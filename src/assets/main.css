@@ -1,0 +1,443 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ========================================
+   智慧消防数字孪生指挥中心 — 全局样式系统
+   深色数字孪生指挥中心 · 电弧蓝/深电蓝/石墨黑
+   ======================================== */
+
+:root {
+  /* 背景层级 — 浅蓝灰数字孪生主题（映射至 theme.css 统一令牌） */
+  --fire-dark: #0A0E1A;                    /* 深色数字孪生指挥中心 */
+  --fire-bg: rgba(15,23,42,0.8);           /* 深色次级背景 */
+  --fire-bg-2: rgba(10,14,26,0.9);         /* 更深背景 */
+  --fire-panel: rgba(20,30,50,0.6);         /* 深色玻璃面板 */
+  --fire-panel-solid: #111827;              /* 实体深色面板 */
+
+  /* 边框 — 细蓝边框 */
+  --fire-border: rgba(76, 201, 240, 0.15);
+  --fire-border-hover: rgba(76, 201, 240, 0.4);
+  --fire-border-active: #4CC9F0;
+
+  /* 主色系 — 深电蓝 + 电弧蓝 */
+  --fire-blue: #4361EE;             /* 深电蓝：主色/按钮/选中 */
+  --fire-cyan: #4CC9F0;             /* 电弧蓝：强调/数据高亮 */
+  --fire-orange: #F59E0B;           /* 警告橙 */
+  --fire-red: #EF4444;              /* 危险红 */
+  --fire-green: #22C55E;            /* 正常绿 */
+  --fire-purple: #4361EE;           /* 兼容旧引用 → 深电蓝 */
+
+  /* 文字 — 石墨黑层级 */
+  --text-primary: #E2E8F0;               /* 深色背景上一级文字 */
+  --text-secondary: #94A3B8;           /* 深色背景上二级文字 */
+  --text-tertiary: #64748B;            /* 深色背景上辅助文字 */
+
+  /* 字体层级 — 统一排版系统 */
+  --font-display: 'DIN', 'Roboto Mono', 'Bebas Neue', monospace;
+  --font-body: 'HarmonyOS Sans SC', 'Source Han Sans CN', 'Microsoft YaHei', 'PingFang SC', -apple-system, BlinkMacSystemFont, sans-serif;
+
+  /* 字号层级 */
+  --fs-hero: 36px;      /* 核心大数字 */
+  --fs-display: 26px;    /* 页面标题 */
+  --fs-lg: 20px;       /* 区块标题 */
+  --fs-md: 16px;       /* 正文/列表 */
+  --fs-sm: 14px;       /* 标签/辅助文字 */
+  --fs-xs: 13px;       /* 微标签/时间戳 */
+  --fs-tiny: 12px;     /* 极小标注 */
+
+  /* 行高 */
+  --lh-tight: 1.2;
+  --lh-normal: 1.5;
+  --lh-relaxed: 1.7;
+
+  /* 效果 — 克制的轻阴影（无霓虹发光/无玻璃） */
+  --glass-blur: 0px;
+  --glow-blue: 0 2px 10px rgba(67, 97, 238, 0.12);
+  --glow-cyan: 0 2px 10px rgba(76, 201, 240, 0.12);
+  --glow-orange: 0 2px 10px rgba(245, 158, 11, 0.12);
+  --glow-red: 0 2px 10px rgba(239, 68, 68, 0.12);
+  --glow-green: 0 2px 10px rgba(34, 197, 94, 0.12);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  background: var(--fire-dark);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* 数字字体 — 工业风格 */
+.num-font {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+  letter-spacing: 0.5px;
+}
+
+/* ========================================
+   全局背景 — 极淡蓝色网格纹理（克制的数据可视化纹理）
+   ======================================== */
+body {
+  background-color: var(--fire-dark);
+  background-image:
+    /* 极淡深电蓝网格 */
+    linear-gradient(var(--grid-blue) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-blue) 1px, transparent 1px);
+  background-size: 44px 44px, 44px 44px;
+}
+
+/* ========================================
+   滚动条
+   ======================================== */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(67, 97, 238, 0.2);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(67, 97, 238, 0.4);
+}
+
+/* ========================================
+   信息卡片 — 白色卡片 + 细蓝边框（替代旧玻璃 fire-card）
+   ======================================== */
+.fire-card {
+  background: var(--fire-panel);
+  border: 1px solid var(--color-card-border);
+  border-radius: 10px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  box-shadow: 0 1px 2px rgba(27, 31, 42, 0.03), 0 2px 10px rgba(67, 97, 238, 0.05);
+}
+
+.fire-card:hover {
+  border-color: var(--fire-border-hover);
+  box-shadow: 0 2px 14px rgba(67, 97, 238, 0.09);
+}
+
+/* 角标装饰 — 细角线（无发光） */
+.corner-decor::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 12px;
+  height: 12px;
+  border-right: 1px solid rgba(67, 97, 238, 0.35);
+  border-bottom: 1px solid rgba(67, 97, 238, 0.35);
+  pointer-events: none;
+}
+
+/* 兼容旧 glow-text 类：仅加深字重表现，无霓虹发光 */
+.glow-text {
+  font-weight: 600;
+}
+
+.glow-text-sm {
+  font-weight: 500;
+}
+
+/* ========================================
+   动画关键帧（供应急/动态状态使用，普通态不闪烁）
+   ======================================== */
+
+/* 呼吸光效 */
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* 脉冲扩散 */
+@keyframes pulseRing {
+  0% { transform: scale(1); opacity: 0.8; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+
+/* 扫描线 */
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+/* 数据流动 */
+@keyframes dataFlow {
+  0% { stroke-dashoffset: 0; }
+  100% { stroke-dashoffset: -20; }
+}
+
+/* 数字滚动 */
+@keyframes numberRoll {
+  0% { transform: translateY(8px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+/* 淡入上移 */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 雷达扫描 */
+@keyframes radarSweep {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* 警告闪烁 */
+@keyframes warningBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* 边框流光（淡化） */
+@keyframes borderGlow {
+  0%, 100% { border-color: rgba(67, 97, 238, 0.12); }
+  50% { border-color: rgba(67, 97, 238, 0.3); }
+}
+
+/* ========================================
+   页面切换动画
+   ======================================== */
+.page-enter-active {
+  animation: pageFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.page-leave-active {
+  animation: pageFadeOut 0.2s ease-in;
+}
+@keyframes pageFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pageFadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ========================================
+   Element Plus 浅色主题覆盖（深电蓝主色）
+   ======================================== */
+.el-table {
+  background-color: transparent !important;
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: rgba(67, 97, 238, 0.05);
+  --el-table-border-color: var(--color-border);
+  --el-table-text-color: var(--text-primary);
+  --el-table-header-text-color: var(--text-secondary);
+  --el-table-row-hover-bg-color: rgba(67, 97, 238, 0.04);
+}
+
+.el-table__row:hover > td {
+  background-color: rgba(67, 97, 238, 0.04) !important;
+}
+
+.el-table th.el-table__cell {
+  border-bottom: 1px solid var(--color-border) !important;
+}
+
+.el-pagination {
+  --el-pagination-bg-color: transparent;
+  --el-pagination-text-color: var(--text-secondary);
+  --el-pagination-button-color: var(--text-secondary);
+  --el-pagination-hover-color: var(--fire-blue);
+}
+
+.el-dialog {
+  background: var(--color-card) !important;
+  border: 1px solid var(--color-border) !important;
+  border-radius: 12px !important;
+  --el-dialog-title-font-size: 16px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.55), 0 0 1px rgba(76, 201, 240, 0.3) !important;
+}
+
+.el-dialog__header {
+  border-bottom: 1px solid var(--color-border) !important;
+}
+
+.el-dialog__title {
+  color: var(--text-primary) !important;
+  letter-spacing: 1px;
+}
+
+.el-dialog__body {
+  color: var(--text-secondary) !important;
+}
+
+.el-select__wrapper,
+.el-input__wrapper {
+  background-color: rgba(10, 14, 26, 0.7) !important;
+  box-shadow: 0 0 0 1px var(--color-border) inset !important;
+  border-radius: 6px !important;
+}
+
+.el-select__wrapper:hover,
+.el-input__wrapper:hover {
+  box-shadow: 0 0 0 1px var(--fire-border-hover) inset !important;
+}
+
+.el-input__inner {
+  color: var(--text-primary) !important;
+}
+
+/* 下拉/弹层 — 深色 */
+.el-popper.el-select__popper,
+.el-popper {
+  background: var(--color-card) !important;
+  border: 1px solid var(--color-border) !important;
+  color: var(--text-secondary) !important;
+}
+
+.el-select-dropdown__item {
+  color: var(--text-secondary) !important;
+}
+
+.el-select-dropdown__item.is-hovering,
+.el-select-dropdown__item:hover {
+  background: rgba(67, 97, 238, 0.15) !important;
+  color: var(--fire-cyan) !important;
+}
+
+.el-select-dropdown__item.is-selected {
+  color: var(--fire-cyan) !important;
+}
+
+.el-popper__arrow::before {
+  background: var(--color-card) !important;
+  border-color: var(--color-border) !important;
+}
+
+/* 主按钮 — 深电蓝纯色（无渐变） */
+.el-button--primary {
+  background: #4361EE !important;
+  border: 1px solid #4361EE !important;
+  color: #fff !important;
+  border-radius: 6px !important;
+}
+
+.el-button--primary:hover {
+  background: #3652D4 !important;
+  border-color: #3652D4 !important;
+}
+
+.el-button--primary:active {
+  background: #2F45B8 !important;
+  border-color: #2F45B8 !important;
+}
+
+.el-button--default {
+  background: rgba(20, 27, 46, 0.8) !important;
+  border: 1px solid var(--color-border) !important;
+  color: var(--text-secondary) !important;
+  border-radius: 6px !important;
+}
+
+.el-button--default:hover {
+  border-color: #4CC9F0 !important;
+  color: #4CC9F0 !important;
+  background: rgba(67, 97, 238, 0.15) !important;
+}
+
+.el-tag {
+  border: none !important;
+  border-radius: 4px !important;
+}
+
+.el-tag--small {
+  font-size: 13px;
+}
+
+.el-progress-bar__outer {
+  background-color: rgba(67, 97, 238, 0.08) !important;
+}
+
+.el-slider__runway {
+  background-color: rgba(67, 97, 238, 0.1) !important;
+}
+
+.el-slider__bar {
+  background-color: var(--fire-blue) !important;
+}
+
+/* ========================================
+   工具类
+   ======================================== */
+.text-blue { color: var(--fire-blue); }
+.text-cyan { color: var(--fire-cyan); }
+.text-orange { color: var(--fire-orange); }
+.text-red { color: var(--fire-red); }
+.text-green { color: var(--fire-green); }
+.text-primary-c { color: var(--text-primary); }
+.text-secondary-c { color: var(--text-secondary); }
+.text-tertiary-c { color: var(--text-tertiary); }
+
+/* 标题字间距 */
+.title-spacing {
+  letter-spacing: 2px;
+  font-weight: 600;
+}
+
+.title-spacing-sm {
+  letter-spacing: 1px;
+  font-weight: 500;
+}
+
+/* 排版工具类 */
+.fs-hero { font-size: var(--fs-hero); }
+.fs-display { font-size: var(--fs-display); }
+.fs-lg { font-size: var(--fs-lg); }
+.fs-md { font-size: var(--fs-md); }
+.fs-sm { font-size: var(--fs-sm); }
+.fs-xs { font-size: var(--fs-xs); }
+.fs-tiny { font-size: var(--fs-tiny); }
+.fw-bold { font-weight: 700; }
+.fw-semi { font-weight: 600; }
+.fw-normal { font-weight: 400; }
+.lh-tight { line-height: var(--lh-tight); }
+.lh-normal { line-height: var(--lh-normal); }
+
+/* 状态标签 */
+.status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+.status-tag::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-tag.green { color: var(--fire-green); background: var(--color-success-soft); }
+.status-tag.orange { color: var(--fire-orange); background: var(--color-warning-soft); }
+.status-tag.red { color: var(--fire-red); background: var(--color-danger-soft); }
+.status-tag.cyan { color: var(--fire-cyan); background: var(--color-info-soft); }
+.status-tag.blue { color: var(--fire-blue); background: var(--color-electric-soft); }
