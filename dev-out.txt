@@ -1,0 +1,73 @@
+
+  [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m3071[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[2m10:50:46[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles/theme.css[22m
+[2m10:51:15[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/assets/main.css[22m
+[2m10:51:54[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/EvacuationView.vue?vue&type=style&index=0&scoped=47a99dec&lang.css[22m
+[2m10:51:54[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2msrc/components/BuildingMap.vue[22m
+[2m10:51:54[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2msrc/views/PersonView.vue[22m
+[2m10:51:54[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/EvacuationView.vue?vue&type=style&index=0&scoped=47a99dec&lang.css, /src/views/EvacuationView.vue, /src/assets/main.css[22m
+[2m10:55:37[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m10:55:58[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m10:55:59[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m10:56:08[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m10:56:54[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m10:57:53[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m10:57:53[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css, /src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m10:58:07[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m10:59:11[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2msrc/components/BuildingDigitalTwin.vue[22m
+[2m11:00:17[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.vue, /src/assets/main.css, /src/components/TopHeader.vue, /src/components/DemoPanel.vue, /src/components/SideNavigation.vue, /src/views/DashboardView.vue, /src/views/EvacuationView.vue, /src/components/OperationLog.vue[22m
+[2m11:01:15[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/SideNavigation.vue, /src/assets/main.css[22m
+[2m11:01:25[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m11:01:25[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m11:02:01[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m11:06:19[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.vue, /src/assets/main.css, /src/components/TopHeader.vue, /src/components/DemoPanel.vue, /src/components/SideNavigation.vue, /src/views/DashboardView.vue, /src/views/EvacuationView.vue, /src/components/OperationLog.vue[22m
+[2m11:06:41[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.vue, /src/assets/main.css, /src/components/TopHeader.vue, /src/components/DemoPanel.vue, /src/components/SideNavigation.vue, /src/views/DashboardView.vue, /src/views/EvacuationView.vue, /src/components/OperationLog.vue[22m
+[2m11:06:59[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.vue, /src/assets/main.css, /src/components/TopHeader.vue, /src/components/DemoPanel.vue, /src/components/SideNavigation.vue, /src/views/DashboardView.vue, /src/views/EvacuationView.vue, /src/components/OperationLog.vue[22m
+[2m11:07:54[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.vue, /src/assets/main.css, /src/components/TopHeader.vue, /src/components/DemoPanel.vue, /src/components/SideNavigation.vue, /src/views/DashboardView.vue, /src/views/EvacuationView.vue, /src/components/OperationLog.vue[22m
+[2m11:08:08[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.vue, /src/assets/main.css, /src/components/TopHeader.vue, /src/components/DemoPanel.vue, /src/components/SideNavigation.vue, /src/views/DashboardView.vue, /src/views/EvacuationView.vue, /src/components/OperationLog.vue[22m
+[2m11:27:50[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m11:28:21[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m11:28:59[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m11:29:55[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.vue, /src/assets/main.css, /src/components/TopHeader.vue, /src/components/DemoPanel.vue, /src/components/SideNavigation.vue, /src/views/DashboardView.vue, /src/views/EvacuationView.vue, /src/components/OperationLog.vue[22m
+[2m11:39:57[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m11:41:09[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m11:41:28[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m11:44:53[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m11:49:38[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:02:54[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.vue, /src/assets/main.css, /src/components/TopHeader.vue, /src/components/DemoPanel.vue, /src/components/SideNavigation.vue, /src/views/DashboardView.vue, /src/views/EvacuationView.vue, /src/components/OperationLog.vue[22m
+[2m12:03:25[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:03:46[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:45:57[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:46:58[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:46:58[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:47:46[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m12:48:10[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m12:48:10[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m12:48:39[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:48:39[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:48:54[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:50:14[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:50:14[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m12:50:28[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m12:50:42[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/EvacuationView.vue, /src/assets/main.css[22m
+[2m12:51:04[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/EvacuationView.vue?vue&type=style&index=0&scoped=47a99dec&lang.css[22m
+[2m12:51:04[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/EvacuationView.vue?vue&type=style&index=0&scoped=47a99dec&lang.css[22m
+[2m12:51:29[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/EvacuationView.vue, /src/assets/main.css[22m
+[2m12:51:47[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/EvacuationView.vue?vue&type=style&index=0&scoped=47a99dec&lang.css[22m
+[2m12:51:52[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/EvacuationView.vue?vue&type=style&index=0&scoped=47a99dec&lang.css[22m
+[2m12:52:20[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles/theme.css[22m
+[2m12:53:11[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m12:53:11[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m13:27:41[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m13:27:55[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue, /src/assets/main.css[22m
+[2m13:28:12[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/SideNavigation.vue, /src/assets/main.css[22m
+[2m13:28:20[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m13:28:28[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m13:28:53[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m13:34:34[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m13:34:48[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
+[2m14:48:15[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles/theme.css[22m
+[2m14:48:22[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/views/DashboardView.vue?vue&type=style&index=0&scoped=336c5134&lang.css[22m
