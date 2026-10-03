@@ -1,6 +1,0 @@
-{
-  "screenshot_method": "skip",
-  "screenshot_method_confirmed": true,
-  "confirmation_note": "用户选择 skip：操作手册以文字+界面元素描述呈现，不附真实截图（纯前端演示系统，本环境难以稳定抓图；后续如需可由用户按 user-supplied 补充）。",
-  "confirmed_at": "2026-09-13T07:59:32+00:00"
-}
