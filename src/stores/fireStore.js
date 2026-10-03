@@ -50,6 +50,15 @@ import {
   validateRoute,
 } from '../mock/routeGraph'
 import { generateFloorDevices, FLOOR_CONFIG, ROOMS as PLAN_ROOMS, STAIRS as PLAN_STAIRS, DOORS as PLAN_DOORS } from '../mock/floorPlanData'
+import { buildSeedDevices } from '../mock/deviceSeed'
+// 双数据源（mock / api）与 Service 层 —— 见 docs/API_CONTRACT.md
+import { dataSource } from '../api'
+import { buildingService } from '../services/buildingService'
+import { deviceService } from '../services/deviceService'
+import { alarmService } from '../services/alarmService'
+import { inspectionService } from '../services/inspectionService'
+import { personPresenceService } from '../services/personPresenceService'
+import { operationLogService } from '../services/operationLogService'
 
 export const useFireStore = defineStore('fire', () => {
   // ================== State ==================
@@ -71,7 +80,43 @@ export const useFireStore = defineStore('fire', () => {
   const persons = ref(Array.isArray(initialPersons) ? [...initialPersons] : [])
   const personStats = ref(initialPersonStats && typeof initialPersonStats === 'object' ? { ...initialPersonStats } : {})
   // 人员初始坐标/状态基线（重置演示后恢复；不对外导出）
-  const personsOrigin = JSON.parse(JSON.stringify(Array.isArray(initialPersons) ? initialPersons : []))
+  let personsOrigin = JSON.parse(JSON.stringify(Array.isArray(initialPersons) ? initialPersons : []))
+
+  // ── 远程数据源（VITE_DATA_SOURCE=api 时经 Service 层加载 Workers/D1 数据） ──
+  const remoteReady = ref(false)
+  async function initFromRemote() {
+    if (!dataSource.isApi || remoteReady.value) return false
+    try {
+      const [blds, devs, alms, insps, ppl, logs] = await Promise.all([
+        buildingService.list(),
+        deviceService.list(),
+        alarmService.list(),
+        inspectionService.list(),
+        personPresenceService.list(),
+        operationLogService.list({ limit: 200 }),
+      ])
+      if (Array.isArray(blds) && blds.length) buildings.value = blds
+      if (Array.isArray(devs) && devs.length) devices.value = devs
+      if (Array.isArray(alms) && alms.length) alarms.value = alms
+      if (Array.isArray(insps) && insps.length) inspectionHistory.value = insps
+      if (Array.isArray(ppl) && ppl.length) {
+        persons.value = ppl
+        personsOrigin = JSON.parse(JSON.stringify(ppl))
+      }
+      if (Array.isArray(logs) && logs.length) {
+        operationLogs.value = logs
+      }
+      refreshBuildings()
+      refreshStats()
+      refreshPersonStats()
+      remoteReady.value = true
+      console.info('[fireStore] 远程数据源初始化完成（Workers → D1）')
+      return true
+    } catch (err) {
+      console.warn('[fireStore] 远程数据源初始化失败，回退本地 mock 数据：', err?.message || err)
+      return false
+    }
+  }
 
   // ══════════ 六阶段演示流程状态（统一单一数据源；0=正常 / 1=发现火灾 / 2=启动应急响应 / 3=疏散路径 / 4=智能疏散 / 5=滞留人员识别 / 6=协同救援） ══════════
   const emergencyStage = ref(0)
@@ -171,6 +216,10 @@ export const useFireStore = defineStore('fire', () => {
     })
     if (operationLogs.value.length > 200) {
       operationLogs.value = operationLogs.value.slice(0, 200)
+    }
+    // api 模式：异步落库（fire-and-forget，失败不影响本地）
+    if (dataSource.isApi) {
+      operationLogService.create({ action, module, detail, level }).catch(() => {})
     }
   }
 
@@ -849,73 +898,6 @@ export const useFireStore = defineStore('fire', () => {
 
   // ================== Helpers ==================
 
-  // ================== 平面数据源初始化（4 栋 × 6 层，与 floorPlanData / 首页平面图同源） ==================
-  // 每台设备都带 x/y 坐标与疏散方向，首页、设备管理、联动、路线规划读的是同一批对象；id 含楼栋前缀保证全局唯一
-  function buildSeedDevices() {
-    const list = []
-    const bldNames = { B001: '1号楼', B002: '2号楼', B003: '3号楼', B004: '4号楼' }
-    const FLOORS = ['1F', '2F', '3F', '4F', '5F', '6F']
-    let _dSeed = 20260905
-    const _rand = () => { _dSeed = (_dSeed * 9301 + 49297) % 233280; return _dSeed / 233280 }
-    const _randInt = (min, max) => Math.floor(_rand() * (max - min + 1)) + min
-    const typeName = (t) => ({
-      evacuation_light: '疏散指示灯',
-      emergency_light: '应急照明灯',
-      smoke_detector: '烟感探测器',
-      radar_sensor: '雷达感知终端',
-      exit_sign: '安全出口标识',
-    }[t] || '消防设备')
-    const lastReport = () => new Date(Date.now() - Math.floor(_rand() * 3600000)).toLocaleString('zh-CN')
-
-    Object.entries(bldNames).forEach(([bid, bname]) => {
-      FLOORS.forEach((fid) => {
-        generateFloorDevices(fid, bid).forEach((pd) => {
-          const roll = _rand()
-          const status = roll > 0.97 ? 'fault' : roll > 0.93 ? 'warning' : 'normal'
-          const fault = status === 'fault'
-          const isLight = pd.type === 'evacuation_light' || pd.type === 'emergency_light'
-          const isRadar = pd.type === 'radar_sensor'
-          const areaSuffix = pd.type === 'exit_sign' ? '' : pd.area || ''
-          list.push({
-            id: `${bid}-${pd.id}`,          // 楼栋前缀，跨楼唯一（如 B003-EL-5F-01）
-            planId: pd.id,
-            name: `${bname}${fid}${areaSuffix}${typeName(pd.type)}`,
-            type: pd.type,
-            building: bname,
-            buildingId: bid,
-            floor: fid,
-            floorId: fid,
-            area: pd.area,
-            zoneName: pd.zoneName || pd.area,
-            x: pd.x,
-            y: pd.y,
-            status,
-            controllable: isLight,
-            battery: fault ? 0 : _randInt(30, 100),
-            temperature: fault ? 0 : _randInt(20, 34),
-            communication: fault ? 'offline' : 'online',
-            lastReport: lastReport(),
-            installPosition: `${bname}${fid}${areaSuffix}`,
-            workHours: _randInt(100, 8760),
-            voltage: fault ? 0 : +(3.0 + _rand() * 1.2).toFixed(2),
-            signal: fault ? 0 : _randInt(60, 100),
-            direction: pd.direction || 'right',
-            recommendedDirection: pd.direction || 'right',
-            brightness: fault ? 0 : _randInt(50, 100),
-            currentMode: fault ? 'offline' : 'daily',
-            detectionRange: isRadar ? 8 : undefined,
-            detectedPersons: isRadar ? _randInt(0, 5) : undefined,
-            exitId: pd.exitId,
-            stairId: pd.stairId,
-            doorId: pd.doorId,
-            emergencyFlash: false,
-          })
-        })
-      })
-    })
-    return list
-  }
-
   function refreshBuildings() {
     if (!Array.isArray(buildings.value)) return
     buildings.value.forEach((b) => {
@@ -1269,6 +1251,10 @@ export const useFireStore = defineStore('fire', () => {
     if (alarm) {
       alarm.status = 'resolved'
       alarm.progress = 100
+      // api 模式：异步落库（fire-and-forget）
+      if (dataSource.isApi) {
+        alarmService.update(alarmId, { status: 'resolved', progress: 100 }).catch(() => {})
+      }
     }
   }
 
@@ -1492,6 +1478,11 @@ export const useFireStore = defineStore('fire', () => {
 
     inspectionHistory.value.unshift(result)
     if (inspectionHistory.value.length > 20) inspectionHistory.value.pop()
+
+    // api 模式：巡检结果异步归档（fire-and-forget）
+    if (dataSource.isApi && result) {
+      inspectionService.create(result).catch(() => {})
+    }
 
     addNotification({
       title: '巡检完成',
@@ -2290,6 +2281,8 @@ export const useFireStore = defineStore('fire', () => {
     toggleDemoMode,
     resetDemoState,
     updateRandomData,
+    initFromRemote,
+    remoteReady,
     persons,
     personStats,
     lightingStatus,

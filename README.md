@@ -48,26 +48,63 @@ npm run build
 npm run preview
 ```
 
+## 架构与双数据源
+
+```
+Vue 视图 → Pinia (fireStore) → Service 层（8 个领域服务） → Repository ┬ MockRepository（src/mock，默认）
+                                                                      └ ApiRepository → Workers(Hono) → D1
+```
+
+- 数据契约见 `docs/API_CONTRACT.md`（Building / Device / Telemetry / Alarm / Inspection / EvacuationPlan / PersonPresence / OperationLog 八类核心实体）
+- `VITE_DATA_SOURCE=mock`（默认）：纯前端演示，行为不变；`=api`：走 Workers + D1，初始化失败自动回退 mock
+- 远程模式下操作日志、告警处置、巡检结果等写路径为"本地即时生效 + 远端异步落库"
+
+### 本地启动后端（Cloudflare Workers + D1）
+
+```bash
+cd worker
+npm install
+npm run migrate:local     # 本地 D1 建表
+npm run dev               # 启动 API（http://localhost:8787）
+# 另开终端灌入种子数据（复用前端 mock 同源数据）
+curl -X POST http://localhost:8787/api/v1/admin/seed
+```
+
+前端以 api 模式启动：根目录复制 `.env.example` 为 `.env` 后设置 `VITE_DATA_SOURCE=api`，再 `npm run dev`。
+E2E 冒烟脚本：`node worker/e2e-smoke.cjs`（需先以 api 模式启动前后端，依赖系统 Edge）。
+
 ## 部署
 
 项目通过 GitHub 仓库集成部署至 **Cloudflare Pages**，推送 `main` 分支后自动构建发布（构建命令 `npm run build`，输出目录 `dist`）。
+
+后端 API 独立部署为 Cloudflare Worker：`cd worker && npx wrangler d1 create smart-fire-db`（将返回的 database_id 填入 `wrangler.toml`）→ `npm run migrate:remote` → `npm run deploy`。
+
+## 路线图
+
+- [x] 统一数据模型与 API Contract（八类核心实体，REST v1）
+- [x] MockRepository / ApiRepository 双数据源 + Vue→Pinia→Service→Workers→D1 闭环
+- [ ] Durable Objects + WebSocket（实时人员位置、设备状态、疏散动态）
+- [ ] Demo Simulation Engine（后端状态机驱动"模拟火灾→启动预案→路径确认→智能疏散→滞留人员→救援"全流程）
+- [ ] ESP32 + 毫米波雷达接入 telemetry / command API
+- [ ] 登录与多角色权限
 
 ## 目录结构
 
 ```
 src/
+├── api/             # API 契约 + Mock/Api 双数据源仓库
 ├── assets/          # 静态资源（样式、3D 模型）
 ├── components/      # 通用组件 + building3d 三维模块
 ├── mock/            # 模拟数据源（设备、告警、人员、疏散、图算法等）
 ├── router/          # 路由配置
+├── services/        # Service 层（8 个领域服务）
 ├── stores/          # Pinia 状态管理
 ├── styles/          # 主题样式
 └── views/           # 页面级组件
+
+worker/              # Cloudflare Workers + Hono + D1 后端 API
+├── migrations/      # D1 表结构迁移
+├── src/routes/      # REST 路由（按资源分文件）
+└── src/seed.ts      # 种子数据（与前端 mock 同源）
 ```
 
-## 路线图
-
-- [ ] 后端服务（设备接入、告警推送、数据持久化）
-- [ ] 真实消防设备协议对接（NB-IoT / LoRa 烟感等）
-- [ ] 毫米波雷达人员定位数据接入
-- [ ] 多角色权限与登录体系

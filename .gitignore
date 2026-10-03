@@ -23,6 +23,9 @@ dev*.txt
 build-out.txt
 task_*.md
 
+# Cloudflare wrangler 本地状态
+.wrangler/
+
 # 系统与编辑器文件
 .DS_Store
 Thumbs.db

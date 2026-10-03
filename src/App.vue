@@ -26,6 +26,8 @@ const store = useFireStore()
 
 let timer = null
 onMounted(() => {
+  // api 数据源：经 Service 层从 Workers → D1 拉取初始化数据（mock 模式下为空操作）
+  store.initFromRemote()
   timer = setInterval(() => {
     store.updateRandomData()
   }, 5000)

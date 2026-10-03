@@ -1,0 +1,15 @@
+name = "smart-fire-api"
+main = "src/index.ts"
+compatibility_date = "2026-09-20"
+
+# D1 数据库：首次部署前执行
+#   npx wrangler d1 create smart-fire-db
+# 并将返回的 database_id 填到下方
+[[d1_databases]]
+binding = "DB"
+database_name = "smart-fire-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# 种子数据保护令牌（生产环境务必设置；本地 dev 留空即可免校验）
+# [vars]
+# SEED_TOKEN = "change-me"
