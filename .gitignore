@@ -17,6 +17,12 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# 开发过程文件（调试输出 / 任务文档）
+*.txt
+dev*.txt
+build-out.txt
+task_*.md
+
 # 系统与编辑器文件
 .DS_Store
 Thumbs.db

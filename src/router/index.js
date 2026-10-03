@@ -12,6 +12,18 @@ const routes = [
     meta: { title: '楼宇态势' },
   },
   {
+    path: '/building',
+    name: 'Building',
+    component: () => import('../views/BuildingView.vue'),
+    meta: { title: '楼宇消防态势' },
+  },
+  {
+    path: '/person',
+    name: 'Person',
+    component: () => import('../views/PersonView.vue'),
+    meta: { title: '生命感知中心' },
+  },
+  {
     path: '/devices',
     name: 'Devices',
     component: () => import('../views/DeviceView.vue'),

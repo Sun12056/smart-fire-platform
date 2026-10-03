@@ -131,6 +131,8 @@ const store = useFireStore()
 
 const navItems = computed(() => [
   { path: '/dashboard', label: '楼宇态势', icon: 'dashboard' },
+  { path: '/building', label: '消防态势', icon: 'building' },
+  { path: '/person', label: '生命感知', icon: 'person' },
   { path: '/evacuation', label: '智能疏散', icon: 'door' },
   { path: '/route-plan', label: '疏散路径', icon: 'route' },
   { path: '/emergency', label: '后台日志', icon: 'emergency' },
