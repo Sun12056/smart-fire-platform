@@ -1,0 +1,174 @@
+{
+  "software_name": "智慧消防数字孪生管理平台",
+  "version": "V1.0",
+  "project_root": "D:\\桌面\\smart-fire-platform",
+  "file_count": 15,
+  "material_line_count": 9476,
+  "source_line_count": 10418,
+  "selected_source_line_count": 9461,
+  "lines_per_page": 50,
+  "total_pages": 190,
+  "target_pages": 60,
+  "available_candidate_line_count": 19537,
+  "available_candidate_pages": 391,
+  "supplement_status": "候选源码可达到前30页/后30页要求",
+  "mode": "front30_back30",
+  "selection_file": "软件著作权申请资料\\草稿\\代码文件选择.json",
+  "outputs": [
+    "代码-前30页.md",
+    "代码-后30页.md"
+  ],
+  "files": [
+    {
+      "path": "src/App.vue",
+      "source_line_count": 64,
+      "blank_line_count": 7,
+      "selected_line_start": 1,
+      "selected_line_end": 64,
+      "selected_line_count": 57,
+      "material_line_start": 1,
+      "material_line_end": 58
+    },
+    {
+      "path": "src/main.js",
+      "source_line_count": 21,
+      "blank_line_count": 4,
+      "selected_line_start": 1,
+      "selected_line_end": 21,
+      "selected_line_count": 17,
+      "material_line_start": 59,
+      "material_line_end": 76
+    },
+    {
+      "path": "src/router/index.js",
+      "source_line_count": 63,
+      "blank_line_count": 3,
+      "selected_line_start": 1,
+      "selected_line_end": 63,
+      "selected_line_count": 60,
+      "material_line_start": 77,
+      "material_line_end": 137
+    },
+    {
+      "path": "src/views/AlarmView.vue",
+      "source_line_count": 1047,
+      "blank_line_count": 120,
+      "selected_line_start": 1,
+      "selected_line_end": 1047,
+      "selected_line_count": 927,
+      "material_line_start": 138,
+      "material_line_end": 1065
+    },
+    {
+      "path": "src/views/DeviceView.vue",
+      "source_line_count": 1258,
+      "blank_line_count": 114,
+      "selected_line_start": 1,
+      "selected_line_end": 1258,
+      "selected_line_count": 1144,
+      "material_line_start": 1066,
+      "material_line_end": 2210
+    },
+    {
+      "path": "src/views/EmergencyView.vue",
+      "source_line_count": 165,
+      "blank_line_count": 9,
+      "selected_line_start": 1,
+      "selected_line_end": 165,
+      "selected_line_count": 156,
+      "material_line_start": 2211,
+      "material_line_end": 2367
+    },
+    {
+      "path": "src/views/EvacuationView.vue",
+      "source_line_count": 1529,
+      "blank_line_count": 193,
+      "selected_line_start": 1,
+      "selected_line_end": 1529,
+      "selected_line_count": 1336,
+      "material_line_start": 2368,
+      "material_line_end": 3704
+    },
+    {
+      "path": "src/views/InspectionView.vue",
+      "source_line_count": 1124,
+      "blank_line_count": 134,
+      "selected_line_start": 1,
+      "selected_line_end": 1124,
+      "selected_line_count": 990,
+      "material_line_start": 3705,
+      "material_line_end": 4695
+    },
+    {
+      "path": "src/views/LightingView.vue",
+      "source_line_count": 1173,
+      "blank_line_count": 79,
+      "selected_line_start": 1,
+      "selected_line_end": 1173,
+      "selected_line_count": 1094,
+      "material_line_start": 4696,
+      "material_line_end": 5790
+    },
+    {
+      "path": "src/views/RoutePlanView.vue",
+      "source_line_count": 665,
+      "blank_line_count": 33,
+      "selected_line_start": 1,
+      "selected_line_end": 665,
+      "selected_line_count": 632,
+      "material_line_start": 5791,
+      "material_line_end": 6423
+    },
+    {
+      "path": "src/stores/fireStore.js",
+      "source_line_count": 2412,
+      "blank_line_count": 165,
+      "selected_line_start": 1,
+      "selected_line_end": 2412,
+      "selected_line_count": 2247,
+      "material_line_start": 6424,
+      "material_line_end": 8671
+    },
+    {
+      "path": "src/stores/platformStore.js",
+      "source_line_count": 63,
+      "blank_line_count": 8,
+      "selected_line_start": 1,
+      "selected_line_end": 63,
+      "selected_line_count": 55,
+      "material_line_start": 8672,
+      "material_line_end": 8727
+    },
+    {
+      "path": "src/components/DemoPanel.vue",
+      "source_line_count": 364,
+      "blank_line_count": 41,
+      "selected_line_start": 1,
+      "selected_line_end": 364,
+      "selected_line_count": 323,
+      "material_line_start": 8728,
+      "material_line_end": 9051
+    },
+    {
+      "path": "src/components/SideNavigation.vue",
+      "source_line_count": 295,
+      "blank_line_count": 24,
+      "selected_line_start": 1,
+      "selected_line_end": 295,
+      "selected_line_count": 271,
+      "material_line_start": 9052,
+      "material_line_end": 9323
+    },
+    {
+      "path": "src/components/TopHeader.vue",
+      "source_line_count": 175,
+      "blank_line_count": 23,
+      "selected_line_start": 1,
+      "selected_line_end": 175,
+      "selected_line_count": 152,
+      "material_line_start": 9324,
+      "material_line_end": 9476
+    }
+  ],
+  "safe_software_filename": "智慧消防数字孪生管理平台"
+}

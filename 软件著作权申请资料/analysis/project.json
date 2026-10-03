@@ -1,0 +1,161 @@
+{
+  "project_root": "D:\\桌面\\smart-fire-platform",
+  "project_name": "smart-fire-platform",
+  "software_name_candidate": "smart fire platform",
+  "package": {
+    "name": "smart-fire-platform",
+    "path": "package.json",
+    "version": "1.0.0",
+    "scripts": {
+      "dev": "vite",
+      "build": "vite build",
+      "preview": "vite preview"
+    },
+    "dependency_names": [
+      "@element-plus/icons-vue",
+      "@vitejs/plugin-vue",
+      "autoprefixer",
+      "echarts",
+      "element-plus",
+      "lucide-vue-next",
+      "pinia",
+      "postcss",
+      "tailwindcss",
+      "three",
+      "vite",
+      "vue",
+      "vue-echarts",
+      "vue-router"
+    ]
+  },
+  "frameworks": [
+    "Vite",
+    "Vue"
+  ],
+  "language": "JavaScript",
+  "source": {
+    "file_count": 41,
+    "line_count": 21282,
+    "total_file_count": 41,
+    "total_line_count": 21282,
+    "extension_counts": {
+      ".css": 2,
+      ".html": 1,
+      ".js": 17,
+      ".vue": 21
+    },
+    "category_counts": {
+      "component": 11,
+      "entry": 2,
+      "page": 10,
+      "route": 1,
+      "source": 13,
+      "state": 2,
+      "style": 2
+    },
+    "categorized_files": {
+      "entry": [
+        "src/App.vue",
+        "src/main.js"
+      ],
+      "route": [
+        "src/router/index.js"
+      ],
+      "page": [
+        "src/views/AlarmView.vue",
+        "src/views/BuildingView.vue",
+        "src/views/DashboardView.vue",
+        "src/views/DeviceView.vue",
+        "src/views/EmergencyView.vue",
+        "src/views/EvacuationView.vue",
+        "src/views/InspectionView.vue",
+        "src/views/LightingView.vue",
+        "src/views/PersonView.vue",
+        "src/views/RoutePlanView.vue"
+      ],
+      "component": [
+        "src/components/AlarmList.vue",
+        "src/components/BuildingDigitalTwin.vue",
+        "src/components/BuildingMap.vue",
+        "src/components/BuildingMiniature.vue",
+        "src/components/DemoPanel.vue",
+        "src/components/OperationLog.vue",
+        "src/components/SideNavigation.vue",
+        "src/components/StatCard.vue",
+        "src/components/StatusChart.vue",
+        "src/components/TopHeader.vue",
+        "src/components/building3d/building3dUtils.js"
+      ],
+      "state": [
+        "src/stores/fireStore.js",
+        "src/stores/platformStore.js"
+      ],
+      "style": [
+        "src/assets/main.css",
+        "src/styles/theme.css"
+      ],
+      "source": [
+        "index.html",
+        "src/mock/alarms.js",
+        "src/mock/buildings.js",
+        "src/mock/deviceConfig.js",
+        "src/mock/devices.js",
+        "src/mock/evacuation.js",
+        "src/mock/floorPlanData.js",
+        "src/mock/inspection.js",
+        "src/mock/lighting.js",
+        "src/mock/person.js",
+        "src/mock/rescue.js",
+        "src/mock/routeGraph.js",
+        "src/mock/statistics.js"
+      ]
+    }
+  },
+  "routes": [
+    "/",
+    "/alarms",
+    "/dashboard",
+    "/devices",
+    "/emergency",
+    "/evacuation",
+    "/inspection",
+    "/lighting",
+    "/route-plan"
+  ],
+  "readme_excerpt": "# 智慧消防管理平台（创赛演示版）\n基于 **Vue 3 + Vite + Pinia + Element Plus + ECharts + Tailwind CSS** 的智慧消防数字孪生演示系统，用于大学生创新创业大赛现场展示。\n> ⚠️ 纯前端演示作品：无真实后台 / 无数据库 / 无真实 IoT 设备 / 无外部 API，所有数据均为本地 Mock 模拟，不构成真实消防认证产品。\n## 快速开始\n```bash\nnpm install     # 安装依赖（已执行过可跳过）\nnpm run dev     # 开发调试 → http://localhost:3000\nnpm run build   # 生产构建 → dist/（相对路径产物，可直接静态托管）\n```\n## 页面（左侧导航）\n| 路由 | 页面 | 亮点 |\n|---|---|---|\n| /dashboard | 综合态势 | 数字孪生平面图、模拟火灾全链路联动、楼层状态、右侧实时信息栏 |\n| /person | 生命感知 | 人员实时分布、风险标记 |\n| /building | 楼宇态势 | 楼层切换 / 放大、设备点位 |\n| /devices | 设备管理 | 设备搜索筛选、详情弹窗、历史曲线 |\n| /lighting | 智能照明 | 应急照明状态与控制 |\n| /inspection | 远程巡检 | 巡检任务模拟 |\n| /alarms | 智能告警 | 告警列表 + 7 步处置流程 |\n| /evacuation | 疏散引导 | 常规 vs 应急路线、方向管控 |\n| /route-plan | 疏散路线规划 | 分区路线自动规划与火情封堵 |\n| /emergency | 应急指挥 | 应急事件 + 救援资源 + 处置方案 |\n## 演示闭环（3~5 分钟）\n首页【模拟火灾】→ 传感器预警 → 疏散指示灯自动避火换向 → 告警/应急事件生成 →【应急指挥】处置 → 完成关闭、系统复位。\n## 目录结构\n```\nsrc/\n├─ main.js / App.vue        # 入口与布局（顶栏 + 侧边导航）\n├─ router/index.js          # 路由（hash 模式）\n├─ stores/                  # Pinia：fireStore / evacuationStore / ...\n├─ mock/                    # Mock 数据（楼宇/设备/人员/告警/救援/统计/疏散）\n├─ components/              # StatCard / BuildingMap / AlarmList / EvacuationControl ...\n├─ views/                   # 10 个页面视图\n└─ assets/main.css          # 深色科技风主题与 Element Plus 暗色覆盖\n```\n## 演示包\n「智慧消防演示包」= dist 构建产物 + 启动脚本，老师/评委无需 Node 环境，双击 `启动演示.bat` 即可观看。",
+  "run_command_candidates": [
+    "npm run dev",
+    "npm run preview"
+  ],
+  "feature_candidates": [
+    "alarms",
+    "dashboard",
+    "devices",
+    "emergency",
+    "evacuation",
+    "inspection",
+    "lighting",
+    "route plan",
+    "AlarmView",
+    "BuildingView",
+    "DashboardView",
+    "DeviceView",
+    "EmergencyView",
+    "EvacuationView",
+    "InspectionView",
+    "LightingView",
+    "PersonView",
+    "RoutePlanView",
+    "AlarmList",
+    "BuildingDigitalTwin",
+    "BuildingMap",
+    "BuildingMiniature",
+    "DemoPanel",
+    "OperationLog",
+    "SideNavigation",
+    "StatCard",
+    "StatusChart",
+    "TopHeader",
+    "building3dUtils"
+  ]
+}

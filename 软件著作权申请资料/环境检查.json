@@ -1,0 +1,23 @@
+{
+  "output_directory": "当前目录/软件著作权申请资料",
+  "capabilities": {
+    "markdown_drafts": true,
+    "application_txt": true,
+    "basic_docx": true,
+    "python_docx": true,
+    "pandoc_preview": false,
+    "docx_openxml_full": false,
+    "dotnet_sdk": false
+  },
+  "versions": {
+    "pandoc": "not found",
+    "dotnet": "not found"
+  },
+  "final_docx_mode": "python-docx",
+  "recommendation": "完整 DOCX OpenXML 环境未就绪。可以继续使用兜底 DOCX 生成；如需更规范的 Word 结构和校验，请先安装 .NET SDK 并运行 vendor/docx-toolkit/scripts/setup.sh。",
+  "install_prompt": "是否安装完整 DOCX 环境？安装后文档生成和校验更规范；不安装也可以继续生成 Markdown、TXT 和基础 DOCX。",
+  "requires_user_input": true,
+  "confirmation_stage": "environment",
+  "next_action": "请选择：1) 安装完整 DOCX 环境；2) 使用基础 DOCX 兜底继续。回复选择后再进入项目分析。",
+  "docx_env_output": "unsupported operand type(s) for +: 'NoneType' and 'str'"
+}
