@@ -83,6 +83,30 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
     check('路线终点为安全出口节点', /EXIT_/.test(topo.endNode || ''), topo.endNode)
     check('方案出口字段与拓扑一致', /^1F:EXIT_/.test(topo.exitId || ''), topo.exitId)
     check('路线经楼梯下行', topo.viaStair)
+    // 整栋楼疏散：mock 模式同样必须产出「整栋楼」方案（前端本地规划共用 shared/evacuation）
+    const mockBp = await page.evaluate(() => {
+      const s = window.__demo.store
+      const res = s.generateBuildingEvacuationPlans({ buildingId: s.routeBuildingId || 'B003' }) || {}
+      const bp = s.activeBuildingPlan
+      return {
+        plans: (res.plans || []).length,
+        id: bp && bp.id,
+        scope: bp && bp.scope,
+        zoneCount: bp && bp.summary ? bp.summary.zoneCount : 0,
+        personCount: bp && bp.summary ? bp.summary.personCount : 0,
+        floors: bp && bp.summary ? bp.summary.floors : [],
+        valid: bp && bp.valid,
+        routePlans: (s.routePlans || []).length,
+        matrixAreas: s.routeMatrix ? s.routeMatrix.areas : null,
+        zoneRoutes: (s.getAllZoneRoutes() || []).length,
+      }
+    })
+    check('mock 模式生成 3 套整栋楼方案（scope=BUILDING）',
+      mockBp.plans === 3 && mockBp.scope === 'BUILDING', mockBp)
+    check('mock 整栋楼方案覆盖多个楼层与区域',
+      (mockBp.floors || []).length > 1 && mockBp.zoneCount > 1 && mockBp.valid, mockBp)
+    check('mock 整栋楼方案同步到 routePlans / routeMatrix / 平面图',
+      mockBp.routePlans === mockBp.zoneCount && (mockBp.matrixAreas || []).length > 0 && mockBp.zoneRoutes > 0, mockBp)
     check('无 JS 运行时错误', !consoleLogs.some((l) => l.startsWith('[error]')), consoleLogs.filter((l) => l.startsWith('[error]')).slice(0, 2))
   } else if (EXPECT_OFFLINE) {
     console.log('\n[后端不可用：禁止静默回退 mock]')
@@ -153,12 +177,43 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
     })
     const pickedId = await page.evaluate(() => window.__demo.demoStore.selectedPlanId)
     check('点选方案被记录', Boolean(pickedId), pickedId)
+    // 阶段 3：前端拿到的是「整栋楼」方案（PLAN-A/B/C = 三种策略，不是某区域的三条路线）
+    const bpInfo = await page.evaluate(() => {
+      const list = window.__demo.demoStore.buildingPlans || []
+      const store = window.__demo.store
+      return {
+        count: list.length,
+        scopes: [...new Set(list.map((p) => p.scope))],
+        strategies: list.map((p) => p.strategy),
+        zoneCount: list[0] && list[0].summary ? list[0].summary.zoneCount : 0,
+        personCount: list[0] && list[0].summary ? list[0].summary.personCount : 0,
+        floors: list[0] && list[0].summary ? list[0].summary.floors : [],
+        storeCount: (store.buildingEvacuationPlans || []).length,
+        storeScope: store.evacuationScope,
+        activeId: store.activeBuildingPlanId,
+      }
+    })
+    check('下发 3 套整栋楼方案', bpInfo.count === 3, bpInfo.count)
+    check('疏散范围 = BUILDING（与火灾位置分离）', bpInfo.scopes.join(',') === 'BUILDING' && bpInfo.storeScope === 'BUILDING', bpInfo)
+    check('策略为 均衡/快速/安全', bpInfo.strategies.join(',') === 'BALANCED,FASTEST,SAFEST', bpInfo.strategies)
+    check('fireStore 同步到整栋楼方案', bpInfo.storeCount === 3 && Boolean(bpInfo.activeId), bpInfo)
+    check('整栋楼方案覆盖多个楼层与区域', bpInfo.floors.length > 1 && bpInfo.zoneCount > 1, bpInfo)
+    // 切换整栋楼策略：全楼人员路线必须同步切换
+    const switchRes = await page.evaluate(() => {
+      const store = window.__demo.store
+      const before = Object.values(store.activeBuildingPlan.routesByZone || {}).map((r) => r.routeId).join('|')
+      const target = (store.buildingEvacuationPlans || []).find((p) => p.id !== store.activeBuildingPlanId)
+      store.setActiveBuildingPlan(target.id)
+      const after = Object.values(store.activeBuildingPlan.routesByZone || {}).map((r) => r.routeId).join('|')
+      return { before: before.slice(0, 60), after: after.slice(0, 60), changed: before !== after, activeId: store.activeBuildingPlanId, targetId: target.id }
+    })
+    check('切换整栋楼方案后全楼路线同步切换', switchRes.changed && switchRes.activeId === switchRes.targetId, switchRes)
 
     await clickByText('确认当前疏散路径')
     check('④ 智能疏散', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'SMART_EVACUATION'), 8000),
       await page.evaluate(() => window.__demo.demoStore.stage))
-    check('执行的是所选方案', await page.evaluate((id) => window.__demo.demoStore.activePlanId === id, pickedId),
-      await page.evaluate(() => window.__demo.demoStore.activePlanId))
+    check('执行的是所选方案', await page.evaluate((id) => window.__demo.demoStore.activeBuildingPlanId === id, pickedId),
+      await page.evaluate(() => [window.__demo.demoStore.activeBuildingPlanId, window.__demo.demoStore.activePlanId]))
     // 前端渲染的路线必须来自后端规划器（3D/平面图同源）
     const routeSame = await page.evaluate(() => {
       const p = window.__demo.store.routePlans || []
@@ -211,8 +266,20 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
       check('人员数据来自后端 routePoints（非 zone 随机散点）',
         d0.shouldHave > 0 && d0.withBackendRoute === d0.shouldHave && d0.missing === 0, d0)
       check('每条路线含多个节点', d0.sample.every((s) => s.n >= 2), d0.sample)
-      // 跨楼层：路线起终点 Y 不同（5F → 1F 连续下降）
-      check('路线跨楼层（起终点高度不同）', d0.sample.some((s) => s.y0 !== s.yN), d0.sample)
+      // 跨楼层：非 1F 人员的路线必须连续下降（y0 > yN），1F 人员本就在首层（高度不变属正常）
+      const crossFloor = await page.evaluate(() => {
+        const bp = window.__demo.store.activeBuildingPlan
+        const backend = window.__demo.demoStore.persons || []
+        const upper = backend.filter((p) => p && p.floorId && p.floorId !== '1F').map((p) => p.id)
+        const ds = window.__dtwin.persons.data.filter(Boolean).filter((d) => upper.includes(d.id))
+        const descended = ds.filter((d) => (d.pts || []).length > 1 && d.pts[0].y > d.pts[d.pts.length - 1].y)
+        return {
+          upper: upper.length, withPts: ds.length, descended: descended.length,
+          sample: ds.slice(0, 2).map((d) => ({ id: d.id, n: (d.pts || []).length, y0: +d.pts[0].y.toFixed(2), yN: +d.pts[d.pts.length - 1].y.toFixed(2) })),
+          planRoutes: bp ? (bp.routes || []).length : 0,
+        }
+      })
+      check('非 1F 人员路线跨楼层连续下降', crossFloor.withPts > 0 && crossFloor.descended === crossFloor.withPts, crossFloor)
 
       const snapA = await page.evaluate(() => window.__dtwin.persons.data.filter(Boolean)
         .map((d) => ({ id: d.id, x: d.cur.x, y: d.cur.y, z: d.cur.z })))
@@ -228,24 +295,59 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
       // 不穿墙 / 不经火区 / 必达出口：3D 折线来自后端方案 → 与 2D 同一条
       const geo = await page.evaluate(() => {
         const dt = window.__dtwin
-        const planId = window.__demo.store.activeRoutePlanId
-        const plan = (window.__demo.store.routePlans || []).find((p) => p.id === planId)
-        const d = dt.persons.data.find((x) => x && String(x.routeKey || '').startsWith('backend:'))
+        const store = window.__demo.store
+        const bp = store.activeBuildingPlan
+        // 整栋楼方案：3D 路线层为「每个有人的区域」各画一条；取火源区那条做几何校验
+        const fire = bp && bp.fire ? bp.fire : { floorId: '5F', zone: 'A区' }
+        const route = bp ? (bp.routesByZone || {})[`${fire.floorId}:${fire.zone}`] : null
+        const planId = store.activeRoutePlanId
+        const plan = (store.routePlans || []).find((p) => p.id === planId)
         return {
           routePlanId3D: dt.route.currentPlanId,
-          activePlanId: planId,
+          activeBuildingPlanId: store.activeBuildingPlanId,
+          drawnRoutes: (dt.route._tubes || []).length,
+          planRoutes: bp ? (bp.routes || []).length : 0,
+          routeNodes: route ? route.nodes.length : 0,
           planPathLen: plan ? plan.path.length : 0,
-          polyLen: d ? d.pts.length : 0,
-          endsAtExit: plan ? /EXIT_/.test(plan.path[plan.path.length - 1].id) : false,
-          viaStair: plan ? plan.path.some((n) => n.type === 'stair') : false,
-          viaFireRoom: plan ? plan.path.slice(1).some((n) => n.id.endsWith('A_CENTER')) : false,
+          endsAtExit: route ? /EXIT_/.test(route.exitId) : false,
+          viaStair: route ? route.nodes.some((n) => /STAIR_/.test(n)) : false,
+          viaFireRoom: route ? route.nodes.slice(1).some((n) => n.endsWith('A_CENTER')) : false,
         }
       })
-      check('2D 与 3D 使用同一个 activeRoutePlanId', geo.routePlanId3D === geo.activePlanId, geo)
-      check('3D 折线与方案路径同源', geo.polyLen === geo.planPathLen, geo)
+      // 3D 路线层的方案 id 形如 `PLAN-B:<routes数量>`
+      check('2D 与 3D 使用同一个整栋楼方案',
+        String(geo.routePlanId3D || '').startsWith(`${geo.activeBuildingPlanId}:`), geo)
+      check('3D 绘制了整栋楼全部区域路线', geo.drawnRoutes === geo.planRoutes && geo.drawnRoutes > 1, geo)
+      check('3D 折线与方案路径同源', geo.routeNodes === geo.planPathLen && geo.planPathLen > 1, geo)
       check('路线经楼梯', geo.viaStair)
       check('路线止于安全出口', geo.endsAtExit)
       check('路线不进入火源房间（起点除外）', geo.viaFireRoom === false)
+
+      // 整栋楼：后端每个人的 routeId 必须与前端 2D/3D 使用的 buildingEvacuationPlan 路线一致
+      const routeIdMatch = await page.evaluate(() => {
+        const store = window.__demo.store
+        const bp = store.activeBuildingPlan
+        if (!bp) return { ok: false, reason: 'no activeBuildingPlan' }
+        const backend = window.__demo.demoStore.persons || []
+        const bad = []
+        let checked = 0
+        backend.forEach((p) => {
+          const r = (bp.routesByZone || {})[`${p.floorId}:${p.zone}`]
+          if (!r) return
+          checked += 1
+          if (r.routeId !== p.routeId) bad.push({ id: p.id, backend: p.routeId, frontend: r.routeId })
+        })
+        return {
+          ok: bad.length === 0, checked, bad: bad.slice(0, 3),
+          planId: bp.id, scope: bp.scope,
+          routeCount: (bp.routes || []).length,
+          allValid: (bp.routes || []).every((r) => r.valid),
+          allToExit: (bp.routes || []).every((r) => /^1F:EXIT_/.test(r.exitId)),
+        }
+      })
+      check('2D/3D routeId 与后端人员 routeId 一致', routeIdMatch.ok && routeIdMatch.checked > 0, routeIdMatch)
+      check('整栋楼所有路线合法且终点为 1F 出口',
+        routeIdMatch.allValid === true && routeIdMatch.allToExit === true, routeIdMatch)
 
       // 视觉错峰：起步时间不同（同一时刻人员进度不完全一致）
       const stagger = await page.evaluate(() => window.__dtwin.persons.data.filter(Boolean)

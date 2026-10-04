@@ -93,6 +93,14 @@ curl -X POST http://localhost:8787/api/v1/admin/seed
 
 前端启动：根目录复制 `.env.example` 为 `.env` 后设置 `VITE_DATA_SOURCE`（`mock` / `api` / `demo`），再 `npm run dev`。
 
+### 整栋楼疏散：一次火灾 = 一栋楼的一次整体疏散
+
+- `fireEvent` 只描述火灾位置（楼/层/区），`evacuationScope` 恒为 `BUILDING`
+- `shared/evacuation/buildingEvacuationPlanner.js`：整栋楼人员按 `floorId + zone` 分组 → 每组复用现有 `findPaths()` → 按策略选线 → 汇总 `BuildingEvacuationPlan`
+- `PLAN-A/B/C` = 整栋楼三种策略（均衡 / 快速 / 安全），不是某个区域的三条路线；每套覆盖全部有人的楼层与区域
+- 所有路线仍过 `routeValidator`：不穿墙、不经火区、终点 `1F` 安全出口、跨层必经楼梯
+- 测试：`npm run test:building`（整栋楼 221 项，与 `test:route` 57 项互不干扰）
+
 ### 3D 人员沿后端路线移动
 
 - 权威数据：后端的 `x/y + routePoints + progress`（WebSocket 每秒推进），3D 只做视觉插值 `lerp(0.18)`，不自己算速度

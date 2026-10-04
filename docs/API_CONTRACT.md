@@ -196,6 +196,40 @@ shared/evacuation ┬ routeGraph.js     楼层拓扑（节点/边/墙）+ Dijkst
 - ⚠️ 已从 `mock/routeGraph` 删除 `buildBuildingGraph` 别名（它曾指向 `floorPlanData.buildPlanGraph`，是最大的混淆源）；需要拓扑请直接 import `shared/evacuation/routeGraph.js`。
 - 节点 id 格式为 `${floorId}:${key}`（如 `5F:A_CENTER`、`1F:EXIT_E`），出口 id 为 `1F:EXIT_W / 1F:EXIT_E`。
 
+### 3.1.3 整栋楼疏散（scope = BUILDING）
+
+**一次火灾事件 = 一栋楼的一次整体疏散任务。** `fireEvent` 只描述火灾位置（`buildingId + floorId + zone`），
+`evacuationScope` 恒为 `BUILDING`；火灾只作为动态障碍，不改变疏散范围。
+
+```
+fireEvent { buildingId, floorId, zone }   ← 只描述位置
+        ↓
+buildingEvacuationPlanner.js
+  ① 整栋楼人员 → 按 floorId + zone 分组
+  ② 每组调用现有 findPaths()（不改动 Dijkstra / Yen）
+  ③ 按 strategy 为每组选一条路线
+  ④ 汇总为 BuildingEvacuationPlan（每条路线仍过 validateRoute）
+```
+
+```json
+{
+  "id": "PLAN-A", "name": "方案A·均衡疏散", "buildingId": "B003", "scope": "BUILDING",
+  "strategy": "BALANCED", "fire": { "buildingId": "B003", "floorId": "5F", "zone": "A区" },
+  "summary": { "zoneCount": 24, "personCount": 90, "maxEstimatedTime": 120, "floors": ["6F","5F","4F","3F","2F","1F"] },
+  "routes": [{ "routeId": "PLAN-A:5F:A区", "floorId": "5F", "zone": "A区", "startNode": "5F:A_CENTER",
+               "exitId": "1F:EXIT_E", "nodes": ["5F:A_CENTER","…","1F:EXIT_E"], "points": [{ "x": 140, "y": 150 }],
+               "distance": 81.3, "estimatedTime": 88, "riskLevel": "LOW", "valid": true }],
+  "routesByZone": { "5F:A区": { "routeId": "PLAN-A:5F:A区", "…": "…" } }
+}
+```
+
+- **PLAN-A/B/C 是整栋楼三种策略，不再是某个区域的三条路线**：A 均衡（出口负载均衡 + 综合评分）/ B 快速（耗时最短）/ C 安全（远离火源、风险最低）。
+- 每个策略内部必须为**所有「有人员的 floorId + zone」**各生成一条路线；`走廊` 等公共区域没有房间节点，按最近房间节点归属（`resolvePlanningZone`），保证人人有合法起点。
+- 每条路线继续通过现有 `routeValidator`：不穿墙、不经过 `blockedNodes`（火区）、终点必须是 `1F` 安全出口、跨层必经楼梯。
+- 确认的是**整栋楼方案**（`payload.buildingPlanId`）；`CONFIRM_ROUTE` 校验：`scope === BUILDING`、`buildingId` 与火情楼栋一致、所有有人 `floor+zone` 都有合法 route，否则 409。
+- 阶段 4：整栋楼人员按各自 `routePoints` 移动（每人 `routeId` = `${planId}:${floorId}:${zone}`）；`PersonLayer3D` 只消费后端 `routePoints/routeId`，不重新设计。
+- 前端状态从 `routeMatrix/perZone` 迁移到 `buildingEvacuationPlan/routesByZone`（`routeMatrix` 仍按当前查看楼层派生，保证 2D 逐步迁移）。
+
 ## 3.2 Demo 六阶段状态机（唯一定义）
 
 ```
