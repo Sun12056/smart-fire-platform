@@ -1119,8 +1119,10 @@ import { useFireStore } from '../stores/fireStore'
 import BuildingDigitalTwin from '../components/BuildingDigitalTwin.vue'
 import {
   SVG_W, SVG_H, WALLS, ROOMS, CORRIDOR, STAIRS, EXITS, DOORS,
-  FLOOR_CONFIG, getFloorTopology, activeStairsForFloor,
+  FLOOR_CONFIG, activeStairsForFloor,
 } from '../mock/floorPlanData'
+// 路网调试层必须与寻路同一张图（shared/evacuation 拓扑）
+import { getFloorTopology } from '../mock/routeGraph'
 
 const store = useFireStore()
 const router = useRouter()

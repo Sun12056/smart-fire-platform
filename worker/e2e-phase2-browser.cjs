@@ -66,6 +66,23 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
     const zoneRoutes = await page.evaluate(() => window.__demo.store.getAllZoneRoutes())
     check('平面图取到区域路线', Array.isArray(zoneRoutes) && zoneRoutes.some((r) => (r.segment || []).length > 1),
       (zoneRoutes || []).map((r) => (r.segment || []).length))
+    // P1.5：拓扑单一数据源 —— 前端 2D 用的节点/出口必须来自 shared/evacuation
+    const topo = await page.evaluate(() => {
+      const m = window.__demo.store.routeMatrix
+      const first = (window.__demo.store.routePlans || [])[0]
+      return {
+        exits: m ? m.exits : null,
+        startNode: first && first.path ? first.path[0].id : null,
+        endNode: first && first.path ? first.path[first.path.length - 1].id : null,
+        exitId: first ? first.exit : null,
+        viaStair: first && first.path ? first.path.some((n) => n.type === 'stair') : false,
+      }
+    })
+    check('出口来自 shared 拓扑（1F:EXIT_*）', Array.isArray(topo.exits) && topo.exits.every((e) => /^1F:EXIT_/.test(e)), topo.exits)
+    check('路线起点为 shared 房间节点（5F:A_CENTER）', /_CENTER$/.test(topo.startNode || ''), topo.startNode)
+    check('路线终点为安全出口节点', /EXIT_/.test(topo.endNode || ''), topo.endNode)
+    check('方案出口字段与拓扑一致', /^1F:EXIT_/.test(topo.exitId || ''), topo.exitId)
+    check('路线经楼梯下行', topo.viaStair)
     check('无 JS 运行时错误', !consoleLogs.some((l) => l.startsWith('[error]')), consoleLogs.filter((l) => l.startsWith('[error]')).slice(0, 2))
   } else if (EXPECT_OFFLINE) {
     console.log('\n[后端不可用：禁止静默回退 mock]')

@@ -34,15 +34,14 @@ import {
   evacuationDevices as initialEvacuationDevices,
   initialEvacuationLogs,
 } from '../mock/evacuation'
+// 建筑拓扑唯一数据源：shared/evacuation（与 Worker Demo Engine、3D 同一张图）
+// ⚠️ mock/routeGraph.js 只是旧签名兼容层，不要再从中取拓扑
 import {
-  buildBuildingGraph,
-  kShortestPaths,
-  dijkstra,
-  edgeKey,
-  floorAdjacency,
+  buildBuildingGraph, kShortestPaths, dijkstra, edgeKey, nodeId as sharedNodeId,
+  exitIdsOf, ZONE_NODE_KEY,
+} from '../../shared/evacuation/routeGraph.js'
+import {
   ROOM_AREAS,
-  EXIT_NODES,
-  FLOOR_NODES,
   ZONE_COLORS,
   FLOOR_HEIGHT_M,
   EVAC_SPEED,
@@ -2035,7 +2034,8 @@ export const useFireStore = defineStore('fire', () => {
     const nodeObjs = pathResult.path.map((id) => routeGraphCache.nodes[id])
     const stair = nodeObjs.find((n) => n.type === 'stair')
     const corridor = nodeObjs.find((n) => n.type === 'corridor' && n.floorId === floorId)
-    const exitNode = EXIT_NODES.find((e) => e.id === exit)
+    // 出口信息直接取 shared 拓扑节点（唯一数据源），不再查 mock 的 EXIT_NODES 常量
+    const exitNode = routeGraphCache.nodes[exit] || { label: exit, side: /EXIT_E/.test(exit) ? 'right' : 'left' }
     const startNum = parseInt(String(floorId).replace('F', ''), 10) || 1
     const floorsPassed = []
     for (let i = startNum; i >= 1; i--) floorsPassed.push(`${i}F`)
@@ -2107,7 +2107,7 @@ export const useFireStore = defineStore('fire', () => {
     const maxF = getBuildingFloors(buildingId)
     routeGraphCache = buildBuildingGraph(maxF)
     const areas = ROOM_AREAS
-    const exits = EXIT_NODES.map((e) => e.id)
+    const exits = exitIdsOf(routeGraphCache, '1F') // shared 拓扑里的安全出口（1F 直通室外）
     // 合法性校验用的边集合（任意相邻节点必须是图中合法边，禁止穿墙/房间直连）
     const edgeSet = new Set()
     Object.values(routeGraphCache.adj).forEach((arr) => arr.forEach((e) => edgeSet.add(e.ek)))
@@ -2115,11 +2115,13 @@ export const useFireStore = defineStore('fire', () => {
     const perZone = {}
     areas.forEach((zone) => {
       const zonePlans = []
+      const startId = sharedNodeId(floorId, ZONE_NODE_KEY[zone])
+      if (!routeGraphCache.nodes[startId]) return
       exits.forEach((exit) => {
         const paths = kShortestPaths(
           routeGraphCache,
-          `${floorId}-${zone}`,
-          `1F-${exit}`,
+          startId,
+          exit,
           blockNodeSet(),
           blockEdgeSet(),
           3
@@ -2199,13 +2201,15 @@ export const useFireStore = defineStore('fire', () => {
       if (p.status === 'BLOCKED') affectedZones.add(p.startArea)
     })
     affectedZones.forEach((zone) => {
-      const exits = EXIT_NODES.map((e) => e.id)
+      const exits = exitIdsOf(routeGraphCache, '1F')
+      const startId = sharedNodeId(fe.floor, ZONE_NODE_KEY[zone])
+      if (!routeGraphCache.nodes[startId]) return
       const newPlans = []
       exits.forEach((exit) => {
         const paths = kShortestPaths(
           routeGraphCache,
-          `${fe.floor}-${zone}`,
-          `1F-${exit}`,
+          startId,
+          exit,
           blockNodeSet(),
           blockEdgeSet(),
           3

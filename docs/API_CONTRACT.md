@@ -183,6 +183,19 @@ shared/evacuation ┬ routeGraph.js     楼层拓扑（节点/边/墙）+ Dijkst
 - Worker 不再自带出口常量与硬编码方案；`engine.ts` 调用同一规划器，人员沿 `routePoints` 逐段推进。
 - 前端 `src/mock/routeGraph.js` 只保留旧签名适配，算法全部转发到 shared（不再有两套实现）。
 
+### 3.1.2 建筑拓扑单一数据源
+
+| 层 | 唯一来源 | 说明 |
+|---|---|---|
+| 拓扑（节点/边/权重/出口） | `shared/evacuation/routeGraph.js` | 前端 store、Worker、3D、2D 调试层全部读它 |
+| 算法 | `shared/evacuation/{routePlanner,routeValidator}.js` | 寻路 / A/B/C / 校验 |
+| 3D 坐标换算 | `src/components/building3d/coords.js` | SVG 560×300 → Three.js（X/Z + 楼层高度） |
+| 渲染几何 / 设备布点 | `src/mock/floorPlanData.js` | 仅房间矩形、墙体、门、设备种子（不再是拓扑） |
+
+- `src/mock/routeGraph.js` 已是纯兼容层：只保留旧签名 `validateRoute(pathNodes,{edgeSet})` 与少量常量重导出；`getFloorTopology()` 实际返回 shared 的单层图（调试层与寻路同源）。
+- ⚠️ 已从 `mock/routeGraph` 删除 `buildBuildingGraph` 别名（它曾指向 `floorPlanData.buildPlanGraph`，是最大的混淆源）；需要拓扑请直接 import `shared/evacuation/routeGraph.js`。
+- 节点 id 格式为 `${floorId}:${key}`（如 `5F:A_CENTER`、`1F:EXIT_E`），出口 id 为 `1F:EXIT_W / 1F:EXIT_E`。
+
 ## 3.2 Demo 六阶段状态机（唯一定义）
 
 ```

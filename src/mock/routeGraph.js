@@ -11,9 +11,9 @@
  * 楼层平面数据（房间/门/走廊/楼梯/出口坐标）仍来自 floorPlanData.js。
  */
 import {
-  buildPlanGraph, edgeKey, getFloorPlanNodes, getFloorPlanEdges,
+  edgeKey, getFloorPlanNodes, getFloorPlanEdges,
   ROOM_AREAS, EXIT_NODES, ZONE_COLORS, WALLS, DOORS, STAIRS, ROOMS, CORRIDOR,
-  FLOOR_HEIGHT_M, EVAC_SPEED, STAIR_PENALTY_S, getFloorTopology,
+  FLOOR_HEIGHT_M, EVAC_SPEED, STAIR_PENALTY_S,
 } from './floorPlanData.js'
 import {
   dijkstra, kShortestPaths, euclid, pathCost, buildBuildingGraph as buildSharedGraph,
@@ -23,11 +23,13 @@ import {
 import { validateRoute as validateRouteShared } from '../../shared/evacuation/routeValidator.js'
 import { findPaths, planEvacuationRoutes, rankPlans, buildPlan, startNodeId } from '../../shared/evacuation/routePlanner.js'
 
-// 重导出（保持 store 旧 import 兼容）
+// 重导出（保持旧 import 兼容）
+// ⚠️ buildBuildingGraph 已从这里移除：拓扑唯一数据源是 shared/evacuation，
+//    旧名会让人误以为仍在用 floorPlanData 的图（曾经的坑）。请直接 import shared。
 export {
-  buildPlanGraph as buildBuildingGraph, edgeKey, ROOM_AREAS, EXIT_NODES,
+  edgeKey, ROOM_AREAS, EXIT_NODES,
   ZONE_COLORS, WALLS, DOORS, STAIRS, ROOMS, CORRIDOR,
-  FLOOR_HEIGHT_M, EVAC_SPEED, STAIR_PENALTY_S, getFloorTopology,
+  FLOOR_HEIGHT_M, EVAC_SPEED, STAIR_PENALTY_S,
   getFloorPlanNodes as FLOOR_NODES_FN, getFloorPlanEdges as FLOOR_EDGES_FN,
   // shared 算法（新代码请直接引用 shared/evacuation，这里仅为兼容旧 import）
   dijkstra, kShortestPaths, pathCost, euclid,
@@ -43,6 +45,27 @@ export const FLOOR_NODES = {
   'B区': { x: 140, y: 190 },
   'C区': { x: 415, y: 150 },
   'D区': { x: 415, y: 190 },
+}
+
+/**
+ * 路网调试层（2D 视图画拓扑用）—— 必须与实际寻路同一张图，
+ * 因此直接取 shared 的单层图，不再用 floorPlanData 的旧拓扑。
+ */
+export function getFloorTopology(floorId = '5F') {
+  const g = buildFloorGraph(floorId)
+  const nodes = Object.values(g.nodes).map((n) => ({
+    id: n.id, key: n.key, x: n.x, y: n.y, type: n.type, label: n.label || n.key,
+  }))
+  const seen = new Set()
+  const edges = []
+  Object.entries(g.adj).forEach(([from, arr]) => {
+    arr.forEach(({ to, ek }) => {
+      if (seen.has(ek)) return
+      seen.add(ek)
+      edges.push({ from, to })
+    })
+  })
+  return { nodes, edges }
 }
 
 // 单层相邻表

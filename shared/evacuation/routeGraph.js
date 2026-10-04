@@ -142,7 +142,10 @@ export function buildFloorGraph(floorId) {
   const adj = {}
   const add = (bp) => {
     const id = nodeId(floorId, bp.key)
-    nodes[id] = { id, floorId, key: bp.key, x: bp.x, y: bp.y, type: bp.type, zone: bp.zone || null, label: bp.label }
+    nodes[id] = {
+      id, floorId, key: bp.key, x: bp.x, y: bp.y, type: bp.type,
+      zone: bp.zone || null, label: bp.label, side: bp.side || null,
+    }
     adj[id] = []
     return id
   }
