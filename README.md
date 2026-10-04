@@ -93,6 +93,13 @@ curl -X POST http://localhost:8787/api/v1/admin/seed
 
 前端启动：根目录复制 `.env.example` 为 `.env` 后设置 `VITE_DATA_SOURCE`（`mock` / `api` / `demo`），再 `npm run dev`。
 
+### 3D 人员沿后端路线移动
+
+- 权威数据：后端的 `x/y + routePoints + progress`（WebSocket 每秒推进），3D 只做视觉插值 `lerp(0.18)`，不自己算速度
+- 坐标唯一转换：`src/components/building3d/coords.js`（SVG 560×300 → Three.js X/Z + 楼层高度）
+- 人员沿折线转弯、经楼梯、跨楼层连续下降（Y 随楼层连续变化，不瞬移），最终到达安全出口后隐藏
+- 视觉错峰 0~2.2s（只影响观感，不改后端状态）；滞留人员原地不动，不跟随疏散路线
+
 ### 疏散路线：一套算法，三端共用
 
 ```

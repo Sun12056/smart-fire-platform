@@ -109,7 +109,8 @@ onMounted(async () => {
     applyHighlight()
     // ── 6. 注册每帧回调 ──
     unsubscribeTick = scene.onTick((dt, t) => {
-      persons.tick(t, dt)
+      // 人员每帧从 store（后端权威位置 / routePoints）取目标并做视觉插值
+      persons.tick(t, dt, store)
       route.tick(t)
       em.tick(t, store)
       fire.tick(t)
@@ -175,13 +176,17 @@ watch(() => store.selectedBuilding, () => {
 }, { deep: true })
 watch(() => store.persons, () => persons && persons.update(store), { deep: false })
 watch(() => store.devices, () => em && em.update(store), { deep: false })
-watch(() => store.routePlans, () => route && route.update(store), { deep: true })
-watch(() => store.activeRoutePlanId, () => route && route.update(store))
+watch(() => store.routePlans, () => { route && route.update(store); persons && persons.update(store) }, { deep: true })
+// A/B/C 切换：2D 平面图与 3D 人员跟随同一条路线（activeRoutePlanId 唯一驱动）
+watch(() => store.activeRoutePlanId, () => {
+  route && route.update(store)
+  persons && persons.update(store)
+})
 watch(() => [store.rescueState, store.emergencyStage], () => rescue && rescue.update(store))
-// 阶段 ≥ 4：人员开始沿当前方案疏散
+// 阶段 ≥ 4：人员开始沿当前方案疏散（错峰重新计时）
 watch(() => store.emergencyStage, (s) => {
   if (!persons || !route) return
-  if (s >= 4 && store.emergencyMode) persons.startEvacuation(route.activeCurves)
+  if (s >= 4 && store.emergencyMode) persons.startEvacuation()
   else persons.stopEvacuation()
 })
 

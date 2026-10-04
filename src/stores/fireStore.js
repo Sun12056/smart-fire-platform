@@ -229,6 +229,18 @@ export const useFireStore = defineStore('fire', () => {
       emergencyResponseConfirmed.value = false
       routeDecisionConfirmed.value = false
       emergencyStage.value = 0
+      // 清空后端运行时路线，人员回到基线位置（避免残留 routePoints 导致复位后仍沿旧路线）
+      asArray(persons.value).forEach((p) => {
+        if (!p) return
+        delete p.route
+        delete p.routePoints
+        delete p.waypoint
+        delete p.progress
+        delete p.evacuating
+        delete p.retained
+        delete p.rescued
+        p._stranded = false
+      })
     }
     // ②·补充：疏散方案 —— 前端/3D 直接复用后端规划器的结果（同一套路线，不再各算一套）
     if (Array.isArray(snap.plans)) applyDemoPlans(snap)
@@ -308,6 +320,14 @@ export const useFireStore = defineStore('fire', () => {
       if (typeof r.y === 'number') p.y = r.y
       if (r.status) p.status = r.status
       if (r.movementType) p.movementType = r.movementType
+      // 权威路线：3D 人员沿后端 routePoints 移动（前端不再自己算路线）
+      if (Array.isArray(r.routePoints)) p.routePoints = r.routePoints
+      if (Array.isArray(r.route)) p.route = r.route
+      if (typeof r.waypoint === 'number') p.waypoint = r.waypoint
+      if (typeof r.progress === 'number') p.progress = r.progress
+      if (typeof r.evacuating === 'boolean') p.evacuating = r.evacuating
+      if (typeof r.retained === 'boolean') p.retained = r.retained
+      if (typeof r.rescued === 'boolean') p.rescued = r.rescued
       if (r.retained) p._stranded = true
       if (r.rescued) p._stranded = false
     })

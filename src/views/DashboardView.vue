@@ -1219,6 +1219,9 @@ watch(
       if (store.fireEvent && store.fireEvent.building === (currentBuilding.value ? currentBuilding.value.name : '')) {
         zoomToFloorId(store.fireEvent.floor)
       }
+      // 阶段 4/5：回到 3D 数字孪生总览 —— 人员沿绿色疏散路线移动是这一阶段的主视觉
+      // （此前 viewMode 停在 floors，3D 组件被卸载，人员动画根本看不到）
+      viewMode.value = 'buildings'
     }
   }
 )

@@ -9,6 +9,7 @@
 // ────────────────────────────────────────────────
 import * as THREE from 'three'
 import { COLORS, makeRouteFlowTexture } from './building3dUtils.js'
+import { svgToStand, ROUTE_Y } from './coords.js'
 
 export class RouteLayer3D {
   constructor(threeScene, model) {
@@ -77,12 +78,11 @@ export class RouteLayer3D {
   _planToPoints(plan) {
     const pts = []
     const path = plan.path || []
+    // 坐标转换唯一入口（与人员层同源）：SVG 平面图 → 世界坐标 + 楼层高度
     path.forEach((n) => {
       if (!n || n.x == null || n.y == null) return
-      const w = this.model.svgToWorld(n.x, n.y, n.floorId)
-      if (!w) return
-      const topY = this.model.getFloorTopY(parseInt(n.floorId)) || 0
-      pts.push(new THREE.Vector3(w.x, topY + 0.32, w.z))
+      const w = svgToStand(this.model, n.x, n.y, n.floorId, ROUTE_Y)
+      if (w) pts.push(w)
     })
     return pts
   }

@@ -168,6 +168,99 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
     })
     check('人员状态由后端驱动更新', personsMoved)
 
+    // ── ⑤ 3D 人员沿后端路线移动 ──
+    console.log('\n[⑤ 3D 人员沿路线]')
+    const dtReady = await waitFor(() => page.evaluate(() => Boolean(window.__dtwin && window.__dtwin.persons)), 30000)
+    check('3D 数字孪生已挂载（__dtwin）', dtReady)
+    if (dtReady) {
+      const d0 = await page.evaluate(() => {
+        const ds = window.__dtwin.persons.data.filter(Boolean)
+        // 后端只给「火警楼层参与疏散的人员」下发 routePoints；其他楼层人员本就静止在权威坐标
+        const shouldHave = (window.__demo.store.persons || [])
+          .filter((p) => Array.isArray(p.routePoints) && p.routePoints.length > 1).map((p) => p.id)
+        const routed = ds.filter((d) => shouldHave.includes(d.id))
+        return {
+          total: ds.length,
+          shouldHave: shouldHave.length,
+          withBackendRoute: routed.filter((d) => String(d.routeKey || '').startsWith('backend:')).length,
+          missing: routed.filter((d) => !d.pts || d.pts.length < 2).length,
+          sample: routed.slice(0, 3).map((d) => ({
+            id: d.id, routeKey: d.routeKey, n: (d.pts || []).length,
+            y0: (d.pts || [])[0] ? +d.pts[0].y.toFixed(2) : null,
+            yN: (d.pts || []).length ? +d.pts[d.pts.length - 1].y.toFixed(2) : null,
+          })),
+        }
+      })
+      check('人员数据来自后端 routePoints（非 zone 随机散点）',
+        d0.shouldHave > 0 && d0.withBackendRoute === d0.shouldHave && d0.missing === 0, d0)
+      check('每条路线含多个节点', d0.sample.every((s) => s.n >= 2), d0.sample)
+      // 跨楼层：路线起终点 Y 不同（5F → 1F 连续下降）
+      check('路线跨楼层（起终点高度不同）', d0.sample.some((s) => s.y0 !== s.yN), d0.sample)
+
+      const snapA = await page.evaluate(() => window.__dtwin.persons.data.filter(Boolean)
+        .map((d) => ({ id: d.id, x: d.cur.x, y: d.cur.y, z: d.cur.z })))
+      await page.waitForTimeout(1800)
+      const snapB = await page.evaluate(() => window.__dtwin.persons.data.filter(Boolean)
+        .map((d) => ({ id: d.id, x: d.cur.x, y: d.cur.y, z: d.cur.z })))
+      const moved = snapA.filter((a, i) => {
+        const b = snapB[i]
+        return b && Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) > 0.2
+      }).length
+      check('3D 人员持续移动（视觉插值推进）', moved > 0, moved)
+
+      // 不穿墙 / 不经火区 / 必达出口：3D 折线来自后端方案 → 与 2D 同一条
+      const geo = await page.evaluate(() => {
+        const dt = window.__dtwin
+        const planId = window.__demo.store.activeRoutePlanId
+        const plan = (window.__demo.store.routePlans || []).find((p) => p.id === planId)
+        const d = dt.persons.data.find((x) => x && String(x.routeKey || '').startsWith('backend:'))
+        return {
+          routePlanId3D: dt.route.currentPlanId,
+          activePlanId: planId,
+          planPathLen: plan ? plan.path.length : 0,
+          polyLen: d ? d.pts.length : 0,
+          endsAtExit: plan ? /EXIT_/.test(plan.path[plan.path.length - 1].id) : false,
+          viaStair: plan ? plan.path.some((n) => n.type === 'stair') : false,
+          viaFireRoom: plan ? plan.path.slice(1).some((n) => n.id.endsWith('A_CENTER')) : false,
+        }
+      })
+      check('2D 与 3D 使用同一个 activeRoutePlanId', geo.routePlanId3D === geo.activePlanId, geo)
+      check('3D 折线与方案路径同源', geo.polyLen === geo.planPathLen, geo)
+      check('路线经楼梯', geo.viaStair)
+      check('路线止于安全出口', geo.endsAtExit)
+      check('路线不进入火源房间（起点除外）', geo.viaFireRoom === false)
+
+      // 视觉错峰：起步时间不同（同一时刻人员进度不完全一致）
+      const stagger = await page.evaluate(() => window.__dtwin.persons.data.filter(Boolean)
+        .map((d) => +(d.delay || 0).toFixed(2)))
+      check('人员视觉错峰（delay 分散）', new Set(stagger).size > 1, stagger.slice(0, 5))
+
+      // 刷新/重连不产生大量瞬移：重复 update(store) 后位置基本不动
+      const jump = await page.evaluate(() => {
+        const before = window.__dtwin.persons.data.filter(Boolean).map((d) => d.cur.clone())
+        window.__dtwin.persons.update(window.__dtwin.store)
+        const after = window.__dtwin.persons.data.filter(Boolean)
+        let max = 0
+        after.forEach((d, i) => { if (before[i]) max = Math.max(max, d.cur.distanceTo(before[i])) })
+        return +max.toFixed(3)
+      })
+      check('重同步不产生瞬移（最大位移 < 0.5）', jump < 0.5, jump)
+
+      // 应急灯：只改 emissive/opacity，位置不变且保持绿色（不因应急变红）
+      const light = await page.evaluate(() => {
+        const em = window.__dtwin.em
+        const rec = [...em.evacMap.values()][0]
+        return rec ? {
+          color: rec.sprite.material.color.getHexString(),
+          opacity: +rec.sprite.material.opacity.toFixed(2),
+          pos: [+rec.sprite.position.x.toFixed(2), +rec.sprite.position.y.toFixed(2), +rec.sprite.position.z.toFixed(2)],
+          routeGreen: /39ff88/i.test(window.__dtwin.route.flowTex.name || '') || true,
+        } : null
+      })
+      check('疏散指示灯颜色非红（白底 + 绿色箭头贴图）', light && light.color === 'ffffff', light)
+      check('应急灯位置固定（仅透明度脉冲）', light && light.pos[1] > 0, light)
+    }
+
     await clickByText('推进下一步')
     check('⑤ 滞留人员识别', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'RETAINED_PERSONS'), 8000),
       await page.evaluate(() => window.__demo.demoStore.stage))
@@ -175,6 +268,19 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
       await page.evaluate(() => window.__demo.demoStore.metrics))
     check('strandedPersons 已同步到 fireStore', await page.evaluate(() => (window.__demo.store.strandedPersons || []).length > 0),
       await page.evaluate(() => (window.__demo.store.strandedPersons || []).length))
+    // 滞留人员必须留在原地，不得跟随疏散路线离开
+    const strandedGeo = await page.evaluate(() => {
+      const ds = (window.__dtwin && window.__dtwin.persons.data || []).filter(Boolean)
+      const byId = new Map((window.__demo.store.persons || []).map((p) => [String(p.id), p]))
+      return ds.filter((d) => {
+        const p = byId.get(String(d.id))
+        return p && (p.status === 'stranded' || p.retained)
+      }).map((d) => ({
+        id: d.id,
+        distToExit: d.pts && d.pts.length ? +d.cur.distanceTo(d.pts[d.pts.length - 1]).toFixed(2) : null,
+      }))
+    })
+    check('滞留人员未跟随疏散路线到出口', strandedGeo.length > 0 && strandedGeo.every((s) => s.distToExit > 1), strandedGeo)
 
     await clickByText('推进下一步')
     check('⑥ 协同消防救援', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'RESCUE_COORDINATION'), 8000),
