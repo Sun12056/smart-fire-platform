@@ -12,6 +12,8 @@ import {
 import type { DemoBaseline, DemoWorld } from '../demo/world'
 import type { DeviceRuntime, PersonRuntime } from '../demo/world'
 import { fmtSH } from '../db'
+// 人员运行时统一契约（P1.6.1）：后端 → WS → 2D/3D 同一套字段
+import { normalizePersonRuntime } from '../../../shared/person/personRuntime.js'
 
 const TICK_MS = 1000
 // v2：基线覆盖整栋楼各楼层（scope = BUILDING），旧缓存只有火警楼层，需失效重建
@@ -53,6 +55,11 @@ export class DemoRoom extends DurableObject<Env> {
       progress: 0,
       targetX: 840,
       targetY: 150,
+      // 统一字段初始化：基线人员尚未分配路线
+      routeId: null,
+      route: [],
+      routePoints: [],
+      waypoint: 0,
       evacuating: false,
       retained: false,
       rescued: false,
@@ -215,7 +222,8 @@ export class DemoRoom extends DurableObject<Env> {
         type: 'demo.tick',
         seq: world.seq,
         stage: world.stage,
-        persons: Object.values(world.persons),
+        // 与 snapshot 同一套人员契约（同一 id / 同一 routeId）
+        persons: personDTOs(world),
         metrics: world.metrics,
         evacuationSettled: world.evacuationSettled,
         at: world.updatedAt,
@@ -525,7 +533,8 @@ export class DemoRoom extends DurableObject<Env> {
       lighting: world.lighting,
       metrics: world.metrics,
       rescue: world.rescue,
-      persons: Object.values(world.persons),
+      // 人员：统一契约（id/buildingId/floorId/zone/status/routeId/routePoints/progress/position）
+      persons: personDTOs(world),
       devices: Object.values(world.devices),
       eventLog: world.eventLog.slice(0, 30),
       evacuationSettled: world.evacuationSettled,
@@ -535,6 +544,19 @@ export class DemoRoom extends DurableObject<Env> {
       serverTime: fmtSH(),
     }
   }
+}
+
+/**
+ * 人员运行时 → 统一 wire 结构（P1.6.1）
+ * 后端是唯一权威：routeId / routePoints / progress / position 全部来自 PersonRuntime，
+ * 经 shared/person/personRuntime 规范化后下发，2D（fireStore）与 3D（PersonLayer3D）直接消费。
+ */
+function personDTOs(world: DemoWorld) {
+  return Object.values(world.persons).map((p) => normalizePersonRuntime(p, {
+    buildingId: p.buildingId || world.scenario.buildingId,
+    floorId: p.floorId,
+    zone: p.zone,
+  }))
 }
 
 function isCommand(v: string): v is DemoCommand {

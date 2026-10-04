@@ -302,6 +302,89 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   check('1F~6F 均有人获得路线（不是只疏散 5F）',
     runs['PLAN-B'].floors.length >= 6, runs['PLAN-B'].floors)
 
+  // ── 7.6 人员数据链统一（P1.6.1） ──
+  console.log('\n[7.6] 人员数据链统一（DemoRoom → PersonRuntime → WS → 2D/3D）')
+  // 统一字段：id / buildingId / floorId / zone / status / routeId / routePoints / progress / position
+  const PERSON_FIELDS = ['id', 'buildingId', 'floorId', 'zone', 'status', 'routeId', 'routePoints', 'progress', 'position']
+  const isCanonical = (p) => Boolean(p)
+    && PERSON_FIELDS.every((f) => p[f] !== undefined)
+    && Array.isArray(p.routePoints)
+    && typeof p.progress === 'number' && p.progress >= 0 && p.progress <= 1
+    && Boolean(p.position) && Number.isFinite(p.position.x) && Number.isFinite(p.position.y)
+
+  await api(`/api/v1/demo/reset?sessionId=${SESSION}`, { method: 'POST' })
+  await cmd('START_FIRE')
+  await cmd('ACTIVATE_RESPONSE')
+  await cmd('PLAN_ROUTES')
+  const rc = await cmd('CONFIRM_ROUTE', { buildingPlanId: 'PLAN-C' })
+  const chain = rc.body?.persons || []
+  check('快照人员含统一字段 9 项', chain.length > 0 && chain.every(isCanonical),
+    chain.filter((p) => !isCanonical(p)).slice(0, 2))
+  check('position 与 x/y 同源（别名由统一字段派生）',
+    chain.every((p) => p.position.x === p.x && p.position.y === p.y), chain.slice(0, 2).map((p) => [p.position, p.x, p.y]))
+  check('buildingId / floorId / zone 均为有效值',
+    chain.every((p) => p.buildingId === 'B003' && /^\d+F$/.test(p.floorId) && Boolean(p.zone)),
+    chain.slice(0, 2).map((p) => [p.buildingId, p.floorId, p.zone]))
+  check('全员 routePoints 为路线折线（≥2 点）',
+    chain.every((p) => p.routePoints.length > 1),
+    chain.filter((p) => p.routePoints.length <= 1).slice(0, 3).map((p) => p.id))
+  check('全员 routeId 属于当前整栋楼方案 PLAN-C',
+    chain.every((p) => String(p.routeId).startsWith('PLAN-C:')), [...new Set(chain.map((p) => p.routeId))].slice(0, 3))
+
+  // 人员 ID：后端 DemoRoom / D1 person_presence / 2D / 3D 必须是同一套
+  const ppRes = await api('/api/v1/person-presence?buildingId=B003')
+  const ppIds = new Set((ppRes.body || []).map((p) => String(p.id)))
+  const chainIds = new Set(chain.map((p) => String(p.id)))
+  check('人员 id 与 D1 person_presence 完全一致（同一人员 ID）',
+    chainIds.size > 0 && [...chainIds].every((id) => ppIds.has(id)) && chainIds.size === ppIds.size,
+    { chain: chainIds.size, d1: ppIds.size })
+
+  // routeId：后端下发 = 整栋楼方案 routesByZone[floorId:zone].routeId（2D/3D 用同一个）
+  const bpC = (rc.body?.buildingPlans || []).find((p) => p.id === 'PLAN-C')
+  const routeIdMismatch = chain.filter((p) => {
+    const r = bpC?.routesByZone?.[`${p.floorId}:${p.zone}`]
+    return r && r.routeId !== p.routeId
+  })
+  check('人员 routeId = 方案 routesByZone[floorId:zone].routeId',
+    routeIdMismatch.length === 0, routeIdMismatch.slice(0, 3).map((p) => [p.id, p.floorId, p.zone, p.routeId]))
+  check('routeId 覆盖多个楼层（整栋楼，不是只疏散 5F）',
+    new Set(chain.map((p) => String(p.routeId).split(':')[1])).size >= 6,
+    [...new Set(chain.map((p) => String(p.routeId).split(':')[1]))])
+
+  // WebSocket tick：人员继续按统一契约推进（同一 id / 同一 routeId）
+  // 注意：第一个 ws 已在 [7] 关闭，这里用重连后的连接接收广播
+  const live = reconnected.messages
+  const beforeTick2 = live.length
+  const gotTick2 = await waitFor(() => live.slice(beforeTick2).some((m) => m.type === 'demo.tick'), 12000)
+  check('WS tick 广播人员', gotTick2 && (live.slice(beforeTick2).find((m) => m.type === 'demo.tick')?.persons || []).length > 0)
+  const tick2 = live.slice(beforeTick2).find((m) => m.type === 'demo.tick')
+  check('tick 人员同样符合统一契约', (tick2?.persons || []).length > 0 && tick2.persons.every(isCanonical),
+    (tick2?.persons || []).filter((p) => !isCanonical(p)).slice(0, 2))
+  const tickIds = new Set((tick2?.persons || []).map((p) => String(p.id)))
+  check('tick 与快照使用同一批人员 id',
+    tickIds.size === chainIds.size && [...tickIds].every((id) => chainIds.has(id)), { tick: tickIds.size, snap: chainIds.size })
+  const tickRouteMap = new Map((tick2?.persons || []).map((p) => [String(p.id), p.routeId]))
+  check('tick 与快照使用同一个 routeId',
+    chain.every((p) => tickRouteMap.get(String(p.id)) === p.routeId),
+    chain.slice(0, 3).map((p) => [p.id, p.routeId, tickRouteMap.get(String(p.id))]))
+  const progressed = await waitFor(() => {
+    const t = live.slice(beforeTick2).filter((m) => m.type === 'demo.tick').slice(-1)[0]
+    return Boolean(t && (t.persons || []).some((p) => p.progress > 0))
+  }, 12000)
+  check('tick 推进 progress（权威进度，前端不自行计算）', progressed)
+  const posAdvanced = await waitFor(() => {
+    const ticks = live.slice(beforeTick2).filter((m) => m.type === 'demo.tick')
+    if (ticks.length < 2) return false
+    const a = ticks[ticks.length - 2]
+    const b = ticks[ticks.length - 1]
+    const amap = new Map((a.persons || []).map((p) => [String(p.id), p.position]))
+    return (b.persons || []).some((p) => {
+      const prev = amap.get(String(p.id))
+      return prev && (Math.abs(prev.x - p.position.x) > 0.01 || Math.abs(prev.y - p.position.y) > 0.01)
+    })
+  }, 12000)
+  check('tick 推进 position（权威坐标，3D 只做视觉插值）', posAdvanced)
+
   // ── 8. 复位闭环 ──
   console.log('\n[8] 复位')
   const reset2 = await api(`/api/v1/demo/reset?sessionId=${SESSION}`, { method: 'POST' })

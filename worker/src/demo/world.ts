@@ -60,6 +60,13 @@ export interface BuildingEvacuationPlan {
   recommended: boolean
 }
 
+/**
+ * 人员运行时（P1.6.1 统一数据契约）
+ * 对外（WebSocket snapshot / tick）一律经 shared/person/personRuntime 的 normalizePersonRuntime 序列化为：
+ *   id / buildingId / floorId / zone / status / routeId / routePoints / progress / position
+ * 内部仿真仍用 x / y / waypoint 推进；position 由 x/y 派生，避免两份坐标源。
+ * 铁律：routeId / routePoints / progress / position 只能由后端产生，2D 与 3D 只消费。
+ */
 export interface PersonRuntime {
   id: string
   buildingId: string
@@ -75,7 +82,7 @@ export interface PersonRuntime {
   targetX: number
   targetY: number
   /** 整栋楼方案中该人员所属 floorId+zone 的路线 id（2D/3D/后端同一个） */
-  routeId?: string
+  routeId: string | null
   /** 沿用的疏散路线（节点 id 序列，来自 shared/evacuation 规划器） */
   route: string[]
   /** 路线折线点（SVG 平面图坐标），逐段推进用 */

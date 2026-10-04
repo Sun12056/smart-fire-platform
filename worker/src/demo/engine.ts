@@ -37,6 +37,8 @@ export function createWorld(sessionId: string, scenario: DemoWorld['scenario'], 
       progress: 0,
       targetX: p.x,
       targetY: p.y,
+      // 统一字段初始化（P1.6.1）：未下发方案时 routeId 恒为 null，routePoints 恒为 []
+      routeId: null,
       route: [],
       routePoints: [],
       waypoint: 0,

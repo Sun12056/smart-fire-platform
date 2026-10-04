@@ -46,6 +46,10 @@ import {
   resolvePlanningZone,
 } from '../../shared/evacuation/buildingEvacuationPlanner.js'
 import { EVACUATION_SCOPE, STRATEGY, zoneKeyOf } from '../../shared/evacuation/buildingEvacuationTypes.js'
+// 人员运行时统一契约（P1.6.1）：后端 / 2D / 3D 同一个 id、同一个 routeId
+import {
+  normalizePersonRuntime, assignPersonRuntime, isCanonicalPerson,
+} from '../../shared/person/personRuntime.js'
 import {
   ROOM_AREAS,
   ZONE_COLORS,
@@ -81,11 +85,24 @@ export const useFireStore = defineStore('fire', () => {
   const demoMode = ref(false)
   const updateTime = ref(new Date().toLocaleString('zh-CN'))
 
-  // 人员感知
-  const persons = ref(Array.isArray(initialPersons) ? [...initialPersons] : [])
+  // 人员感知（统一契约：id/buildingId/floorId/zone/status/routeId/routePoints/progress/position）
+  // 旧的 building / floor / area / x / y 只是只读别名，由统一字段派生（兼容旧组件与 SVG 模板）
+  const persons = ref(normalizePersons(initialPersons))
   const personStats = ref(initialPersonStats && typeof initialPersonStats === 'object' ? { ...initialPersonStats } : {})
   // 人员初始坐标/状态基线（重置演示后恢复；不对外导出）
-  let personsOrigin = JSON.parse(JSON.stringify(Array.isArray(initialPersons) ? initialPersons : []))
+  let personsOrigin = normalizePersons(initialPersons)
+
+  /** 批量规范化人员（统一字段 + 只读别名），mock 与远端数据一律经过这里 */
+  function normalizePersons(list) {
+    return (Array.isArray(list) ? list : []).map((p) => normalizePersonRuntime(p))
+  }
+
+  /** 位置同步：x / y（旧别名）↔ position（统一字段），2D/3D 读到的始终是同一份坐标 */
+  function syncPersonPosition(p) {
+    if (!p) return p
+    if (Number.isFinite(p.x) && Number.isFinite(p.y)) p.position = { x: p.x, y: p.y }
+    return p
+  }
 
   // ── 远程数据源（api / demo 模式经 Service 层加载 Workers/D1 数据） ──
   // 重要：远端失败时【不静默回退 mock】，必须显式置位 remoteError / dataSourceDegraded 交由 UI 告警，
@@ -109,8 +126,9 @@ export const useFireStore = defineStore('fire', () => {
       if (Array.isArray(alms) && alms.length) alarms.value = alms
       if (Array.isArray(insps) && insps.length) inspectionHistory.value = insps
       if (Array.isArray(ppl) && ppl.length) {
-        persons.value = ppl
-        personsOrigin = JSON.parse(JSON.stringify(ppl))
+        // 远端人员同样升级为统一字段（D1 行含 buildingId/floorId/zone，与后端 PersonRuntime 同一套 id）
+        persons.value = normalizePersons(ppl)
+        personsOrigin = JSON.parse(JSON.stringify(persons.value))
       }
       if (Array.isArray(logs) && logs.length) {
         operationLogs.value = logs
@@ -242,15 +260,17 @@ export const useFireStore = defineStore('fire', () => {
       routeDecisionConfirmed.value = false
       emergencyStage.value = 0
       // 清空后端运行时路线，人员回到基线位置（避免残留 routePoints 导致复位后仍沿旧路线）
+      // 统一字段：复位只清空「值」，不删除字段（否则 2D/3D 读到的不再是统一契约）
       asArray(persons.value).forEach((p) => {
         if (!p) return
         delete p.route
-        delete p.routePoints
         delete p.waypoint
-        delete p.progress
         delete p.evacuating
         delete p.retained
         delete p.rescued
+        p.routePoints = []
+        p.progress = 0
+        p.routeId = null
         p._stranded = false
       })
     }
@@ -323,28 +343,49 @@ export const useFireStore = defineStore('fire', () => {
     refreshPersonStats()
   }
 
+  /**
+   * 后端人员运行时 → 2D 人员对象（P1.6.1 统一契约）
+   * 按 id 合并（后端 / 2D / 3D 同一个人员 id），只写后端下发的权威字段：
+   * routeId / routePoints / progress / position 一律来自后端，前端不推导。
+   */
   function applyDemoPersons(list) {
-    const pmap = new Map(list.map((p) => [String(p.id), p]))
+    const pmap = new Map((Array.isArray(list) ? list : []).map((p) => [String(p.id), p]))
     asArray(persons.value).forEach((p) => {
       const r = pmap.get(String(p.id))
       if (!r) return
-      if (typeof r.x === 'number') p.x = r.x
-      if (typeof r.y === 'number') p.y = r.y
-      if (r.status) p.status = r.status
-      if (r.movementType) p.movementType = r.movementType
-      // 权威路线：3D 人员沿后端 routePoints 移动（前端不再自己算路线）
-      if (Array.isArray(r.routePoints)) p.routePoints = r.routePoints
-      if (Array.isArray(r.route)) p.route = r.route
-      // routeId = `${buildingPlanId}:${floorId}:${zone}` —— 后端权威，2D/3D 同一个
-      if (r.routeId !== undefined) p.routeId = r.routeId
-      if (typeof r.waypoint === 'number') p.waypoint = r.waypoint
-      if (typeof r.progress === 'number') p.progress = r.progress
-      if (typeof r.evacuating === 'boolean') p.evacuating = r.evacuating
-      if (typeof r.retained === 'boolean') p.retained = r.retained
-      if (typeof r.rescued === 'boolean') p.rescued = r.rescued
+      assignPersonRuntime(p, r)
       if (r.retained) p._stranded = true
       if (r.rescued) p._stranded = false
     })
+  }
+
+  /** 当前整栋楼方案下某人员的权威 routeId（2D/3D/后端同一个；方案未定时为 null） */
+  function personRouteId(person) {
+    const p = typeof person === 'string' ? asArray(persons.value).find((x) => x && String(x.id) === String(person)) : person
+    if (!p) return null
+    if (p.routeId) return p.routeId
+    const bp = activeBuildingPlan.value
+    if (!bp) return null
+    const route = buildingRouteOfPerson(bp, { floorId: p.floorId || p.floor, zone: p.zone || p.area })
+    return route ? route.routeId : null
+  }
+
+  /** 2D/3D 消费用的统一人员视图（只暴露统一字段 + 只读别名） */
+  const personRuntimes = computed(() => asArray(persons.value).map((p) => ({
+    id: p.id,
+    buildingId: p.buildingId,
+    floorId: p.floorId,
+    zone: p.zone,
+    status: p.status,
+    routeId: p.routeId !== undefined ? p.routeId : null,
+    routePoints: Array.isArray(p.routePoints) ? p.routePoints : [],
+    progress: typeof p.progress === 'number' ? p.progress : 0,
+    position: p.position || (Number.isFinite(p.x) && Number.isFinite(p.y) ? { x: p.x, y: p.y } : null),
+  })))
+
+  /** 统一字段完整性自检（E2E 用）：返回不符合契约的人员数 */
+  function countNonCanonicalPersons() {
+    return asArray(persons.value).filter((p) => !isCanonicalPerson(p)).length
   }
 
   // 实时疏散推进（仅人员位置与指标，不重复刷新整表）
@@ -919,24 +960,26 @@ export const useFireStore = defineStore('fire', () => {
     // 火灾只决定路线怎么绕开火区，不决定「谁参与疏散」—— 整栋楼有人区域全部纳入。
     const bp = activeBuildingPlan.value
     if (!bp) return false
+    // 统一字段：按 buildingId 判定参与范围（与后端 PersonRuntime 同一个 id / 同一套字段）
+    const feBuildingId = fireBuildingId(fe.building)
     let total = 0
     asArray(persons.value).forEach((p) => {
-      if (!p || p.building !== fe.building) return
+      if (!p || (p.buildingId || fireBuildingId(p.building)) !== feBuildingId) return
       delete p._evacDone
       delete p._evac
       // 走廊等公共区域没有房间节点 → 与规划阶段同一套归属规则，保证人人有路线
-      let route = buildingRouteOfPerson(bp, { floorId: p.floor, zone: p.zone || p.area })
-      if (!route && (p.zone || p.area)) {
+      let route = buildingRouteOfPerson(bp, { floorId: p.floorId, zone: p.zone })
+      if (!route && p.zone) {
         if (!routeGraphCache) routeGraphCache = buildBuildingGraph(getBuildingFloors(bp.buildingId))
         route = buildingRouteOfPerson(bp, {
-          floorId: p.floor,
+          floorId: p.floorId,
           zone: resolvePlanningZone(routeGraphCache, {
-            floorId: p.floor, zone: p.zone || p.area, x: p.x, y: p.y,
+            floorId: p.floorId, zone: p.zone, x: p.x, y: p.y,
           }),
         })
       }
       const plan = route ? routeToRenderable(bp, route) : null
-      const ownFloor = p.floor
+      const ownFloor = p.floorId
       // routeId = `${planId}:${floorId}:${zone}` —— 2D / 3D / 后端同一个 id
       p.routeId = route ? route.routeId : null
       if (!plan || plan.status === 'BLOCKED') return
@@ -960,8 +1003,16 @@ export const useFireStore = defineStore('fire', () => {
         total++
       }
     })
+    // P1.6.1：demo 模式（后端状态机驱动）下，人员位置 / 进度 / 滞留判定一律以后端广播为准，
+    // 前端不再并行跑自己的疏散模拟（否则 2D/3D 与后端坐标分裂）。
+    if (dataSource.isDemo) {
+      stopEvacuationSim()
+      evacRun.value = true
+      return true
+    }
     // 演示滞留人员：火源区域 1 名（如 A区）+ 非火源区域 1 名（如 C区），共 2 人（不进入疏散动画，用于阶段5识别）
-    const floorPool = asArray(persons.value).filter((p) => p && p.building === fe.building && p.floor === fe.floor && p.zone)
+    const floorPool = asArray(persons.value)
+      .filter((p) => p && (p.buildingId || fireBuildingId(p.building)) === feBuildingId && p.floorId === fe.floor && p.zone)
     const strandedPicks = []
     const inFireZone = floorPool.filter((p) => p.zone === fe.area)
     if (inFireZone.length) strandedPicks.push(inFireZone[0])
@@ -997,7 +1048,9 @@ export const useFireStore = defineStore('fire', () => {
     const fe = fireEvent.value
     if (!fe) return
     stopEvacuationSim()
-    const floorPersons = asArray(persons.value).filter((p) => p && p.building === fe.building && p.floor === fe.floor)
+    const feBuildingId = fireBuildingId(fe.building)
+    const floorPersons = asArray(persons.value)
+      .filter((p) => p && (p.buildingId || fireBuildingId(p.building)) === feBuildingId && p.floorId === fe.floor)
     const stranded = floorPersons.filter((p) => p._stranded)
     strandedPersons.value = stranded.map((p) => ({
       id: p.id,
@@ -1059,6 +1112,7 @@ export const useFireStore = defineStore('fire', () => {
       if (dist <= sp) {
         p.x = t.x
         p.y = t.y
+        syncPersonPosition(p)
         p._evac.idx++
         if (p._evac.idx >= pts.length) {
           p._evacDone = true
@@ -1068,6 +1122,7 @@ export const useFireStore = defineStore('fire', () => {
       } else {
         p.x += (dx / dist) * sp
         p.y += (dy / dist) * sp
+        syncPersonPosition(p)
         if (p.movementType === 'static') p.movementType = 'moving'
       }
     })
@@ -1573,8 +1628,8 @@ export const useFireStore = defineStore('fire', () => {
     buildings.value = JSON.parse(JSON.stringify(initialBuildings))
     // 重置告警
     alarms.value = JSON.parse(JSON.stringify(initialAlarms))
-    // 重置人员
-    persons.value = JSON.parse(JSON.stringify(initialPersons))
+    // 重置人员（统一契约规范化，保证 2D/3D 读到的仍是同一套字段）
+    persons.value = normalizePersons(initialPersons)
     personStats.value = JSON.parse(JSON.stringify(initialPersonStats))
     // 重置风险区域
     riskAreas.value = []
@@ -2761,6 +2816,8 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   restorePersistSnapshot()
+  // 持久化快照可能是旧格式：恢复后统一升级为「人员统一契约」（保证 2D/3D 字段齐全）
+  persons.value = normalizePersons(persons.value)
 
   watch(
     Object.values(persistRefs),
@@ -2831,6 +2888,10 @@ export const useFireStore = defineStore('fire', () => {
     demoStepList,
     personTrend,
     zoneHeatmap,
+    // ── 人员统一数据链（P1.6.1）：后端 / 2D / 3D 同一 id、同一 routeId ──
+    personRuntimes,
+    personRouteId,
+    countNonCanonicalPersons,
     onlineSensorCount,
     riskAreaCount,
     deviceHealthScore,

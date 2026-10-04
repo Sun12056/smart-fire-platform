@@ -124,6 +124,20 @@ const cmd = (command, payload = {}) =>
       (mockBp.floors || []).length > 1 && mockBp.zoneCount > 1 && mockBp.valid, mockBp)
     check('mock 整栋楼方案同步到 routePlans / routeMatrix / 平面图',
       mockBp.routePlans === mockBp.zoneCount && (mockBp.matrixAreas || []).length > 0 && mockBp.zoneRoutes > 0, mockBp)
+    // 人员统一契约（P1.6.1）：mock 数据源同样升级为统一字段
+    const mockPersons = await page.evaluate(() => {
+      const s = window.__demo.store
+      const FIELDS = ['id', 'buildingId', 'floorId', 'zone', 'status', 'routeId', 'routePoints', 'progress', 'position']
+      const ps = s.persons || []
+      return {
+        total: ps.length,
+        nonCanonical: s.countNonCanonicalPersons ? s.countNonCanonicalPersons() : -1,
+        allHaveFields: ps.every((p) => FIELDS.every((f) => p[f] !== undefined)),
+        sample: ps.slice(0, 2).map((p) => [p.id, p.buildingId, p.floorId, p.zone, p.status, p.routeId]),
+      }
+    })
+    check('mock 模式人员字段符合统一契约',
+      mockPersons.total > 0 && mockPersons.allHaveFields && mockPersons.nonCanonical === 0, mockPersons)
     check('无 JS 运行时错误', !consoleLogs.some((l) => l.startsWith('[error]')), consoleLogs.filter((l) => l.startsWith('[error]')).slice(0, 2))
   } else if (EXPECT_OFFLINE) {
     console.log('\n[后端不可用：禁止静默回退 mock]')
@@ -553,6 +567,66 @@ const cmd = (command, payload = {}) =>
       check('疏散指示灯颜色非红（白底 + 绿色箭头贴图）', light && light.color === 'ffffff', light)
       check('应急灯位置固定（仅透明度脉冲）', light && light.pos[1] > 0, light)
     }
+
+    // ── ④·补2 人员数据链统一（P1.6.1） ──
+    console.log('\n[④·补2] 人员数据链统一（后端 / 2D / 3D 同一 ID 与 routeId）')
+    const chain = await page.evaluate(() => {
+      const demo = window.__demo.demoStore   // 后端 WebSocket 快照
+      const store = window.__demo.store      // fireStore（2D 平面图消费）
+      const dt = window.__dtwin && window.__dtwin.persons // 3D
+      const FIELDS = ['id', 'buildingId', 'floorId', 'zone', 'status', 'routeId', 'routePoints', 'progress', 'position']
+      const canonical = (p) => Boolean(p)
+        && FIELDS.every((f) => p[f] !== undefined)
+        && Array.isArray(p.routePoints)
+        && typeof p.progress === 'number'
+        && Boolean(p.position) && Number.isFinite(p.position.x) && Number.isFinite(p.position.y)
+      const backend = demo.persons || []
+      const twoD = store.persons || []
+      const three = (dt && dt.data ? dt.data : []).filter(Boolean)
+      const bIds = backend.map((p) => String(p.id)).sort()
+      const dIdSet = new Set(twoD.map((p) => String(p.id)))
+      const tIds = three.map((d) => String(d.id)).sort()
+      // routeId 一致性：后端 → 2D
+      const bRoute = new Map(backend.map((p) => [String(p.id), p.routeId]))
+      const mismatch2d = twoD.filter((p) => bRoute.has(String(p.id)) && bRoute.get(String(p.id)) !== p.routeId)
+      // routeId 一致性：后端 → 3D（3D 路线指纹必须携带后端 routeId）
+      const tMap = new Map(three.map((d) => [String(d.id), d]))
+      const keyNoRoute = backend.filter((p) => {
+        const d = tMap.get(String(p.id))
+        return d && d.routeKey && !String(d.routeKey).includes(String(p.routeId))
+      })
+      // 位置一致性：2D 与后端同源
+      const bPos = new Map(backend.map((p) => [String(p.id), p.position]))
+      const posMismatch = twoD.filter((p) => {
+        const q = bPos.get(String(p.id))
+        return q && (!p.position || p.position.x !== q.x || p.position.y !== q.y)
+      })
+      return {
+        backendCount: backend.length,
+        twoDCount: twoD.length,
+        threeCount: three.length,
+        idsAllIn2D: bIds.length > 0 && bIds.every((id) => dIdSet.has(id)),
+        idsSameAs3D: JSON.stringify(bIds) === JSON.stringify(tIds),
+        nonCanonical2D: twoD.filter((p) => !canonical(p)).length,
+        selfCheck: store.countNonCanonicalPersons ? store.countNonCanonicalPersons() : -1,
+        mismatch2d: mismatch2d.length,
+        keyNoRoute: keyNoRoute.length,
+        posMismatch: posMismatch.length,
+        selfGenerated: three.filter((d) => String(d.routeKey || '').startsWith('mock:')).length,
+        sample: backend.slice(0, 2).map((p) => [p.id, p.buildingId, p.floorId, p.zone, p.routeId]),
+        sample3d: three.slice(0, 2).map((d) => [d.id, d.routeId, d.routeKey]),
+        ncSample: twoD.filter((p) => !canonical(p)).slice(0, 2)
+          .map((p) => [String(p.id), p.buildingId, p.floorId, p.zone, p.routeId, Array.isArray(p.routePoints), p.progress, Boolean(p.position)]),
+        posSample: posMismatch.slice(0, 2).map((p) => [String(p.id), p.position, bPos.get(String(p.id))]),
+      }
+    })
+    check('后端 → 2D：同一批人员 ID', chain.idsAllIn2D && chain.backendCount > 0, chain)
+    check('后端 → 3D：同一批人员 ID', chain.idsSameAs3D && chain.threeCount === chain.backendCount, chain)
+    check('2D 人员字段符合统一契约（9 项齐全）', chain.nonCanonical2D === 0 && chain.selfCheck === 0, chain)
+    check('后端 → 2D：同一 routeId', chain.mismatch2d === 0, chain)
+    check('后端 → 3D：3D 路线指纹携带同一 routeId', chain.keyNoRoute === 0, chain)
+    check('后端 → 2D：position 同源', chain.posMismatch === 0, chain)
+    check('3D 未自行生成路线（无本地 mock 路线指纹）', chain.selfGenerated === 0, chain)
 
     await clickByText('推进下一步')
     check('⑤ 滞留人员识别', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'RETAINED_PERSONS'), 8000),

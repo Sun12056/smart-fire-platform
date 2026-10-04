@@ -1,16 +1,22 @@
 // PersonLayer3D · 3D 人员系统（InstancedMesh）
 // ────────────────────────────────────────────────
-// 数据权威来源（不再由 3D 自己“编”位置）：
-//   ① 后端 WebSocket 下发的 p.x / p.y（SVG 平面图坐标）+ p.route / p.routePoints / p.progress
-//   ② mock 模式的运行时 p.x / p.y（store 沿合法路线推进）
-//   ③ 兜底：无坐标人员才按 zone 盒子散点（理论上已不存在）
+// P1.6.1 人员数据链统一：
+//   DemoRoom(PersonRuntime) → WebSocket snapshot → demoStore → fireStore（2D）→ 本层（3D）
+//   统一字段：id / buildingId / floorId / zone / status / routeId / routePoints / progress / position
 //
-// 移动语义：
-//   后端位置 = 权威；3D 只做视觉插值（lerp），绝不自己算速度/路线
-//   人员沿 routePoints 折线移动 → 会转弯、经楼梯、跨层连续下降（不会瞬移、不会穿墙）
+// 权威来源（3D 只消费，绝不生产）：
+//   ① 后端下发的 routeId + routePoints + progress + position（demo / api 模式）
+//   ② 整栋楼方案（activeBuildingPlanId → 该人员 floor+zone 的 route）—— 未确认前的 A/B/C 预览
+//   ③ mock 模式 store 沿合法路线推进的 p._evac（本地模拟，同样不是 3D 生成）
+//
+// 禁止：3D 自行生成路线、速度或路径。
+//   位置目标点 = 权威 progress 沿权威折线求得的弧长点；3D 只对该目标点做视觉插值（lerp）。
+//   兜底：后端完全未提供坐标时才用 zone 盒内确定性散点（不是路线，也不是速度）。
 // ────────────────────────────────────────────────
 import * as THREE from 'three'
 import { personColor, seededRand, currentBuildingName } from './building3dUtils.js'
+// 人员统一契约（与后端 / 2D 同一套字段解析规则）
+import { positionOf } from '../../../shared/person/personRuntime.js'
 import {
   polylineFromSvg, arcLengths, pointAtArc, svgToStand, PERSON_Y,
 } from './coords.js'
@@ -57,7 +63,12 @@ export class PersonLayer3D {
   update(store) {
     if (!this.model.idx.entries.length) return
     const bldName = currentBuildingName(store)
-    const list = (store.persons || []).filter((p) => p && (p.building === bldName || !bldName))
+    const bldId = (store.dashboardView || {}).selectedBuildingId
+    // 统一字段过滤：buildingId 为主（与后端 PersonRuntime 同一个 id 空间），楼栋名为兼容回退
+    const list = (store.persons || []).filter((p) => p && (
+      (bldId && String(p.buildingId || '') === String(bldId))
+      || (!bldId && (p.building === bldName || !bldName))
+    ))
     const N = Math.min(list.length, MAX)
     this.mesh.count = N
 
@@ -72,9 +83,13 @@ export class PersonLayer3D {
         elapsed: 0,
         delay: seededRand(p.id + 'stagger') * STAGGER_MAX,
       }
+      // 统一字段（后端 / 2D / 3D 同一个 id、同一个 routeId）
+      d.id = p.id
+      d.buildingId = p.buildingId || ''
       d.floorId = p.floorId || p.floor
       d.zone = p.zone || p.area
       d.status = p.status
+      d.routeId = p.routeId === undefined ? null : p.routeId
       const rt = this._resolveRoute(store, p)
       if (rt.key !== d.routeKey) {
         d.routeKey = rt.key
@@ -103,25 +118,31 @@ export class PersonLayer3D {
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true
   }
 
-  /** 路线指纹（廉价比较用）：仅在后端路线 / 方案切换时才重建折线 */
+  /**
+   * 路线指纹（廉价比较用）：仅在后端路线 / 方案切换时才重建折线。
+   * 指纹一律携带「权威 routeId」（backend:<routeId>:<点数> / bp:<方案id>:<routeId>），
+   * 便于校验 2D / 3D / 后端使用的是同一条路线。
+   */
   _routeKey(p, store) {
     if (Array.isArray(p.routePoints) && p.routePoints.length > 1) {
-      return `backend:${(p.route || []).length}:${p.routePoints.length}:${(p.route || [])[0] || ''}`
+      return `backend:${p.routeId || 'none'}:${p.routePoints.length}`
     }
     if (p._evac && Array.isArray(p._evac.pts) && p._evac.pts.length > 1) {
       return `mock:${p._evac.pts.length}:${p._evac.pts[0].x}`
     }
     // 整栋楼方案（authoritative）：buildingPlanId + 该人员 floor+zone 的路线
     const bp = store.activeBuildingPlan
-    if (bp && !p.routeId) {
-      const r = store.buildingRouteOfPerson ? store.buildingRouteOfPerson(bp, { floorId: p.floorId || p.floor, zone: p.zone }) : null
+    if (bp) {
+      const r = store.buildingRouteOfPerson
+        ? store.buildingRouteOfPerson(bp, { floorId: p.floorId || p.floor, zone: p.zone || p.area })
+        : null
       if (r) return `bp:${bp.id}:${r.routeId}`
     }
-    return `bp:${bp ? bp.id : ''}:${p.routeId || ''}:${(store.routePlans || []).length}`
+    return `none:${p.routeId || ''}`
   }
 
   /**
-   * 路线来源（优先级即「权威性」顺序）：
+   * 路线来源（优先级即「权威性」顺序；3D 绝不自己算路线）：
    *   ① 后端 routePoints —— 已确认执行时后端下发的权威路线（demo / api 模式）
    *   ② mock 运行时 p._evac —— 本地演示沿合法路线推进的点列
    *   ③ 整栋楼方案（activeBuildingPlanId + 该人员 floor/zone 的 route）—— 未确认前的 A/B/C 预览，
@@ -133,7 +154,7 @@ export class PersonLayer3D {
     // ① 后端权威路线（demo / api 模式：WebSocket 下发）
     if (Array.isArray(p.routePoints) && p.routePoints.length > 1) {
       const pts = polylineFromSvg(this.model, p.routePoints, p.route || [], PERSON_Y)
-      if (pts.length > 1) return this._pack(pts, `backend:${p.route ? p.route.length : 0}:${pts.length}`)
+      if (pts.length > 1) return this._pack(pts, `backend:${p.routeId || 'none'}:${pts.length}`)
     }
     // ② mock 运行时路线（store 沿合法路线推进的点列，同层）
     if (p._evac && Array.isArray(p._evac.pts) && p._evac.pts.length > 1) {
@@ -190,13 +211,20 @@ export class PersonLayer3D {
     return this._staticPos(p)
   }
 
-  /** 非疏散态：直接取权威平面坐标（后端 x/y） */
+  /** 非疏散态：直接取权威平面坐标（统一字段 position，旧别名 x/y 由它派生） */
   _staticPos(p) {
-    const v = svgToStand(this.model, p.x, p.y, p.floorId || p.floor, PERSON_Y)
+    const pos = positionOf(p)
+    if (!pos) {
+      return this._fallbackPos({ zone: p.zone || p.area, floorId: p.floorId || p.floor, id: p.id })
+    }
+    const v = svgToStand(this.model, pos.x, pos.y, p.floorId || p.floor, PERSON_Y)
     return v || this._fallbackPos({ zone: p.zone || p.area, floorId: p.floorId || p.floor, id: p.id })
   }
 
-  /** 兜底：无坐标人员在所属区域盒内确定性散点（正常情况下不会走到这里） */
+  /**
+   * 兜底：后端/基线完全未提供坐标时才用「所属区域盒内确定性散点」。
+   * ⚠️ 仅生成静止位置，绝不生成路线、速度或路径（正常情况下不会走到这里）。
+   */
   _fallbackPos(d) {
     const zk = this.model.getZoneBox(d.floorId, d.zone)
     if (!zk) return new THREE.Vector3(0, -100, 0)
@@ -233,6 +261,7 @@ export class PersonLayer3D {
       const p = map.get(String(d.id))
       if (p) {
         d.status = p.status
+        d.routeId = p.routeId === undefined ? null : p.routeId
         // 路线变化（A/B/C 切换、后端重规划）→ 立即换线
         const key = this._routeKey(p, store)
         if (key !== d.routeKey) {

@@ -8,6 +8,8 @@ import { demoService } from '../services/demoService'
 import { useFireStore } from './fireStore'
 import { WS_MSG, DEMO_FLOW_STAGES } from '../api/contract'
 import { dataSource } from '../api'
+// 人员运行时统一契约（P1.6.1）：后端 → demoStore → fireStore → 2D/3D 同一套字段
+import { normalizePersonRuntime } from '../../shared/person/personRuntime.js'
 
 export const useDemoStore = defineStore('demo', () => {
   // ── 状态（全部来自后端） ──
@@ -95,7 +97,10 @@ export const useDemoStore = defineStore('demo', () => {
     if (snap.lighting !== undefined) lighting.value = snap.lighting
     if (snap.metrics !== undefined) metrics.value = snap.metrics
     if (snap.rescue !== undefined) rescue.value = snap.rescue
-    if (snap.persons !== undefined) persons.value = snap.persons || []
+    // 人员：统一契约（后端权威的 id / routeId / routePoints / progress / position）
+    if (snap.persons !== undefined) {
+      persons.value = (snap.persons || []).map((p) => normalizePersonRuntime(p))
+    }
     if (snap.devices !== undefined) devices.value = snap.devices || []
     if (snap.eventLog !== undefined) eventLog.value = snap.eventLog || []
     if (snap.evacuationSettled !== undefined) evacuationSettled.value = snap.evacuationSettled
@@ -111,8 +116,8 @@ export const useDemoStore = defineStore('demo', () => {
         applySnapshot(msg)
         break
       case WS_MSG.TICK:
-        // 实时疏散动态：只更新人员与指标
-        if (msg.persons) persons.value = msg.persons
+        // 实时疏散动态：只更新人员与指标（人员同样按统一契约规范化）
+        if (msg.persons) persons.value = msg.persons.map((p) => normalizePersonRuntime(p))
         if (msg.metrics) metrics.value = msg.metrics
         if (msg.evacuationSettled !== undefined) evacuationSettled.value = msg.evacuationSettled
         if (msg.seq !== undefined) seq.value = msg.seq
