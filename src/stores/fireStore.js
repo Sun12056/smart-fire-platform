@@ -48,7 +48,7 @@ import {
 import { EVACUATION_SCOPE, STRATEGY, zoneKeyOf } from '../../shared/evacuation/buildingEvacuationTypes.js'
 // 人员运行时统一契约（P1.6.1）：后端 / 2D / 3D 同一个 id、同一个 routeId
 import {
-  normalizePersonRuntime, assignPersonRuntime, isCanonicalPerson,
+  normalizePersonRuntime, assignPersonRuntime, isCanonicalPerson, pickRetainedCandidates,
 } from '../../shared/person/personRuntime.js'
 // 设备运行时统一契约（P1.6.2）：后端 / 2D / 3D 同一个设备 id、同一个楼层归属（buildingId/floorId/zone）
 import {
@@ -1035,20 +1035,13 @@ export const useFireStore = defineStore('fire', () => {
       evacRun.value = true
       return true
     }
-    // 演示滞留人员：火源区域 1 名（如 A区）+ 非火源区域 1 名（如 C区），共 2 人（不进入疏散动画，用于阶段5识别）
-    const floorPool = asArray(persons.value)
-      .filter((p) => p && (p.buildingId || fireBuildingId(p.building)) === feBuildingId && p.floorId === fe.floor && p.zone)
-    const strandedPicks = []
-    const inFireZone = floorPool.filter((p) => p.zone === fe.area)
-    if (inFireZone.length) strandedPicks.push(inFireZone[0])
-    const inCZone = floorPool.filter((p) => p.zone === 'C区' && !strandedPicks.includes(p))
-    if (inCZone.length) strandedPicks.push(inCZone[0])
-    if (strandedPicks.length < 2) {
-      floorPool.forEach((p) => {
-        if (strandedPicks.length >= 2 || strandedPicks.includes(p) || p.zone === fe.area) return
-        if (!p._evac || p._evacDone) strandedPicks.push(p)
-      })
-    }
+    // P2 确定性滞留（mock / 离线模式）：与后端共用同一份固定候选名单 RETAINED_CANDIDATES，
+    // 只允许 evacuating → stranded —— 严禁把已撤离或未参与疏散的人重新标记为滞留，
+    // 也不再按「火源区第一个 / C区第一个」这种顺序取人（否则同一份场景每次跑出来的人不一样）
+    const strandedPicks = pickRetainedCandidates(
+      asArray(persons.value).filter((p) => p && (p.buildingId || fireBuildingId(p.building)) === feBuildingId),
+      'evacuating',
+    )
     strandedPicks.forEach((p) => {
       p._stranded = true
       p.status = 'stranded'
@@ -1074,8 +1067,10 @@ export const useFireStore = defineStore('fire', () => {
     if (!fe) return
     stopEvacuationSim()
     const feBuildingId = fireBuildingId(fe.building)
+    // P2 确定性滞留：滞留名单来自整栋楼固定候选（可能是火警楼层之外的楼层），
+    // 因此这里按「火警楼栋」而不是「火警楼层」取，保证 2D 名单与 3D / 后端同一批人
     const floorPersons = asArray(persons.value)
-      .filter((p) => p && (p.buildingId || fireBuildingId(p.building)) === feBuildingId && p.floorId === fe.floor)
+      .filter((p) => p && (p.buildingId || fireBuildingId(p.building)) === feBuildingId)
     const stranded = floorPersons.filter((p) => p._stranded)
     strandedPersons.value = stranded.map((p) => ({
       id: p.id,
@@ -1098,9 +1093,10 @@ export const useFireStore = defineStore('fire', () => {
       pct: totalFloor > 0 ? Math.round(((totalFloor - strandedCount) / totalFloor) * 100) : 100,
     }
     if (strandedCount > 0) {
-      addOperationLog('发现滞留人员', '演示流程', `${fe.building} ${fe.floor} 发现滞留人员 ${strandedCount} 人`, 'danger')
+      addOperationLog('发现滞留人员', '演示流程',
+        `${fe.building} 发现滞留人员 ${strandedCount} 人：${stranded.map((p) => `${p.id}（${p.floorId}-${p.zone}）`).join('、')}`, 'danger')
     } else {
-      addOperationLog('人员疏散完成', '演示流程', `${fe.building} ${fe.floor} 全部人员安全撤离，未发现滞留人员`, 'success')
+      addOperationLog('人员疏散完成', '演示流程', `${fe.building} 全部人员安全撤离，未发现滞留人员`, 'success')
     }
     emergencyStage.value = 5
     refreshPersonStats()

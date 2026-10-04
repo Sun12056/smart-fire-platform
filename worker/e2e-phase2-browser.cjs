@@ -739,9 +739,99 @@ const cmd = (command, payload = {}) =>
     check('滞留人员未继续沿疏散路线前进（位置冻结）',
       strandedA.length > 0 && drift.every((d) => d >= 0 && d < 0.2), { drift, distToExit: strandedA.map((s) => s.distToExit) })
 
+    // ── P2 确定性滞留：后端 / 2D / 3D 同一个 id、同一个 status（3D 必须处于挂载态才比对）──
+    // 阶段切换会让视图在 buildings / floors 间切换（切回 buildings 时浮层关闭），
+    // 因此每轮比对前重新确认挂载态并重新取 __dtwin 实例
+    const readRetained = async () => {
+      await ensureTwinMounted()
+      return page.evaluate(() => {
+        const store = window.__demo.store
+        const demo = window.__demo.demoStore
+        const dt = window.__dtwin
+        const backendStranded = (demo.persons || []).filter((p) => p.status === 'stranded').map((p) => String(p.id))
+        const twoD = (store.strandedPersons || []).map((p) => String(p.id))
+        const three = (dt && dt.persons.data ? dt.persons.data : []).filter(Boolean)
+          .filter((d) => backendStranded.includes(String(d.id)))
+          .map((d) => ({ id: String(d.id), status: String(d.status) }))
+        const threeStatus = new Map(three.map((d) => [d.id, d.status]))
+        return {
+          backendStranded,
+          twoD,
+          threeIds: three.map((d) => d.id),
+          threeAllStranded: three.length > 0 && three.every((d) => d.status === 'stranded'),
+          backendSafeStill: (demo.persons || []).filter((p) => p.status === 'safe').length,
+          progress: (demo.persons || []).filter((p) => p.status === 'stranded').map((p) => p.progress),
+          threeStatusSample: [...threeStatus.entries()],
+        }
+      })
+    }
+    const retainedOk = (r) => JSON.stringify(r.backendStranded.slice().sort()) === JSON.stringify(['T134', 'T169'])
+      && r.threeAllStranded && r.backendSafeStill > 0
+    let retainedCheck = await readRetained()
+    for (let i = 0; i < 4 && !retainedOk(retainedCheck); i++) {
+      await page.waitForTimeout(1200)
+      retainedCheck = await readRetained()
+    }
+    check('滞留阶段 3D 仍处于挂载态（2D / 3D 比对前提）', await page.evaluate(
+      () => Boolean(window.__dtwin && window.__dtwin.scene.renderer.domElement.isConnected)))
+    check('滞留人员恰为固定候选名单 T134 / T169（不多不少）',
+      JSON.stringify(retainedCheck.backendStranded.slice().sort()) === JSON.stringify(['T134', 'T169']),
+      retainedCheck.backendStranded)
+    check('2D strandedPersons 与后端同一批滞留人员 ID',
+      JSON.stringify(retainedCheck.twoD.slice().sort()) === JSON.stringify(retainedCheck.backendStranded.slice().sort()),
+      [retainedCheck.twoD, retainedCheck.backendStranded])
+    check('3D 使用同一个滞留人员 ID 且 status = stranded',
+      retainedCheck.threeIds.length === retainedCheck.backendStranded.length && retainedCheck.threeAllStranded,
+      retainedCheck.threeStatusSample)
+    check('严禁 safe → stranded：已撤离人员仍是 safe', retainedCheck.backendSafeStill > 0, retainedCheck.backendSafeStill)
+    check('滞留人员进度未到终点（<1）',
+      retainedCheck.progress.length > 0 && retainedCheck.progress.every((v) => v < 1), retainedCheck.progress)
+
     await clickByText('推进下一步')
     check('⑥ 协同消防救援', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'RESCUE_COORDINATION'), 8000),
       await page.evaluate(() => window.__demo.demoStore.stage))
+    // 3D 状态由每帧 tick 从 fireStore 同步：阶段切换会让视图在 buildings / floors 之间切换
+    // （切回 buildings 时浮层会关闭），因此每轮比对前重新确认挂载态并重新取 __dtwin 实例
+    const readLocated = async () => {
+      await ensureTwinMounted()
+      return page.evaluate(async () => {
+        const ids = ['T134', 'T169']
+        const read = () => {
+          const demo = window.__demo.demoStore
+          const store = window.__demo.store
+          const dt = window.__dtwin
+          const pick = (list) => (list || []).filter((p) => ids.includes(String(p.id)))
+            .map((p) => [String(p.id), String(p.status)])
+          const three = (dt && dt.persons.data ? dt.persons.data : []).filter(Boolean)
+            .filter((d) => ids.includes(String(d.id)))
+            .map((d) => [String(d.id), String(d.status)])
+          return { backend: pick(demo.persons), twoD: pick(store.persons), three }
+        }
+        let out = read()
+        let waited = 0
+        while (waited < 3000 && !out.three.every(([, s]) => s === 'located')) {
+          await new Promise((r) => setTimeout(r, 200))
+          waited += 200
+          out = read()
+        }
+        out.waited = waited
+        out.events = (window.__demo.demoStore.eventLog || []).map((e) => e.action)
+        return out
+      })
+    }
+    const locatedOk = (s) => s.backend.length === 2 && s.three.length === 2
+      && s.backend.every(([, v]) => v === 'located') && s.twoD.every(([, v]) => v === 'located')
+      && s.three.every(([, v]) => v === 'located')
+    let locatedCheck = await readLocated()
+    for (let i = 0; i < 4 && !locatedOk(locatedCheck); i++) {
+      await page.waitForTimeout(1200)
+      locatedCheck = await readLocated()
+    }
+    check('救援阶段 3D 仍处于挂载态（2D / 3D 比对前提）', await page.evaluate(
+      () => Boolean(window.__dtwin && window.__dtwin.scene.renderer.domElement.isConnected)))
+    check('管理员确认后滞留人员 stranded → located（后端 / 2D / 3D 一致）', locatedOk(locatedCheck), locatedCheck)
+    check('确认位置动作进入事件流水（stranded → located 可追溯）',
+      locatedCheck.events.includes('确认滞留人员位置'), locatedCheck.events)
 
     await clickByText('推进下一步')
     check('处置完成 COMPLETED', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'COMPLETED'), 8000),

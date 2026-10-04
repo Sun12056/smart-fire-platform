@@ -20,6 +20,40 @@ export const PERSON_FIELDS = Object.freeze([
 
 export const DEFAULT_PERSON_STATUS = 'normal'
 
+// ── P2 确定性滞留机制（固定候选名单，后端 / 2D / 3D 共用同一份）──────────────────────
+// 背景：原先「取前 2 个未完成疏散的人」+「全部撤离完就在火源区兜底拦 2 人」，
+//       会把已经变成 safe 的人员重新标记为 stranded，演一次一个结果。
+// 契约（唯一权威）：
+//   ① 固定名单：只有 RETAINED_CANDIDATES 里的人员才可能被识别为滞留（禁止 slice(0,2) 之类取前 N 人）
+//   ② 状态迁移只能是 evacuating → stranded → located（管理员确认）→ rescued
+//      严禁 safe → stranded：已撤离的人永不再被标记为滞留
+//   ③ 后端（worker/src/demo/engine.ts）与前端 mock 路径共用本名单，
+//      保证后端 / 2D / 3D 看到的是同一批人员 id、同一个位置和同一个 status
+export const RETAINED_CANDIDATES = Object.freeze(['T134', 'T169'])
+
+/** 候选人在疏散阶段的推进上限（<1）：走到这里就停住，确保进入滞留识别时仍是 evacuating（不是 safe） */
+export const RETAINED_HOLD_PROGRESS = 0.62
+
+const RETAINED_INDEX = new Map(RETAINED_CANDIDATES.map((id, i) => [String(id), i]))
+
+/** 该人员是否在固定滞留候选名单内 */
+export function isRetainedCandidate(id) {
+  return RETAINED_INDEX.has(String(id))
+}
+
+/**
+ * 按名单顺序挑选滞留候选人（确定性：结果顺序与 RETAINED_CANDIDATES 一致，与传入数组顺序无关）
+ * @param {Array} persons 人员列表（统一契约对象，含 id / status）
+ * @param {string} [requireStatus] 只取该状态的人员；用于「只把 evacuating 的人置为 stranded」
+ */
+export function pickRetainedCandidates(persons, requireStatus) {
+  const byId = new Map()
+  ;(Array.isArray(persons) ? persons : []).forEach((p) => { if (p && p.id !== undefined) byId.set(String(p.id), p) })
+  return RETAINED_CANDIDATES
+    .map((id) => byId.get(id))
+    .filter((p) => Boolean(p) && (!requireStatus || p.status === requireStatus))
+}
+
 /** 楼栋名 ↔ id（与 src/mock/buildings.js、worker/src/seed.ts 一致） */
 export const BUILDING_NAME_TO_ID = Object.freeze({
   '1号楼': 'B001', '2号楼': 'B002', '3号楼': 'B003', '4号楼': 'B004',

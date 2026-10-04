@@ -202,6 +202,8 @@ export class DemoRoom extends DurableObject<Env> {
     const events = applyStageEffects(world, target, at, { ...payload, ...sideEffect })
     // 方案在引擎生成后落 D1（A/B/C 与执行中的方案都来自同一套规划器结果）
     await this.persistPlans(world, target, at)
+    // 人员级操作在引擎推演之后补写 operationLogs（逐人 id / 位置 / 状态迁移与实际一致）
+    await this.persistRetainedLogs(world, command, at)
     await this.saveWorld()
 
     // ③ 广播全量快照（阶段变化）
@@ -486,14 +488,12 @@ export class DemoRoom extends DurableObject<Env> {
       }
       case 'COMPLETE_EVACUATION': {
         // 方案生命周期置为 DONE（EvacuationPlan 生命周期，与 Demo 阶段互相独立）
-        await log('识别滞留人员', '疏散完成，自动识别滞留人员', 'warning')
+        // 操作日志（含逐人 id / 位置 / 状态迁移）在 applying stage effects 后补写，见 persistRetainedLogs()
         await evt('识别滞留人员', '进入 RETAINED_PERSONS 阶段', 'warning')
         break
       }
       case 'CONFIRM_RETAINED': {
-        const retained = retainedPersons(world)
-        await log('确认滞留人员位置', `已锁定 ${retained.length} 名滞留人员`, 'warning')
-        await evt('确认滞留人员位置', `${retained.length} 人待救援`, 'warning')
+        await evt('确认滞留人员位置', `${retainedPersons(world).length} 人待救援`, 'warning')
         break
       }
       case 'COMPLETE_RESCUE': {
@@ -501,12 +501,54 @@ export class DemoRoom extends DurableObject<Env> {
           await db.prepare('UPDATE alarms SET status = ?, progress = ?, handled_at = ?, handled_by = ?, updated_at = ? WHERE id = ?')
             .bind('resolved', 100, at, '消防救援队', at, world.alarmId).run()
         }
-        await log('协同救援完成', '滞留人员全部救出，处置闭环完成', 'success')
         await evt('协同救援完成', '处置闭环', 'success')
         break
       }
     }
     return extra
+  }
+
+  /**
+   * P2 确定性滞留：人员级操作必须在「仿真引擎推演出真实结果」之后写 operation_logs，
+   * 这样日志里的逐人 id / 楼层位置 / 状态迁移与实际完全一致（全部操作进 operationLogs）。
+   */
+  private async persistRetainedLogs(world: DemoWorld, command: DemoCommand, at: string): Promise<void> {
+    const db = this.env.DB
+    const write = (action: string, detail: string, level: string, operator: string) =>
+      db.prepare('INSERT INTO operation_logs (module, action, detail, operator, level, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind('演示流程', action, detail, operator, level, at).run()
+    const people = (list: PersonRuntime[]) =>
+      list.map((p) => `${p.id}（${p.floorId}-${p.zone}）`).join('、') || '无'
+
+    if (command === 'COMPLETE_EVACUATION') {
+      const stranded = retainedPersons(world)
+      await write(
+        '识别滞留人员',
+        stranded.length
+          ? `疏散结束：${stranded.length} 名滞留人员 ${people(stranded)}，状态 evacuating → stranded，位置冻结等待管理员确认`
+          : '疏散结束：固定候选名单内无滞留人员，全部人员已安全撤离',
+        stranded.length ? 'warning' : 'success',
+        '系统',
+      )
+    }
+    if (command === 'CONFIRM_RETAINED') {
+      const located = retainedPersons(world).filter((p) => p.status === 'located')
+      await write(
+        '确认滞留人员位置',
+        `管理员确认 ${located.length} 名滞留人员位置：${people(located)}，状态 stranded → located`,
+        'warning',
+        '管理员',
+      )
+    }
+    if (command === 'COMPLETE_RESCUE') {
+      const rescued = Object.values(world.persons).filter((p) => p.rescued)
+      await write(
+        '协同救援完成',
+        `滞留人员 ${rescued.length} 人已救出：${people(rescued)}，状态 located → rescued`,
+        'success',
+        '消防救援队',
+      )
+    }
   }
 
   // ── 广播 / 快照 ──

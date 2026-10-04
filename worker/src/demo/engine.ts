@@ -13,6 +13,10 @@ import {
   planBuildingStrategies, routeOfPerson, groupPersonsByZone, resolvePlanningZone,
 } from '../../../shared/evacuation/buildingEvacuationPlanner.js'
 import { zoneKeyOf } from '../../../shared/evacuation/buildingEvacuationTypes.js'
+// P2 确定性滞留：固定候选名单与推进上限（与前端 2D/3D 共用同一份人员 id）
+import {
+  pickRetainedCandidates, isRetainedCandidate, RETAINED_HOLD_PROGRESS,
+} from '../../../shared/person/personRuntime.js'
 
 // ── 确定性伪随机（同一 session 可复现，避免演示每次不一样） ──
 function seededRand(seedStr: string) {
@@ -81,6 +85,11 @@ export function resetWorld(world: DemoWorld, baseline: DemoBaseline, at: string)
   const fresh = createWorld(world.sessionId, world.scenario, baseline, at)
   fresh.seq = world.seq
   return fresh
+}
+
+/** 「T134（5F-A区）」形式的台账文案（操作日志 / 事件流逐人可追溯） */
+function personText(list: PersonRuntime[]): string {
+  return list.map((p) => `${p.id}（${p.floorId}-${p.zone}）`).join('、') || '无'
 }
 
 function pushEvent(world: DemoWorld, action: string, detail: string, level: DemoEvent['level'], at: string) {
@@ -277,13 +286,12 @@ export function applyStageEffects(
     }
 
     case 'RETAINED_PERSONS': {
-      // 整栋楼疏散：未完成撤离的人员来自全楼（不再只看火警楼层）
-      const unfinished = buildingPersons(world).filter((p) => p.evacuating && p.progress < 1)
-      let retained = unfinished
-      // 若所有人都已撤离，则按确定性规则在火源区保留人员，保证救援阶段有真实对象
-      if (!retained.length) {
-        retained = (fireZonePersons().length ? fireZonePersons() : buildingPersons(world)).slice(0, 2)
-      }
+      // ── P2 确定性滞留：固定候选名单 + evacuating → stranded ──
+      // 严禁 safe → stranded：只有「仍在疏散途中（status = evacuating）」的候选人才会被识别为滞留；
+      // 名单里已经撤离（safe）的人直接跳过，也不再有任何「取前 N 人 / 火源区兜底」的随机补齐逻辑。
+      const candidates = retainedCandidates(world)
+      const retained = retainedCandidates(world, 'evacuating')
+      const skipped = candidates.length - retained.length
       retained.forEach((p) => {
         p.evacuating = false
         p.retained = true
@@ -295,12 +303,23 @@ export function applyStageEffects(
       // ⚠️ LEGACY 镜像：旧结构状态置 DONE（历史），不影响任何路线计算
       world.legacyPlans.forEach((p) => { if (p.status === 'EXECUTING') p.status = 'DONE' })
       recomputeMetrics(world)
-      pushEvent(world, '识别滞留人员', `识别滞留人员 ${retained.length} 人，等待确认位置后协同救援`, 'warning', at)
+      pushEvent(
+        world,
+        '识别滞留人员',
+        retained.length
+          ? `识别滞留人员 ${retained.length} 人（${personText(retained)}），evacuating → stranded，位置冻结等待管理员确认`
+            + (skipped ? `；${skipped} 名候选人已撤离（safe），未被重新标记为滞留` : '')
+          : '固定候选名单内无滞留人员，全部人员已安全撤离',
+        retained.length ? 'warning' : 'success',
+        at,
+      )
       break
     }
 
     case 'RESCUE_COORDINATION': {
-      retainedPersons(world).forEach((p) => { p.status = 'located' })
+      // 管理员确认位置：stranded → located（只处理处于 stranded 的滞留人员）
+      const located = retainedPersons(world).filter((p) => p.status === 'stranded')
+      located.forEach((p) => { p.status = 'located' })
       world.rescue = {
         active: true,
         completed: false,
@@ -313,18 +332,21 @@ export function applyStageEffects(
         },
       }
       recomputeMetrics(world)
-      pushEvent(world, '确认滞留人员位置', `已锁定 ${retainedPersons(world).length} 名滞留人员位置，救援力量出动`, 'warning', at)
+      pushEvent(world, '确认滞留人员位置',
+        `已锁定 ${located.length} 名滞留人员位置（${personText(located)}），stranded → located`,
+        'warning', at)
       break
     }
 
     case 'COMPLETED': {
-      retainedPersons(world).forEach((p) => { p.status = 'rescued'; p.rescued = true })
+      const rescued = retainedPersons(world).filter((p) => p.status === 'located' || p.status === 'stranded')
+      rescued.forEach((p) => { p.status = 'rescued'; p.rescued = true })
       if (world.rescue.task) {
         world.rescue.task.status = '救援完成'
         world.rescue.completed = true
       }
       recomputeMetrics(world)
-      pushEvent(world, '协同救援完成', '滞留人员全部救出，处置闭环完成', 'success', at)
+      pushEvent(world, '协同救援完成', `滞留人员 ${rescued.length} 人已救出（${personText(rescued)}），located → rescued`, 'success', at)
       break
     }
   }
@@ -354,6 +376,16 @@ function remainingLength(pts: Array<{ x: number; y: number }>, waypoint: number,
 
 export function retainedPersons(world: DemoWorld): PersonRuntime[] {
   return Object.values(world.persons).filter((p) => p.retained && !p.rescued)
+}
+
+/**
+ * P2 确定性滞留候选名单（固定人员 id，见 shared/person/personRuntime）：
+ *  · requireStatus 省略 → 名单内所有实际存在的人员
+ *  · requireStatus = 'evacuating' → 只取「仍在疏散途中」的人，供 evacuating → stranded 使用
+ * 严禁在没有候选人的情况下用「取前 N 人 / 火源区兜底」补齐 —— 那会把已撤离的人重新标记为滞留。
+ */
+export function retainedCandidates(world: DemoWorld, requireStatus?: string): PersonRuntime[] {
+  return pickRetainedCandidates(Object.values(world.persons), requireStatus) as PersonRuntime[]
 }
 
 /** 整栋楼参与疏散的人员（疏散范围 = BUILDING，与火灾所在楼层无关） */
@@ -439,12 +471,20 @@ export function tickWorld(world: DemoWorld, at: string): boolean {
   let moving = 0
   for (const p of Object.values(world.persons)) {
     if (!p.evacuating) continue
+    // P2 确定性滞留：候选人在疏散途中只走到 RETAINED_HOLD_PROGRESS 就停住，
+    // 因此进入「滞留人员识别」阶段时状态必然是 evacuating —— 从根上杜绝 safe → stranded
+    const holdCandidate = isRetainedCandidate(p.id)
     // 沿规划路线的折线推进（waypoint 逐段前进），不再是「直线穿墙扑向出口」
     const pts = p.routePoints && p.routePoints.length ? p.routePoints : null
     if (pts) {
       // 演示节奏：每 tick（1s）推进约 55px，整条路线约 8~12s 走完
       const step = 55 + rand() * 20
       let remain = step
+      if (holdCandidate) {
+        const holdTotal = routeLength(pts)
+        const holdWalked = holdTotal - remainingLength(pts, p.waypoint, p.x, p.y)
+        remain = Math.min(remain, Math.max(0, RETAINED_HOLD_PROGRESS * holdTotal - holdWalked))
+      }
       while (remain > 0 && p.waypoint < pts.length - 1) {
         const cur = { x: p.x, y: p.y }
         const next = pts[p.waypoint + 1]
@@ -468,9 +508,13 @@ export function tickWorld(world: DemoWorld, at: string): boolean {
       p.progress = Math.min(1, Number((walked / Math.max(total, 1)).toFixed(3)))
       if (p.waypoint >= pts.length - 1) p.progress = 1
     } else {
-      p.progress = Math.min(1, p.progress + 0.08 + rand() * 0.06)
+      p.progress = Math.min(holdCandidate ? RETAINED_HOLD_PROGRESS : 1, p.progress + 0.08 + rand() * 0.06)
       p.x = Number((p.x + (p.targetX - p.x) * 0.12).toFixed(1))
       p.y = Number((p.y + (p.targetY - p.y) * 0.12).toFixed(1))
+    }
+    if (holdCandidate) {
+      // 候选人停在途中并保持 evacuating：位置冻结，不计入「疏散是否已稳定」
+      continue
     }
     if (p.progress >= 1) {
       p.evacuating = false

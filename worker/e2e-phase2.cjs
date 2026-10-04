@@ -157,18 +157,76 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   const moved = await waitFor(() => (messages.filter((m) => m.type === 'demo.tick').slice(-1)[0]?.metrics?.evacuated || 0) > 0, 15000)
   check('疏散推进产生已撤离人数', moved, messages.filter((m) => m.type === 'demo.tick').slice(-1)[0]?.metrics)
 
+  // ── 5.6 P2 确定性滞留机制 ──
+  // 候选名单与 shared/person/personRuntime RETAINED_CANDIDATES 保持一致（固定人选，不是「取前 N 人」）
+  const RETAINED_CANDIDATES = ['T134', 'T169']
+  const beforeEvacDone = messages.filter((m) => m.type === 'demo.tick').slice(-1)[0]?.persons || []
+  const beforeById = new Map(beforeEvacDone.map((p) => [String(p.id), p]))
+
   const r5 = await cmd('COMPLETE_EVACUATION')
   check('COMPLETE_EVACUATION → RETAINED_PERSONS', r5.status === 200 && r5.body?.stage === 'RETAINED_PERSONS', r5.body?.stage)
-  check('识别出滞留人员', (r5.body?.metrics?.retained || 0) > 0, r5.body?.metrics)
   check('方案置为 DONE', (r5.body?.buildingPlans || []).some((p) => p.status === 'DONE'))
+  console.log('\n[5.2] P2 确定性滞留（固定候选名单 / evacuating → stranded / 位置冻结）')
+  const stranded = (r5.body?.persons || []).filter((p) => p.status === 'stranded')
+  check('识别出滞留人员', stranded.length > 0, (r5.body?.metrics || {}))
+  check('滞留人员恰好等于固定候选名单（不多不少）',
+    JSON.stringify(stranded.map((p) => String(p.id)).sort()) === JSON.stringify([...RETAINED_CANDIDATES].sort()),
+    stranded.map((p) => String(p.id)))
+  check('严禁 safe → stranded：滞留人员在滞留识别前均处于 evacuating',
+    stranded.length > 0 && stranded.every((p) => beforeById.get(String(p.id))?.status === 'evacuating'),
+    stranded.map((p) => [p.id, beforeById.get(String(p.id))?.status]))
+  check('已撤离人员（safe）未被重新标记为滞留',
+    beforeEvacDone.filter((p) => p.status === 'safe')
+      .every((p) => (r5.body?.persons || []).find((q) => String(q.id) === String(p.id))?.status === 'safe'),
+    beforeEvacDone.filter((p) => p.status === 'safe').length)
+  check('滞留人员 progress < 1（未抵达出口）', stranded.every((p) => p.progress < 1), stranded.map((p) => p.progress))
+  check('滞留人员 movementType = static', stranded.every((p) => p.movementType === 'static'), stranded.map((p) => p.movementType))
 
+  // 位置冻结：进入 RETAINED_PERSONS 后不再有任何 tick 推进坐标
+  const frozenAt = stranded.map((p) => ({ id: String(p.id), x: p.position?.x, y: p.position?.y }))
+  const stateA = await api(`/api/v1/demo/state?sessionId=${SESSION}`)
+  await waitFor(() => true, 3000)
+  const stateB = await api(`/api/v1/demo/state?sessionId=${SESSION}`)
+  const posOf = (body, status = 'stranded') => (body?.persons || [])
+    .filter((p) => String(p.status) === status)
+    .map((p) => ({ id: String(p.id), x: p.position?.x, y: p.position?.y }))
+  check('滞留人员进入 stranded 后位置冻结（两次快照坐标完全一致）',
+    JSON.stringify(posOf(stateA.body)) === JSON.stringify(posOf(stateB.body))
+    && JSON.stringify(posOf(stateB.body)) === JSON.stringify(frozenAt),
+    [posOf(stateA.body), posOf(stateB.body)])
+
+  // 管理员确认位置：stranded → located
   const r6 = await cmd('CONFIRM_RETAINED')
   check('CONFIRM_RETAINED → RESCUE_COORDINATION', r6.status === 200 && r6.body?.stage === 'RESCUE_COORDINATION', r6.body?.stage)
+  check('管理员确认后滞留人员 stranded → located',
+    stranded.every((p) => (r6.body?.persons || []).find((q) => String(q.id) === String(p.id))?.status === 'located'),
+    stranded.map((p) => (r6.body?.persons || []).find((q) => String(q.id) === String(p.id))?.status))
+  check('located 人员位置保持不变（确认位置不改变坐标）',
+    JSON.stringify(posOf(r6.body, 'located')) === JSON.stringify(frozenAt), [posOf(r6.body, 'located'), frozenAt])
   check('生成救援任务', Boolean(r6.body?.rescue?.task), r6.body?.rescue)
 
   const r7 = await cmd('COMPLETE_RESCUE')
   check('COMPLETE_RESCUE → COMPLETED', r7.status === 200 && r7.body?.stage === 'COMPLETED', r7.body?.stage)
   check('滞留人员已获救', (r7.body?.metrics?.rescued || 0) > 0, r7.body?.metrics)
+  check('获救人员均为固定候选名单内的人员',
+    JSON.stringify((r7.body?.persons || []).filter((p) => p.status === 'rescued').map((p) => String(p.id)).sort())
+      === JSON.stringify([...RETAINED_CANDIDATES].sort()),
+    (r7.body?.persons || []).filter((p) => p.status === 'rescued').map((p) => p.id))
+
+  // 全部演示操作写入 operationLogs（逐人 id / 楼层位置 / 状态迁移可追溯）
+  const demoLogs = await api('/api/v1/operation-logs?module=演示流程&limit=50')
+  const logRows = demoLogs.body || []
+  const logText = logRows.map((l) => `${l.action} ${l.detail}`).join(' | ')
+  check('全部阶段操作均已写入 operationLogs',
+    ['发现火灾', '启动应急响应', '生成疏散方案', '确认疏散路径', '识别滞留人员', '确认滞留人员位置', '协同救援完成']
+      .every((a) => logRows.some((l) => l.action === a)),
+    logRows.map((l) => l.action))
+  check('识别滞留人员日志含逐人 id 与 evacuating → stranded',
+    logText.includes('evacuating → stranded') && RETAINED_CANDIDATES.every((id) => logText.includes(id)),
+    logRows.filter((l) => l.action === '识别滞留人员').map((l) => l.detail))
+  check('确认位置日志含 stranded → located 与操作员',
+    logText.includes('stranded → located') && logRows.some((l) => l.action === '确认滞留人员位置' && l.operator === '管理员'),
+    logRows.filter((l) => l.action === '确认滞留人员位置').map((l) => [l.operator, l.detail]))
 
   // ── 5.5 LEGACY 单区域方案校验（仅兼容保留，不再是 Demo 疏散方案来源） ──
   console.log('\n[5.5] LEGACY 单火灾区域方案（仅历史/兼容）')

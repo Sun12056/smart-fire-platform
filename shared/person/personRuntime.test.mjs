@@ -6,12 +6,18 @@
  *   · 旧别名（building / floor / area / x / y）由统一字段派生，不反向写回
  *   · 位置与进度来自权威数据，缺失时不为 0 假值而是 null / 0（可判定）
  *   · 后端 DTO → store 合并 → 2D/3D 消费 全程同一个 id 与同一个 routeId
+ *
+ * 校验（P2 确定性滞留）：
+ *   · RETAINED_CANDIDATES 固定人选：只认定为候选人员的 id 才可能成为滞留人员
+ *   · evacuating → stranded：已撤离（safe）的候选人不会被重新挑出
+ *   · 不存在「取前 N 人」兜底：名单缺人时结果为空
  */
 import {
   PERSON_FIELDS, BUILDING_NAME_TO_ID, BUILDING_ID_TO_NAME,
   normalizePersonRuntime, toPersonRuntimeList, assignPersonRuntime,
   isCanonicalPerson, routeIdBelongsToPlan, personZoneKey,
   positionOf, progressOf, routePointsOf, floorIdOf, zoneOf, buildingIdOf,
+  RETAINED_CANDIDATES, RETAINED_HOLD_PROGRESS, isRetainedCandidate, pickRetainedCandidates,
 } from './personRuntime.js'
 
 let pass = 0, fail = 0
@@ -136,7 +142,36 @@ check('不同方案 routeId 不互相认领', routeIdBelongsToPlan('PLAN-A:5F:A�
 check('personZoneKey = floorId:zone', personZoneKey(wire[0]) === '5F:A区' && personZoneKey(wire[1]) === '4F:C区',
   [personZoneKey(wire[0]), personZoneKey(wire[1])])
 
-// ── 6. 确定性（同一输入多次规范化结果一致，禁止随机） ──
+// ── 6.5 P2 确定性滞留候选名单（固定人选，严禁 safe → stranded）──
+console.log('\n[6.5] P2 确定性滞留候选名单')
+const RETAINED_EXPECTED = ['T134', 'T169']
+check('滞留候选名单固定且只包含指定人选',
+  JSON.stringify([...RETAINED_CANDIDATES]) === JSON.stringify(RETAINED_EXPECTED), RETAINED_CANDIDATES)
+check('名单冻结不可运行时篡改', Object.isFrozen(RETAINED_CANDIDATES))
+check('推进上限严格小于 1（候选人到不了出口 → 不会变 safe）',
+  RETAINED_HOLD_PROGRESS > 0 && RETAINED_HOLD_PROGRESS < 1, RETAINED_HOLD_PROGRESS)
+check('isRetainedCandidate 只认名单内人员',
+  RETAINED_EXPECTED.every((id) => isRetainedCandidate(id)) && !isRetainedCandidate('T135') && !isRetainedCandidate('T300'))
+
+// 一次「疏散中」的人员快照：T134 仍在撤离、T169 已撤离（safe）、T135 仍在撤离但不是候选人
+const evacPool = [
+  { id: 'T135', buildingId: 'B003', floorId: '5F', zone: 'A区', status: 'evacuating', progress: 0.5 },
+  { id: 'T134', buildingId: 'B003', floorId: '5F', zone: 'A区', status: 'evacuating', progress: RETAINED_HOLD_PROGRESS },
+  { id: 'T169', buildingId: 'B003', floorId: '6F', zone: 'A区', status: 'safe', progress: 1 },
+]
+const picks = pickRetainedCandidates(evacPool, 'evacuating')
+check('只从名单内挑选，且与传入数组顺序无关（按名单顺序输出）',
+  picks.map((p) => p.id).join(',') === 'T134' && picks.length === 1, picks.map((p) => p.id))
+check('已撤离（safe）的候选人不会被挑出 → 严禁 safe → stranded',
+  pickRetainedCandidates(evacPool, 'evacuating').every((p) => p.status === 'evacuating'))
+check('非候选人即使仍在疏散也不会被挑出为滞留',
+  pickRetainedCandidates(evacPool).every((p) => isRetainedCandidate(p.id)), pickRetainedCandidates(evacPool).map((p) => p.id))
+check('名单内人员不存在时结果为空（不再「取前 N 人」兜底）',
+  pickRetainedCandidates([{ id: 'T999', status: 'evacuating' }], 'evacuating').length === 0)
+const repeated = JSON.stringify(pickRetainedCandidates(evacPool, 'evacuating'))
+check('同一输入多次挑选结果一致（确定性）', repeated === JSON.stringify(pickRetainedCandidates(evacPool, 'evacuating')))
+
+// ── 7. 确定性（同一输入多次规范化结果一致，禁止随机） ──
 console.log('\n[6] 确定性')
 const a1 = JSON.stringify(normalizePersonRuntime(backendPerson))
 const a2 = JSON.stringify(normalizePersonRuntime(backendPerson))
