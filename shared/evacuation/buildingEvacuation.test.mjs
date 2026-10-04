@@ -8,7 +8,10 @@
  *   · 所有路线到 1F 安全出口、不穿墙、不经火区、跨层必经楼梯
  *   · routeId 与 routeOfPerson 一致（后端下发与前端/3D 消费同源）
  */
-import { planBuildingStrategies, planBuildingEvacuation, groupPersonsByZone, routeOfPerson, validateBuildingEvacuationPlan } from './buildingEvacuationPlanner.js'
+import {
+  planBuildingStrategies, planBuildingEvacuation, groupPersonsByZone, routeOfPerson,
+  validateBuildingEvacuationPlan, fireBlockSets,
+} from './buildingEvacuationPlanner.js'
 import { EVACUATION_SCOPE, STRATEGY, RISK_RANK, zoneKeyOf } from './buildingEvacuationTypes.js'
 import { buildBuildingGraph } from './routeGraph.js'
 import { validateRoute } from './routeValidator.js'
@@ -137,7 +140,29 @@ plans.forEach((p) => {
   console.log(`      ${p.name} · ${s.zoneCount}区/${s.personCount}人 · 最慢 ${s.maxEstimatedTime}s · 总距离 ${s.totalDistance}m · 风险 ${s.riskLevel} · 出口 ${s.exitLabels.join('、')}`)
 })
 
-console.log('\n[8] 边界')
+console.log('\n[8] 每条路线都通过既有 routeValidator（P1.5.5 回归）')
+plans.forEach((p) => {
+  const bad = p.routes.filter((r) => r.valid !== true || (r.reasons || []).length > 0)
+  check(`${p.id} 所有路由 valid 且无 reasons`, bad.length === 0, bad.slice(0, 2).map((r) => [r.routeId, r.reasons]))
+  const notExit = p.routes.filter((r) => !/^1F:EXIT_/.test(r.exitId) || r.nodes[r.nodes.length - 1] !== r.exitId)
+  check(`${p.id} 所有路线终点都是 1F 安全出口`, notExit.length === 0, notExit.slice(0, 2).map((r) => [r.routeId, r.exitId]))
+  const noStair = p.routes.filter((r) => r.floorId !== '1F' && !r.nodes.some((n) => /STAIR_/.test(n)))
+  check(`${p.id} 非 1F 路线跨层必经楼梯`, noStair.length === 0, noStair.map((r) => r.routeId))
+  const throughFire = p.routes.filter((r) => r.nodes.slice(1).includes('5F:A_CENTER'))
+  check(`${p.id} 路线不经过火源房间（起点除外）`, throughFire.length === 0, throughFire.map((r) => r.routeId))
+  // 逐条用既有 routeValidator 复核（不依赖规划器自证；火灾障碍按该区域推导）
+  const revalidated = p.routes.filter((r) => {
+    // 与规划器同口径：火源障碍按该路线所属区域推导（fireBlockSets）
+    const blocked = fireBlockSets(graph, fire, r.floorId, r.zone, r.startNode).blockedNodes
+    return !validateRoute(r, { graph, blockedNodes: blocked }).valid
+  })
+  check(`${p.id} 逐条 routeValidator 复核通过`, revalidated.length === 0, revalidated.slice(0, 2).map((r) => r.routeId))
+})
+check('1F~6F 每个有人区域都拿到路线',
+  plans.every((p) => groups.every((g) => Boolean(p.routesByZone[zoneKeyOf(g.floorId, g.zone)]))),
+  groups.map((g) => g.zoneKey))
+
+console.log('\n[9] 边界')
 const emptyRes = planBuildingEvacuation({ buildingId: BUILDING_ID, persons: [], fire, strategy: STRATEGY.BALANCED, graph })
 check('无人员时不抛错（routes 为空且校验不通过）', emptyRes.plan.routes.length === 0 && emptyRes.plan.valid === false)
 const partial = planBuildingEvacuation({

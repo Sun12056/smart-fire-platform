@@ -111,14 +111,21 @@ export class PersonLayer3D {
     if (p._evac && Array.isArray(p._evac.pts) && p._evac.pts.length > 1) {
       return `mock:${p._evac.pts.length}:${p._evac.pts[0].x}`
     }
-    return `plan:${store.activeRoutePlanId || ''}:${(store.routePlans || []).length}`
+    // 整栋楼方案（authoritative）：buildingPlanId + 该人员 floor+zone 的路线
+    const bp = store.activeBuildingPlan
+    if (bp && !p.routeId) {
+      const r = store.buildingRouteOfPerson ? store.buildingRouteOfPerson(bp, { floorId: p.floorId || p.floor, zone: p.zone }) : null
+      if (r) return `bp:${bp.id}:${r.routeId}`
+    }
+    return `bp:${bp ? bp.id : ''}:${p.routeId || ''}:${(store.routePlans || []).length}`
   }
 
   /**
    * 路线来源（优先级即「权威性」顺序）：
    *   ① 后端 routePoints —— 已确认执行时后端下发的权威路线（demo / api 模式）
    *   ② mock 运行时 p._evac —— 本地演示沿合法路线推进的点列
-   *   ③ store 方案（activeRoutePlanId）—— 未确认前的 A/B/C 预览，与 2D 平面图同源
+   *   ③ 整栋楼方案（activeBuildingPlanId + 该人员 floor/zone 的 route）—— 未确认前的 A/B/C 预览，
+   *      与 2D 平面图、RouteLayer3D 完全同源；不使用 routeMatrix.perZone（只读投影）
    * 阶段 3 未确认 → 走 ③，点选 A/B/C 时 3D 立即换线预览；
    * 阶段 4 执行中 → 走 ①，后端位置权威，避免与服务器状态脱节。
    */
@@ -138,19 +145,23 @@ export class PersonLayer3D {
       )
       if (pts.length > 1) return this._pack(pts, `mock:${p._evac.pts.length}:${p._evac.pts[0].x}`)
     }
-    // ③ store 方案（activeRoutePlanId 优先；与 2D 平面图、RouteLayer3D 完全同源）
-    const plans = store.routePlans || []
-    const m = store.routeMatrix
-    const zone = p.zone || p.area
-    const info = m && m.perZone ? m.perZone[zone] : null
-    const plan = (info && info.plans ? info.plans : [])
-      .find((pp) => pp && pp.id === store.activeRoutePlanId)
-      || (info && info.plans ? info.plans : []).find((pp) => pp && pp.id === info.recommendedId)
-      || (info && info.plans ? info.plans[0] : null)
-      || plans.find((pp) => pp && pp.id === store.activeRoutePlanId)
-    if (plan && Array.isArray(plan.path) && plan.path.length > 1) {
-      const pts = polylineFromSvg(this.model, plan.path, plan.path.map((n) => n.id), PERSON_Y)
-      if (pts.length > 1) return this._pack(pts, `plan:${plan.id}`)
+    // ③ 整栋楼方案（未确认前的 A/B/C 预览）：activeBuildingPlanId 唯一决定
+    //    ⚠️ 不读 store.routeMatrix.perZone —— 它只是只读兼容投影，不能驱动 3D 人员路线
+    const bp = store.activeBuildingPlan
+    if (bp) {
+      const route = store.buildingRouteOfPerson
+        ? store.buildingRouteOfPerson(bp, { floorId: p.floorId || p.floor, zone: p.zone || p.area })
+        : null
+      if (route && Array.isArray(route.points) && route.points.length > 1) {
+        const pts = polylineFromSvg(this.model, route.points, route.nodes || [], PERSON_Y)
+        if (pts.length > 1) return this._pack(pts, `bp:${bp.id}:${route.routeId}`)
+      }
+      // 该人员所属区域没有路线（如走廊已归并）：回退到同层任意一条同方案路线做预览
+      const fallback = (bp.routes || []).find((r) => r && r.floorId === (p.floorId || p.floor))
+      if (fallback && Array.isArray(fallback.points) && fallback.points.length > 1) {
+        const pts = polylineFromSvg(this.model, fallback.points, fallback.nodes || [], PERSON_Y)
+        if (pts.length > 1) return this._pack(pts, `bp:${bp.id}:${fallback.routeId}`)
+      }
     }
     return { key: 'none', pts: [], acc: [], total: 0 }
   }

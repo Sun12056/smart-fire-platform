@@ -60,7 +60,7 @@
       <div v-if="demoStore.error" class="demo-error">{{ demoStore.error }}</div>
       <!-- 阶段 3：先选方案，再确认路径（禁止跳过确认直接进入智能疏散） -->
       <div v-if="isRoutePlanning" class="plan-picker">
-        <div class="section-label">选择整栋楼疏散方案（PLAN-A/B/C）</div>
+        <div class="section-label">整栋楼疏散方案（A 综合均衡 / B 快速疏散 / C 安全优先）</div>
         <button
           v-for="plan in planOptions"
           :key="plan.id"
@@ -70,10 +70,12 @@
         >
           <span class="plan-name">{{ plan.name }}</span>
           <span class="plan-meta">{{ planMeta(plan) }}</span>
-          <span class="plan-risk" :class="plan.riskLevel">{{ riskText(plan.riskLevel) }}</span>
+          <span class="plan-risk" :class="riskLevelOf(plan)">{{ riskText(riskLevelOf(plan)) }}</span>
         </button>
         <div v-if="buildingSummary" class="plan-scope-tip">
-          疏散范围：整栋楼（{{ buildingSummary.zoneCount }} 个区域 / {{ buildingSummary.personCount }} 人 / {{ buildingSummary.floors.join('、') }}）
+          疏散范围：整栋楼（覆盖 {{ buildingSummary.floors.length }} 层 / {{ buildingSummary.zoneCount }} 个区域
+          / {{ buildingSummary.personCount }} 人 / {{ buildingSummary.routeCount }} 条路线
+          / 出口 {{ buildingSummary.exitLabels.join('、') || '—' }} / 最慢 {{ buildingSummary.maxEstimatedTime }}s）
         </div>
       </div>
       <div class="demo-flow-actions">
@@ -125,24 +127,21 @@ const linkText = computed(() => LINK_TEXT[demoStore.wsStatus] || demoStore.wsSta
 const isRoutePlanning = computed(() => dataSource.isDemo && demoStore.stage === 'ROUTE_PLANNING')
 const RISK_TEXT = { LOW: '低风险', MEDIUM: '中风险', HIGH: '高风险' }
 const riskText = (lv) => RISK_TEXT[lv] || lv
+// 唯一方案来源：整栋楼方案（PLAN-A/B/C = 均衡/快速/安全）
 function isPlanSelected(id) {
-  return (demoStore.selectedPlanId || demoStore.activeBuildingPlanId || demoStore.activePlanId) === id
+  return (demoStore.selectedPlanId || demoStore.activeBuildingPlanId) === id
 }
-// 整栋楼方案优先（PLAN-A/B/C = 均衡/快速/安全），没有时回退旧的火源区候选
-const planOptions = computed(() => (
-  demoStore.buildingPlans && demoStore.buildingPlans.length ? demoStore.buildingPlans : demoStore.plans
-))
+const planOptions = computed(() => demoStore.buildingPlans || [])
 const buildingSummary = computed(() => {
-  const list = demoStore.buildingPlans || []
+  const list = planOptions.value
   const active = list.find((p) => p.id === (demoStore.selectedPlanId || demoStore.activeBuildingPlanId)) || list[0]
   return active && active.summary ? active.summary : null
 })
+const riskLevelOf = (plan) => (plan && plan.summary ? plan.summary.riskLevel : plan?.riskLevel)
 function planMeta(plan) {
-  if (plan && plan.summary) {
-    const s = plan.summary
-    return `${s.zoneCount}区/${s.personCount}人 · 最慢 ${s.maxEstimatedTime}s · ${s.exitLabels.join('、')}`
-  }
-  return `${plan.exitLabel} · ${plan.distance}m · ${plan.estimatedTime}s`
+  const s = plan && plan.summary
+  if (!s) return '—'
+  return `${s.floors.length}层 · ${s.zoneCount}区 · ${s.personCount}人 · ${s.routeCount}条路线 · 最慢 ${s.maxEstimatedTime}s`
 }
 const flowBtnText = computed(() => {
   if (!platformStore.demoFlowActive) return '启动演示流程'

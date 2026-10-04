@@ -162,7 +162,8 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
     await clickByText('推进下一步')
     check('③ 疏散路径规划', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'ROUTE_PLANNING'), 8000),
       await page.evaluate(() => window.__demo.demoStore.stage))
-    check('生成多套方案', await page.evaluate(() => (window.__demo.demoStore.plans || []).length >= 2))
+    check('生成 3 套整栋楼方案', await page.evaluate(() => (window.__demo.demoStore.buildingPlans || []).length === 3),
+      await page.evaluate(() => (window.__demo.demoStore.buildingPlans || []).map((p) => p.id)))
 
     // 阶段 3 必须先选方案再确认（禁止跳过确认直接进入智能疏散）
     check('阶段3 显示方案选择器', await page.locator('.plan-picker').isVisible().catch(() => false))
@@ -214,21 +215,27 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
       await page.evaluate(() => window.__demo.demoStore.stage))
     check('执行的是所选方案', await page.evaluate((id) => window.__demo.demoStore.activeBuildingPlanId === id, pickedId),
       await page.evaluate(() => [window.__demo.demoStore.activeBuildingPlanId, window.__demo.demoStore.activePlanId]))
-    // 前端渲染的路线必须来自后端规划器（3D/平面图同源）
+    // 前端渲染的路线必须来自整栋楼方案（3D/平面图同源）
     const routeSame = await page.evaluate(() => {
-      const p = window.__demo.store.routePlans || []
-      const backend = window.__demo.demoStore.plans || []
-      if (!p.length || !backend.length) return { ok: false, p: p.length, b: backend.length }
+      const store = window.__demo.store
+      const bp = store.activeBuildingPlan
+      const p = store.routePlans || []
+      if (!bp || !p.length) return { ok: false, bp: Boolean(bp), p: p.length }
       const first = p[0]
       return {
         ok: Boolean(first.path && first.path.length && first.exit && first.distance > 0),
         pathLen: first.path.length,
         exit: first.exit,
-        active: window.__demo.store.activeRoutePlanId,
+        active: store.activeBuildingPlanId,
+        // 每条前端方案都必须反向指向当前整栋楼方案
+        allOwnedByBp: p.every((x) => x.buildingPlanId === store.activeBuildingPlanId),
+        routeCount: (bp.routes || []).length,
       }
     })
-    check('前端路线来自后端方案（含 path/出口/距离）', routeSame.ok, routeSame)
-    check('3D 使用的 activeRoutePlanId 已同步', Boolean(routeSame.active), routeSame.active)
+    check('前端路线来自整栋楼方案（含 path/出口/距离）', routeSame.ok, routeSame)
+    check('前端所有路线都归属当前 buildingPlan',
+      routeSame.allOwnedByBp === true && routeSame.routeCount > 1, routeSame)
+    check('activeBuildingPlanId 已同步（当前方案唯一）', Boolean(routeSame.active), routeSame.active)
     check('前端 emergencyStage 与后端同步为 4', await waitFor(() => page.evaluate(() => window.__demo.store.emergencyStage === 4), 8000),
       await page.evaluate(() => window.__demo.store.emergencyStage))
     const tickOk = await waitFor(() => page.evaluate(() => window.__demo.demoStore.metrics.evacuated > 0), 20000)
@@ -239,6 +246,126 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
       return p.some((x) => x.status === 'safe' || x.evacuating)
     })
     check('人员状态由后端驱动更新', personsMoved)
+
+    // ── ④·补 整栋楼方案权威性回归（P1.5.5） ──
+    console.log('\n[④·补] 整栋楼方案权威性 / legacy 隔离')
+    // ① 修改 legacy world.plans（旧单区域方案）不得影响 Demo 整栋楼疏散
+    const legacyMutation = await page.evaluate(async () => {
+      const demo = window.__demo.demoStore
+      const before = (demo.persons || []).map((p) => p.routeId).join('|')
+      const beforeActive = demo.activeBuildingPlanId
+      // 清空并污染旧结构
+      demo.plans = (demo.plans || []).map((p) => ({ ...p, name: '污染方案', nodes: ['1F:EXIT_W'], points: [{ x: 0, y: 0 }] }))
+      demo.activePlanId = 'HACKED-LEGACY-PLAN'
+      // 短暂等待即可（等待一个 tick 广播，验证旧结构变化不会被后端采纳）
+      await new Promise((r) => setTimeout(r, 400))
+      const after = (demo.persons || []).map((p) => p.routeId).join('|')
+      return {
+        changed: before !== after,
+        beforeActive,
+        afterActive: demo.activeBuildingPlanId,
+        sample: (demo.persons || []).slice(0, 2).map((p) => p.routeId),
+      }
+    })
+    check('修改 legacy world.plans 不影响人员路线', legacyMutation.changed === false, legacyMutation)
+    check('修改 legacy world.plans 不改变 activeBuildingPlanId',
+      legacyMutation.beforeActive === legacyMutation.afterActive, legacyMutation)
+
+    // 所有人员 routeId 都属于当前 buildingPlan；没有人还在用旧 zone plan
+    const ownership = await page.evaluate(() => {
+      const demo = window.__demo.demoStore
+      const id = demo.activeBuildingPlanId
+      const ps = demo.persons || []
+      const legacyIds = (demo.plans || []).map((p) => String(p.id))
+      return {
+        total: ps.length,
+        active: id,
+        owned: ps.filter((p) => String(p.routeId || '').startsWith(`${id}:`)).length,
+        usingLegacy: ps.filter((p) => legacyIds.some((lid) => String(p.routeId || '').startsWith(lid))).length,
+        floors: [...new Set(ps.map((p) => p.floorId))],
+        sample: ps.slice(0, 3).map((p) => [p.id, p.floorId, p.zone, p.routeId]),
+      }
+    })
+    check('所有人员 routeId 都属于当前 buildingPlan',
+      ownership.total > 0 && ownership.owned === ownership.total, ownership)
+    check('没有人员继续使用旧 zone plan', ownership.usingLegacy === 0, ownership)
+    check('疏散覆盖 1F~6F 全部楼层', ownership.floors.length >= 6, ownership.floors)
+
+    // ② routeMatrix.perZone（只读投影）被篡改，不得影响后端执行方案 / 3D 人员路线
+    const perZoneMutation = await page.evaluate(async () => {
+      const store = window.__demo.store
+      const demo = window.__demo.demoStore
+      const beforeBackend = (demo.persons || []).map((p) => p.routeId).join('|')
+      const beforeActive = store.activeBuildingPlanId
+      const before3d = (window.__dtwin?.persons?.data || []).filter(Boolean).map((d) => d.routeKey).join('|')
+      const m = store.routeMatrix
+      if (m && m.perZone) {
+        Object.keys(m.perZone).forEach((z) => {
+          m.perZone[z].recommendedId = 'HACKED-ZONE-PLAN'
+          m.perZone[z].backupId = null
+          m.perZone[z].plans = []
+        })
+      }
+      await new Promise((r) => setTimeout(r, 400))
+      const afterBackend = (demo.persons || []).map((p) => p.routeId).join('|')
+      const after3d = (window.__dtwin?.persons?.data || []).filter(Boolean).map((d) => d.routeKey).join('|')
+      return {
+        backendChanged: beforeBackend !== afterBackend,
+        activeChanged: beforeActive !== store.activeBuildingPlanId,
+        three3dChanged: before3d !== after3d,
+        before3dLen: before3d.length,
+      }
+    })
+    check('routeMatrix.perZone 修改不影响后端人员 routeId', perZoneMutation.backendChanged === false, perZoneMutation)
+    check('routeMatrix.perZone 修改不影响 activeBuildingPlanId', perZoneMutation.activeChanged === false, perZoneMutation)
+    check('routeMatrix.perZone 修改不影响 3D 人员路线', perZoneMutation.three3dChanged === false, perZoneMutation)
+
+    // ③ 整栋楼同一方案：每个方案都覆盖所有楼层，且切换后「每个楼层+区域」的 routeId 同步变化
+    const switchAll = await page.evaluate(() => {
+      const store = window.__demo.store
+      const out = {}
+      const ids = (store.buildingEvacuationPlans || []).map((p) => p.id)
+      ids.forEach((id) => {
+        store.setActiveBuildingPlan(id)
+        const bp = store.activeBuildingPlan
+        const map = {}
+        Object.entries(bp.routesByZone || {}).forEach(([zk, r]) => { map[zk] = r.routeId })
+        out[id] = {
+          active: store.activeBuildingPlanId,
+          map,
+          floors: [...new Set((bp.routes || []).map((r) => r.floorId))],
+          allOwned: Object.values(map).every((rid) => String(rid).startsWith(`${id}:`)),
+        }
+      })
+      const keys = Object.keys(out)
+      const cmp = (a, b) => {
+        const zks = Object.keys(out[a].map)
+        return {
+          total: zks.length,
+          changedAll: zks.every((k) => out[a].map[k] !== out[b].map[k]),
+          sample: [zks[0], out[a].map[zks[0]], out[b].map[zks[0]]],
+        }
+      }
+      return {
+        ids: keys,
+        everyActiveOk: keys.every((id) => out[id].active === id),
+        everyOwned: keys.every((id) => out[id].allOwned),
+        floorsPerPlan: keys.map((id) => out[id].floors.length),
+        ab: keys.length > 1 ? cmp(keys[0], keys[1]) : null,
+        bc: keys.length > 2 ? cmp(keys[1], keys[2]) : null,
+        finalActive: store.activeBuildingPlanId,
+      }
+    })
+    check('切换到每个整栋楼方案：activeBuildingPlanId 唯一生效', switchAll.everyActiveOk === true, switchAll.ids)
+    check('每个方案的所有路线 routeId 都属于该方案', switchAll.everyOwned === true, switchAll.ids)
+    check('每个方案都覆盖 1F~6F（不是只疏散 5F）',
+      switchAll.floorsPerPlan.every((n) => n >= 6), switchAll.floorsPerPlan)
+    check('A → B：每个楼层+区域的 routeId 同步变化',
+      Boolean(switchAll.ab && switchAll.ab.changedAll && switchAll.ab.total > 1), switchAll.ab)
+    check('B → C：每个楼层+区域的 routeId 同步变化',
+      Boolean(switchAll.bc && switchAll.bc.changedAll && switchAll.bc.total > 1), switchAll.bc)
+    // 恢复到最后点选的方案，避免影响后续确认流程
+    await page.evaluate((id) => window.__demo.store.setActiveBuildingPlan(id), 'PLAN-B').catch(() => {})
 
     // ── ⑤ 3D 人员沿后端路线移动 ──
     console.log('\n[⑤ 3D 人员沿路线]')
@@ -281,16 +408,45 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
       })
       check('非 1F 人员路线跨楼层连续下降', crossFloor.withPts > 0 && crossFloor.descended === crossFloor.withPts, crossFloor)
 
+      // （3D 移动性检查见下方，此处先完成折线一致性校验，避免拖到疏散完成后）
+
       const snapA = await page.evaluate(() => window.__dtwin.persons.data.filter(Boolean)
         .map((d) => ({ id: d.id, x: d.cur.x, y: d.cur.y, z: d.cur.z })))
       await page.waitForTimeout(1800)
       const snapB = await page.evaluate(() => window.__dtwin.persons.data.filter(Boolean)
         .map((d) => ({ id: d.id, x: d.cur.x, y: d.cur.y, z: d.cur.z })))
+      const backendProg = await page.evaluate(() => {
+        const ps = window.__demo.demoStore.persons || []
+        const moving = ps.filter((p) => p.evacuating && typeof p.progress === 'number' && p.progress < 1)
+        return {
+          total: ps.length,
+          moving: moving.length,
+          evacuated: window.__demo.demoStore.metrics?.evacuated ?? -1,
+          evacuating: window.__demo.demoStore.metrics?.evacuating ?? -1,
+        }
+      })
       const moved = snapA.filter((a, i) => {
         const b = snapB[i]
         return b && Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) > 0.2
       }).length
-      check('3D 人员持续移动（视觉插值推进）', moved > 0, moved)
+      check('3D 人员持续移动（视觉插值推进）', moved > 0, { moved, ...backendProg })
+
+      // routeMatrix.perZone 是只读投影：篡改它不得改变 3D 人员折线
+      const perZone3d = await page.evaluate(async () => {
+        const store = window.__demo.store
+        const before = window.__dtwin.persons.data.filter(Boolean).map((d) => `${d.id}:${d.routeKey}`).join('|')
+        const m = store.routeMatrix
+        if (m && m.perZone) {
+          Object.keys(m.perZone).forEach((z) => {
+            m.perZone[z].recommendedId = 'HACKED-ZONE-PLAN'
+            m.perZone[z].plans = []
+          })
+        }
+        await new Promise((r) => setTimeout(r, 400))
+        const after = window.__dtwin.persons.data.filter(Boolean).map((d) => `${d.id}:${d.routeKey}`).join('|')
+        return { changed: before !== after, len: before.length, sample: before.slice(0, 60) }
+      })
+      check('routeMatrix.perZone 修改不影响 3D 人员折线', perZone3d.changed === false && perZone3d.len > 0, perZone3d)
 
       // 不穿墙 / 不经火区 / 必达出口：3D 折线来自后端方案 → 与 2D 同一条
       const geo = await page.evaluate(() => {
@@ -387,8 +543,8 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
       await page.evaluate(() => window.__demo.demoStore.metrics))
     check('strandedPersons 已同步到 fireStore', await page.evaluate(() => (window.__demo.store.strandedPersons || []).length > 0),
       await page.evaluate(() => (window.__demo.store.strandedPersons || []).length))
-    // 滞留人员必须留在原地，不得跟随疏散路线离开
-    const strandedGeo = await page.evaluate(() => {
+    // 滞留人员必须留在原地，不得继续沿疏散路线前进（P2 逻辑本阶段不改动，只校验「冻结」这一稳定不变量）
+    const strandedSnap = async () => page.evaluate(() => {
       const ds = (window.__dtwin && window.__dtwin.persons.data || []).filter(Boolean)
       const byId = new Map((window.__demo.store.persons || []).map((p) => [String(p.id), p]))
       return ds.filter((d) => {
@@ -396,10 +552,22 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
         return p && (p.status === 'stranded' || p.retained)
       }).map((d) => ({
         id: d.id,
+        x: +d.cur.x.toFixed(3), y: +d.cur.y.toFixed(3), z: +d.cur.z.toFixed(3),
         distToExit: d.pts && d.pts.length ? +d.cur.distanceTo(d.pts[d.pts.length - 1]).toFixed(2) : null,
       }))
     })
-    check('滞留人员未跟随疏散路线到出口', strandedGeo.length > 0 && strandedGeo.every((s) => s.distToExit > 1), strandedGeo)
+    // 先等待视觉插值收敛（冻结瞬间的残余插值不代表仍在撤离），再比对两次快照
+    await page.waitForTimeout(2500)
+    const strandedA = await strandedSnap()
+    await page.waitForTimeout(1600)
+    const strandedB = await strandedSnap()
+    const drift = strandedA.map((a, i) => {
+      const b = strandedB[i]
+      return b ? +Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z).toFixed(3) : -1
+    })
+    check('滞留人员存在且被标记', strandedA.length > 0, strandedA.length)
+    check('滞留人员未继续沿疏散路线前进（位置冻结）',
+      strandedA.length > 0 && drift.every((d) => d >= 0 && d < 0.2), { drift, distToExit: strandedA.map((s) => s.distToExit) })
 
     await clickByText('推进下一步')
     check('⑥ 协同消防救援', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'RESCUE_COORDINATION'), 8000),

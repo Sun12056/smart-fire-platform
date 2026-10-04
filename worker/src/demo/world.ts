@@ -180,12 +180,20 @@ export interface DemoWorld {
     detectedAt: string
   } | null
   alarmId: string | null
-  /** 旧结构：火源区域的 A/B/C 候选路线（兼容保留，落库与旧接口仍读它） */
-  plans: DemoPlan[]
-  activePlanId: string | null
-  /** 新结构：整栋楼疏散方案（scope=BUILDING），PLAN-A/B/C = 三种整栋楼策略 */
+  /**
+   * ⚠️ LEGACY（旧「单火灾区域 A/B/C 方案」，P1.5.5 起退出决策链）
+   * 仅用于：D1 历史记录与旧 REST 接口兼容（GET /api/v1/evacuation-plans）。
+   * 禁止用于：人员路线、当前执行方案、设备联动、CONFIRM_ROUTE 校验、2D/3D 路线。
+   * 权威顺序恒为：buildingPlans > activeBuildingPlanId > person.routeId/routePoints。
+   */
+  legacyPlans: DemoPlan[]
+  /** ⚠️ LEGACY：与 legacyPlans 配套，仅作历史展示，不参与任何决策 */
+  legacyActivePlanId: string | null
+  /** 权威：整栋楼疏散方案（scope=BUILDING），PLAN-A/B/C = 三种整栋楼策略 */
   buildingPlans: BuildingEvacuationPlan[]
+  /** 权威：当前执行的整栋楼方案 id（唯一来源） */
   activeBuildingPlanId: string | null
+  /** 疏散范围：火灾只描述位置，疏散范围恒为整栋楼 */
   evacuationScope: 'BUILDING'
   persons: Record<string, PersonRuntime>
   devices: Record<string, DeviceRuntime>

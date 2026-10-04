@@ -1,4 +1,8 @@
-// EvacuationPlan 路由：疏散预案（自动 k 短路 / 手动编辑）保存与生命周期流转
+// ⚠️ LEGACY 接口：旧「单火灾区域 A/B/C 疏散方案」（P1.5.5 起不再是 Demo 疏散方案来源）
+//
+// · 本接口只返回 type != 'building' 的历史预案行（手工预案 / 旧 Demo 单区域方案）
+// · 整栋楼方案（scope=BUILDING）请走 GET /api/v1/building-evacuation-plans
+// · 两者不再混在一起返回，避免前端把 legacy zone plan 与 building plan 混用
 import { Hono } from 'hono'
 import type { Env, EvacuationPlan } from '../types'
 import { all, first, run, now, mapPlanRow } from '../db'
@@ -9,7 +13,8 @@ const PLAN_STATUSES = ['NORMAL', 'WARNING', 'BLOCKED', 'CONFIRMED', 'EXECUTING',
 
 evacuationPlansRoute.get('/', async (c) => {
   const q = c.req.query()
-  const conds: string[] = []
+  // 排除整栋楼方案（type='building'）：它们由 /api/v1/building-evacuation-plans 提供
+  const conds: string[] = ["(type IS NULL OR type != 'building')"]
   const params: unknown[] = []
   if (q.buildingId) { conds.push('building_id = ?'); params.push(q.buildingId) }
   if (q.floorId) { conds.push('start_floor = ?'); params.push(q.floorId) }
@@ -22,7 +27,11 @@ evacuationPlansRoute.get('/', async (c) => {
 evacuationPlansRoute.get('/:id', async (c) => {
   const row = await first(c.env.DB, 'SELECT * FROM evacuation_plans WHERE id = ?', [c.req.param('id')])
   if (!row) return c.json({ error: '预案不存在' }, 404)
-  return c.json(mapPlanRow(row))
+  // 整栋楼方案不在这里返回（避免与 legacy 混用）
+  if (String(row.type ?? '') === 'building') {
+    return c.json({ error: '该 id 属于整栋楼疏散方案，请使用 /api/v1/building-evacuation-plans/:id', legacy: true }, 404)
+  }
+  return c.json({ ...mapPlanRow(row), legacy: true })
 })
 
 evacuationPlansRoute.post('/', async (c) => {

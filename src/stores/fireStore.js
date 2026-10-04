@@ -43,6 +43,7 @@ import {
 // 整栋楼疏散（scope = BUILDING）：一次火灾 = 一栋楼的一次整体疏散任务
 import {
   planBuildingStrategies, routeOfPerson as buildingRouteOfPerson, validateBuildingEvacuationPlan,
+  resolvePlanningZone,
 } from '../../shared/evacuation/buildingEvacuationPlanner.js'
 import { EVACUATION_SCOPE, STRATEGY, zoneKeyOf } from '../../shared/evacuation/buildingEvacuationTypes.js'
 import {
@@ -174,11 +175,13 @@ export const useFireStore = defineStore('fire', () => {
 
   /** 用后端方案刷新前端路线矩阵（平面图 2D / 3D 都读这里） */
   function applyDemoPlans(snap) {
-    // 新模型优先：后端下发的是「整栋楼」方案（scope=BUILDING），包含每个有人区域的路线
+    // 权威：后端下发的是「整栋楼」方案（scope=BUILDING），包含每个有人区域的路线
     if (Array.isArray(snap.buildingPlans) && snap.buildingPlans.length) {
       applyBuildingPlans(snap)
       return
     }
+    // ⚠️ LEGACY 兜底：仅当后端未下发整栋楼方案（旧版本后端）时才走旧的火源区投影，
+    // 这里产生的 routeMatrix.perZone 只是只读展示，不参与疏散决策。
     const zone = snap.fire?.zone || 'A区'
     const floorId = snap.fire?.floorId || routeFloorId.value || '5F'
     const ctx = {
@@ -332,6 +335,8 @@ export const useFireStore = defineStore('fire', () => {
       // 权威路线：3D 人员沿后端 routePoints 移动（前端不再自己算路线）
       if (Array.isArray(r.routePoints)) p.routePoints = r.routePoints
       if (Array.isArray(r.route)) p.route = r.route
+      // routeId = `${buildingPlanId}:${floorId}:${zone}` —— 后端权威，2D/3D 同一个
+      if (r.routeId !== undefined) p.routeId = r.routeId
       if (typeof r.waypoint === 'number') p.waypoint = r.waypoint
       if (typeof r.progress === 'number') p.progress = r.progress
       if (typeof r.evacuating === 'boolean') p.evacuating = r.evacuating
@@ -476,6 +481,16 @@ export const useFireStore = defineStore('fire', () => {
   const routeEdges = ref([]) // 手动模式连线
   const routeDeviceBindings = ref([]) // 路线-设备方向绑定
   const routeFireAutoSwitch = ref(false) // 火灾是否触发过自动重规划
+  /**
+   * ⚠️ COMPAT ONLY
+   * routeMatrix.perZone is a read-only compatibility projection and must not be used as
+   * authoritative evacuation state.（P1.5.5）
+   *
+   * 它只能：旧组件兼容 / 当前楼层局部展示 / 旧页面过渡；
+   * 它不能：决定当前疏散方案、决定人员 routeId、决定后端执行路线、
+   *         修改 buildingEvacuationPlans、修改 activeBuildingPlanId、驱动 3D 人员路线。
+   * 唯一权威顺序：buildingEvacuationPlans > activeBuildingPlanId > person.routeId/routePoints
+   */
   const routeMatrix = ref(null) // { buildingId, buildingName, floorId, areas, exits, perZone:{ zone:{plans,recommendedId,backupId} } }
   // ── 整栋楼疏散方案（新模型） ──
   // fireEvent 只描述火灾位置；evacuationScope 永远 = BUILDING
@@ -790,104 +805,89 @@ export const useFireStore = defineStore('fire', () => {
     const fe = fireEvent.value
     if (!fe) return []
     addOperationLog('生成疏散路线', '疏散规划', '整栋楼各楼层/区域生成整体疏散方案')
-    // ① 整栋楼方案（scope=BUILDING）：A/B/C = 均衡 / 快速 / 安全三种整栋楼策略
+    // ① 整栋楼方案（scope=BUILDING）：A/B/C = 均衡 / 快速 / 安全三种整栋楼策略（唯一权威）
     const built = generateBuildingEvacuationPlans({ buildingId: fireBuildingId(fe.building) })
-    const m = routeMatrix.value
-    const needFresh = !m || m.buildingName !== fe.building || m.floorId !== fe.floor
-    if (!built.plans.length && needFresh) {
-      // 整栋楼规划失败时回退旧的单楼层矩阵（保证页面仍有内容可展示）
+    if (!built.plans.length) {
+      // 整栋楼规划失败时回退旧的单楼层矩阵（仅用于页面展示，不是权威方案）
       generateRoutePlans({ buildingId: fireBuildingId(fe.building), floorId: fe.floor })
+      applyFireBlocking(fe)
+      replanRoutesForFire()
     }
-    // 幂等：仅封堵火源房间门口后的走廊段（不困死房间），未受影响区域保持原路线
-    applyFireBlocking(fe)
-    replanRoutesForFire()
-    // 火源区域可用方案（排除 BLOCKED，绝不为凑数造假）
-    const info = routeMatrix.value && routeMatrix.value.perZone ? routeMatrix.value.perZone[fe.area] : null
-    const plans = info && Array.isArray(info.plans) ? info.plans.filter((p) => p && p.status !== 'BLOCKED') : []
-    const recId = info ? info.recommendedId : null
-    const activeId = recId && plans.some((p) => p.id === recId) ? recId : plans.length ? plans[0].id : null
-    activeRoutePlanId.value = activeId
-    const act = activeId ? getRoutePlanById(activeId) : null
-    if (act) applyRouteToDevices(act)
     const bp = activeBuildingPlan.value
+    // ② 疏散灯：整栋楼所有路线统一联动（火灾只影响路线走向，不影响参与范围）
+    if (bp) {
+      const bindings = []
+      ;(bp.routes || []).forEach((r) => applyRouteToDevices(routeToRenderable(bp, r), bindings))
+      routeDeviceBindings.value = bindings
+    }
     const scopeText = bp
-      ? `整栋楼 ${bp.summary.zoneCount} 个有人区域 / ${bp.summary.personCount} 人`
+      ? `整栋楼 ${bp.summary.zoneCount} 个有人区域 / ${bp.summary.personCount} 人 / ${bp.summary.routeCount} 条路线`
       : `${fe.floor}-${fe.area}`
     evacuationLogs.value.unshift({
       id: `LOG-${Date.now()}`
       , time: new Date().toLocaleTimeString('zh-CN')
       , action: '生成疏散方案'
-      , detail: `系统为 ${fe.building}（火灾 ${fe.floor}-${fe.area}）生成 ${plans.length} 套整栋楼疏散方案，覆盖 ${scopeText}${act ? `，推荐方案「${act.name}」已高亮` : ''}`
+      , detail: `系统为 ${fe.building}（火灾位置 ${fe.floor}-${fe.area}，疏散范围 BUILDING）生成 ${built.plans.length} 套整栋楼疏散方案，覆盖 ${scopeText}${bp ? `，推荐方案「${bp.name}」已高亮` : ''}`
       , operator: '系统'
       , level: 'warning'
     })
     addNotification({
       title: '整栋楼疏散方案已生成'
-      , message: `已为 ${fe.building} 生成 ${plans.length} 套整栋楼方案（${scopeText}），推荐方案已自动高亮`
+      , message: `已为 ${fe.building} 生成 ${built.plans.length} 套整栋楼方案（${scopeText}），推荐方案已自动高亮`
       , level: 'success'
       , time: new Date().toLocaleTimeString('zh-CN')
     })
     emergencyStage.value = 3
     routeDecisionConfirmed.value = false
-    return plans
+    return built.plans
   }
 
-  // ── 阶段 4：管理员预览/切换方案（疏散灯实时联动该方案方向） ──
+  // ── 阶段 4：管理员预览/切换方案 ──
+  // 切换的是「整栋楼方案」：任何一条区域路线都携带 buildingPlanId，点选即全楼切换。
   function selectEvacuationPlan(planId) {
     const plan = getRoutePlanById(planId)
     if (!plan) return false
-    // 整栋楼方案：点选 A/B/C 任一条区域路线 = 切换整栋楼策略（全楼人员路线同步切换）
     if (plan.buildingPlanId && buildingEvacuationPlans.value.some((p) => p.id === plan.buildingPlanId)) {
       if (activeBuildingPlanId.value !== plan.buildingPlanId) return setActiveBuildingPlan(plan.buildingPlanId)
+      return true
     }
+    // ⚠️ LEGACY：非整栋楼方案（旧单区域结构）仅本地预览，不改变权威方案
     if (plan.status === 'BLOCKED') return false
     activeRoutePlanId.value = planId
     applyRouteToDevices(plan)
     return true
   }
-  // 返回方案列表：推荐方案重新高亮
+  // 返回方案列表：重新回到当前整栋楼方案
   function backToPlanList() {
-    const fe = fireEvent.value
-    if (!fe) return false
-    const info = routeMatrix.value && routeMatrix.value.perZone ? routeMatrix.value.perZone[fe.area] : null
-    const recId = info ? info.recommendedId : null
-    if (recId && activeRoutePlanId.value !== recId) {
-      activeRoutePlanId.value = recId
-      const rec = getRoutePlanById(recId)
-      if (rec) applyRouteToDevices(rec)
-    }
-    return true
+    if (activeBuildingPlanId.value) return setActiveBuildingPlan(activeBuildingPlanId.value)
+    return false
   }
 
-  // ── 阶段 4 → 5：确认执行该疏散方案（开始逃生） ──
+  // ── 阶段 4 → 5：确认执行整栋楼疏散方案（开始逃生） ──
   function confirmEvacuationPlan() {
     const fe = fireEvent.value
     if (!fe || emergencyStage.value !== 3) return false
-    addOperationLog('确认疏散方案', '演示流程', '启动智能疏散')
-    const info = routeMatrix.value && routeMatrix.value.perZone ? routeMatrix.value.perZone[fe.area] : null
-    // 执行方案必须属于火源区域：若管理员最后预览的是其他区域的方案，则回退到火源区推荐方案
-    let chosenId = activeRoutePlanId.value || (info ? info.recommendedId : null)
-    const previewPlan = chosenId ? getRoutePlanById(chosenId) : null
-    if (!previewPlan || previewPlan.startArea !== fe.area) {
-      chosenId = info ? info.recommendedId : null
-    }
-    const plan = chosenId ? getRoutePlanById(chosenId) : null
-    if (!plan || plan.status === 'BLOCKED') return false
+    addOperationLog('确认疏散方案', '演示流程', '启动整栋楼智能疏散')
+    // 权威：唯一当前方案 = activeBuildingPlanId 对应的整栋楼方案
+    // （routeMatrix.perZone 只是只读投影，不得在此决定执行方案）
+    const bp = activeBuildingPlan.value
+    if (!bp) return false
     routeDecisionConfirmed.value = true
-    // 管理员最终确认的方案即为该区域执行方案
-    if (info && info.recommendedId !== plan.id) {
-      info.recommendedId = plan.id
-      info.backupId = plan.id
-    }
-    activeRoutePlanId.value = plan.id
-    // 疏散灯统一沿该方案方向 + 途经楼层应急照明进入应急强闪（applyRouteToDevices 内置）
-    applyRouteToDevices(plan)
-    addOperationLog('调整疏散指示方向', '演示流程', `疏散指示灯方向已按方案「${plan.name}」统一指向出口 ${plan.exitLabel}`, 'warning')
+    // 疏散灯统一沿整栋楼每条路线方向 + 途经楼层应急照明进入应急强闪
+    const bindings = []
+    ;(bp.routes || []).forEach((r) => applyRouteToDevices(routeToRenderable(bp, r), bindings))
+    routeDeviceBindings.value = bindings
+    addOperationLog(
+      '调整疏散指示方向',
+      '演示流程',
+      `疏散指示灯方向已按整栋楼方案「${bp.name}」统一指向出口 ${bp.summary.exitLabels.join('、') || '安全出口'}`,
+      'warning',
+    )
     evacuationLogs.value.unshift({
       id: `LOG-${Date.now()}`
       , time: new Date().toLocaleTimeString('zh-CN')
-      , action: '确认执行疏散方案'
-      , detail: `管理员确认执行方案「${plan.name}」：出口 ${plan.exitLabel}，距离 ${plan.distance}m，预计 ${plan.estimatedTime}s，涉及 ${plan.congestion} 人`
+      , action: '确认执行整栋楼疏散方案'
+      , detail: `管理员确认执行「${bp.name}」（scope=${bp.scope}）：${bp.summary.zoneCount} 个区域 / ${bp.summary.personCount} 人 / ${bp.summary.routeCount} 条路线，出口 ${bp.summary.exitLabels.join('、') || '—'}，最慢 ${bp.summary.maxEstimatedTime}s`
       , operator: '管理员'
       , level: 'danger'
     })
@@ -895,47 +895,50 @@ export const useFireStore = defineStore('fire', () => {
     refreshPersonStats()
     refreshStats()
     addNotification({
-      title: '开始疏散'
-      , message: `开始执行 ${fe.building} ${fe.floor} 疏散方案「${plan.name}」：出口 ${plan.exitLabel} · 距离 ${plan.distance}m · 预计 ${plan.estimatedTime}s`
+      title: '开始整栋楼疏散'
+      , message: `开始执行 ${fe.building} 整栋楼方案「${bp.name}」：${bp.summary.personCount} 人 / ${bp.summary.routeCount} 条路线 · 最慢 ${bp.summary.maxEstimatedTime}s`
       , level: 'danger'
       , time: new Date().toLocaleTimeString('zh-CN')
     })
     emergencyStage.value = 4
-    // ④ 智能疏散立即生效：应急灯脉冲强闪 + 人员沿规划路线动态撤离（方向已在上方按方案联动）
+    // ④ 智能疏散立即生效：应急灯脉冲强闪 + 整栋楼人员沿各自路线动态撤离
     startPulseFlash()
-    startEvacuationRun(plan)
+    startEvacuationRun()
     return true
   }
 
   // ── 疏散执行模拟：人员沿合法路线节点移动（房间→门→走廊→楼梯），数据仍来自 persons 同源，不穿墙 ──
-  function startEvacuationRun(activePlan) {
+  // 权威入口：整栋楼方案（activeBuildingPlanId）→ 每人 routeId / routePoints
+  function startEvacuationRun() {
     const fe = fireEvent.value
-    if (!fe || !activePlan) return
+    if (!fe) return
     stopEvacuationSim()
     addOperationLog('启动智能疏散', '演示流程', '整栋楼多楼层同步疏散', 'warning')
 
     // ── 整栋楼疏散（scope=BUILDING）：每个人员按自己 floorId+zone 的路线撤离 ──
     // 火灾只决定路线怎么绕开火区，不决定「谁参与疏散」—— 整栋楼有人区域全部纳入。
     const bp = activeBuildingPlan.value
+    if (!bp) return false
     let total = 0
     asArray(persons.value).forEach((p) => {
       if (!p || p.building !== fe.building) return
       delete p._evacDone
       delete p._evac
-      let plan = null
-      let ownFloor = p.floor
-      if (bp) {
-        const route = buildingRouteOfPerson(bp, { floorId: p.floor, zone: p.zone })
-        if (route) plan = routeToRenderable(bp, route)
-      } else {
-        // 兼容旧结构（无整栋楼方案时）：仅火警楼层参与
-        const m = routeMatrix.value
-        const info = m && m.perZone ? m.perZone[p.zone] : null
-        const pid = p.zone === fe.area && activePlan ? activePlan.id : info ? info.recommendedId : null
-        plan = pid ? getRoutePlanById(pid) : null
-        ownFloor = fe.floor
-        if (p.floor !== fe.floor) return
+      // 走廊等公共区域没有房间节点 → 与规划阶段同一套归属规则，保证人人有路线
+      let route = buildingRouteOfPerson(bp, { floorId: p.floor, zone: p.zone || p.area })
+      if (!route && (p.zone || p.area)) {
+        if (!routeGraphCache) routeGraphCache = buildBuildingGraph(getBuildingFloors(bp.buildingId))
+        route = buildingRouteOfPerson(bp, {
+          floorId: p.floor,
+          zone: resolvePlanningZone(routeGraphCache, {
+            floorId: p.floor, zone: p.zone || p.area, x: p.x, y: p.y,
+          }),
+        })
       }
+      const plan = route ? routeToRenderable(bp, route) : null
+      const ownFloor = p.floor
+      // routeId = `${planId}:${floorId}:${zone}` —— 2D / 3D / 后端同一个 id
+      p.routeId = route ? route.routeId : null
       if (!plan || plan.status === 'BLOCKED') return
       const pts = []
       // 房间人员：先到本区门口走廊中心点，再沿走廊/楼梯节点（走廊人员直接从走廊节点出发）
@@ -2254,8 +2257,11 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   /**
-   * 把整栋楼方案同步到旧结构（routePlans / routeMatrix / activeRoutePlanId），
-   * 保证 2D 平面图、3D 路线层、设备联动等既有消费方无需一次性重写。
+   * 整栋楼方案 → 旧结构投影（单向，read-only projection）：
+   * buildingEvacuationPlans / activeBuildingPlanId  ──▶  routePlans / routeMatrix.perZone / activeRoutePlanId
+   *
+   * ⚠️ 只能由整栋楼方案向下投影，绝不能反向把 perZone 的改动写回 buildingEvacuationPlans
+   *    或 activeBuildingPlanId；perZone 仅供旧组件与「当前楼层局部展示」使用。
    */
   function syncLegacyRouteState(plans, activeId) {
     buildingEvacuationPlans.value = plans || []
@@ -2359,8 +2365,8 @@ export const useFireStore = defineStore('fire', () => {
     const bindings = []
     ;(active.routes || []).forEach((r) => applyRouteToDevices(routeToRenderable(active, r), bindings))
     routeDeviceBindings.value = bindings
-    // 正在执行疏散时：让每个人员改按新方案的各自路线走
-    if (evacRun.value) startEvacuationRun(active)
+    // 正在执行疏散时：整栋楼所有人改按新方案的各自路线走（A→B→C 全楼同步）
+    if (evacRun.value) startEvacuationRun()
     addNotification({
       title: '整栋楼疏散方案已切换',
       message: `${active.name}（${active.summary.zoneCount}个区域 / ${active.summary.personCount}人）`,
@@ -2381,8 +2387,11 @@ export const useFireStore = defineStore('fire', () => {
   // 房间→走廊的门保持开放，房间其余侧通路保留为备用，
   // 从而实现「原推荐方案因该段被封而需绕行/切换备用」的局部重规划，且不困死火源房间。
   function applyFireBlocking(fe) {
+    // ⚠️ LEGACY 路径：仅在「没有整栋楼方案」时用于旧单楼层展示；
+    // 整栋楼模式下火源由规划器（blockedNodes）统一避让，不再依赖这里的投影。
+    if (activeBuildingPlan.value) return
     const m = routeMatrix.value
-    const info = m && m.perZone[fe.area]
+    const info = m && m.perZone && m.perZone[fe.area]
     const recId = info && info.recommendedId
     const rec = asArray(routePlans.value).find((p) => p.id === recId)
     const bNode = new Set(blockedNodeIds.value)
@@ -2417,6 +2426,9 @@ export const useFireStore = defineStore('fire', () => {
   function replanRoutesForFire() {
     const fe = fireEvent.value
     if (!fe) return
+    // ⚠️ LEGACY 路径：整栋楼模式下路线由 buildingEvacuationPlanner 统一避让火源，
+    // 不做「按区域局部重规划」—— 那会把 routeMatrix.perZone 变成业务状态。
+    if (activeBuildingPlan.value) return
     routeFireAutoSwitch.value = true
     const buildingName = fe.building
     const buildingId = routeBuildingId.value
@@ -2482,16 +2494,23 @@ export const useFireStore = defineStore('fire', () => {
     selectedZone.value = zone
   }
   function setCurrentRoutePlan(zone, planId) {
-    if (!routeMatrix.value) return
+    // 整栋楼语义：点选某条区域路线 = 切换到它所属的整栋楼方案（全楼同步）
+    const plan = getRoutePlanById(planId)
+    if (plan && plan.buildingPlanId && buildingEvacuationPlans.value.some((p) => p.id === plan.buildingPlanId)) {
+      return setActiveBuildingPlan(plan.buildingPlanId)
+    }
+    // ⚠️ LEGACY：仅旧单区域结构的本地投影，不改变权威方案
+    if (!routeMatrix.value) return false
     const info = routeMatrix.value.perZone[zone || selectedZone.value]
-    if (!info) return
+    if (!info) return false
     info.recommendedId = planId
     addNotification({
       title: '当前路线已设定',
-      message: `${zone || selectedZone.value} 推荐路线已更新`,
+      message: `${zone || selectedZone.value} 推荐路线已更新（legacy 投影）`,
       level: 'success',
       time: new Date().toLocaleTimeString('zh-CN'),
     })
+    return true
   }
   function getRoutePlanById(id) {
     return asArray(routePlans.value).find((p) => p.id === id) || null

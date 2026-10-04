@@ -17,13 +17,17 @@ export const useDemoStore = defineStore('demo', () => {
   const nextCommand = ref('START_FIRE')
   const allowedCommands = ref(['START_FIRE'])
   const fire = ref(null)
+  /**
+   * ⚠️ LEGACY：旧「单火灾区域 A/B/C 方案」镜像，仅用于历史展示/兼容，
+   * 不得用于人员路线、当前方案、2D/3D 路线或任何疏散决策（见 P1.5.5）。
+   */
   const plans = ref([])
   const activePlanId = ref(null)
-  /** 整栋楼疏散方案（scope=BUILDING）与当前执行/点选的方案 */
+  /** 权威：整栋楼疏散方案（scope=BUILDING）与当前执行方案 id */
   const buildingPlans = ref([])
   const activeBuildingPlanId = ref(null)
   const evacuationScope = ref('BUILDING')
-  /** 管理员在 ROUTE_PLANNING 阶段点选的方案（确认后成为 activePlanId） */
+  /** 管理员在 ROUTE_PLANNING 阶段点选的整栋楼方案（确认后成为 activeBuildingPlanId） */
   const selectedPlanId = ref(null)
   const lighting = ref(null)
   const metrics = ref({ total: 0, evacuating: 0, evacuated: 0, retained: 0, rescued: 0, riskZones: 0 })
@@ -178,20 +182,21 @@ export const useDemoStore = defineStore('demo', () => {
 
   /**
    * 确认疏散路径：ROUTE_PLANNING → SMART_EVACUATION 的唯一入口。
-   * 必须基于一个已存在的方案（管理员点选优先，其次推荐方案）。
+   * 确认的永远是「整栋楼方案」：buildingPlanId = PLAN-A/B/C（后端强制校验 scope + buildingId + 全楼路线覆盖）。
+   * 不再接受仅传旧 planId（legacy zone plan）的确认。
    */
   function confirmRoute(planId) {
-    // 整栋楼方案优先：确认的是 PLAN-A/B/C 整栋楼策略（后端会校验 scope / buildingId / 全楼路线覆盖）
     const bpId = buildingPlans.value.find((p) => p.id === planId)?.id
       || buildingPlans.value.find((p) => p.id === selectedPlanId.value)?.id
+      || buildingPlans.value.find((p) => p.id === activeBuildingPlanId.value)?.id
       || buildingPlans.value.find((p) => p.recommended)?.id
       || null
-    const legacyId = planId || selectedPlanId.value || activePlanId.value || plans.value.find((p) => p.recommended)?.id
-    if (!bpId && !legacyId) {
-      error.value = '请先选择一套疏散方案，再确认路径'
+    if (!bpId) {
+      error.value = '当前没有可执行的整栋楼疏散方案，请先完成路线规划'
       return Promise.resolve(null)
     }
-    return sendCommand('CONFIRM_ROUTE', bpId ? { buildingPlanId: bpId, planId: legacyId } : { planId: legacyId })
+    selectedPlanId.value = bpId
+    return sendCommand('CONFIRM_ROUTE', { buildingPlanId: bpId })
   }
 
   const completeEvacuation = () => sendCommand('COMPLETE_EVACUATION')
@@ -206,7 +211,8 @@ export const useDemoStore = defineStore('demo', () => {
   function advance() {
     if (!nextCommand.value) return null
     if (nextCommand.value === 'CONFIRM_ROUTE') {
-      return confirmRoute(selectedPlanId.value || activePlanId.value || plans.value.find((p) => p.recommended)?.id)
+      // 权威：整栋楼方案（selectedPlanId / activeBuildingPlanId → buildingPlanId）
+      return confirmRoute(selectedPlanId.value || activeBuildingPlanId.value)
     }
     return sendCommand(nextCommand.value)
   }

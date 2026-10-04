@@ -133,16 +133,20 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   console.log('\n[5] 六阶段全链路推进')
   const r3 = await cmd('PLAN_ROUTES')
   check('PLAN_ROUTES → ROUTE_PLANNING', r3.status === 200 && r3.body?.stage === 'ROUTE_PLANNING', r3.body?.stage)
-  check('生成多套疏散方案', (r3.body?.plans || []).length >= 2, (r3.body?.plans || []).length)
+  check('生成 3 套整栋楼方案', (r3.body?.buildingPlans || []).length === 3, (r3.body?.buildingPlans || []).map((p) => p.id))
 
-  // 阶段 3 → 4：必须由 CONFIRM_ROUTE 推进，且必须基于已存在的方案
-  const badPlan = await cmd('CONFIRM_ROUTE', { planId: 'PLAN-NOT-EXIST' })
-  check('确认不存在的方案返回 409', badPlan.status === 409, badPlan.body)
+  // 阶段 3 → 4：必须由 CONFIRM_ROUTE 推进，且必须携带 buildingPlanId（整栋楼方案）
+  const noBp = await cmd('CONFIRM_ROUTE')
+  check('CONFIRM_ROUTE 未携带 buildingPlanId 返回 409', noBp.status === 409, noBp.body)
+  const onlyLegacy = await cmd('CONFIRM_ROUTE', { planId: 'PLAN-NOT-EXIST' })
+  check('只传 legacy planId 返回 409', onlyLegacy.status === 409, onlyLegacy.body)
+  const badBp = await cmd('CONFIRM_ROUTE', { buildingPlanId: 'PLAN-NOT-EXIST' })
+  check('确认不存在的整栋楼方案返回 409', badBp.status === 409, badBp.body)
 
-  const r4 = await cmd('CONFIRM_ROUTE')
+  const r4 = await cmd('CONFIRM_ROUTE', { buildingPlanId: 'PLAN-B' })
   check('CONFIRM_ROUTE → SMART_EVACUATION', r4.status === 200 && r4.body?.stage === 'SMART_EVACUATION', r4.body?.stage)
-  check('执行方案被标记', Boolean(r4.body?.activePlanId), r4.body?.activePlanId)
-  check('方案进入 EXECUTING（EvacuationPlan 生命周期）', (r4.body?.plans || []).some((p) => p.status === 'EXECUTING'))
+  check('执行方案被标记（activeBuildingPlanId）', r4.body?.activeBuildingPlanId === 'PLAN-B', r4.body?.activeBuildingPlanId)
+  check('整栋楼方案进入 EXECUTING', (r4.body?.buildingPlans || []).some((p) => p.id === 'PLAN-B' && p.status === 'EXECUTING'))
   check('人员进入 evacuating', (r4.body?.persons || []).some((p) => p.evacuating))
 
   // 实时推进：等待 tick 广播
@@ -156,7 +160,7 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   const r5 = await cmd('COMPLETE_EVACUATION')
   check('COMPLETE_EVACUATION → RETAINED_PERSONS', r5.status === 200 && r5.body?.stage === 'RETAINED_PERSONS', r5.body?.stage)
   check('识别出滞留人员', (r5.body?.metrics?.retained || 0) > 0, r5.body?.metrics)
-  check('方案置为 DONE', (r5.body?.plans || []).some((p) => p.status === 'DONE'))
+  check('方案置为 DONE', (r5.body?.buildingPlans || []).some((p) => p.status === 'DONE'))
 
   const r6 = await cmd('CONFIRM_RETAINED')
   check('CONFIRM_RETAINED → RESCUE_COORDINATION', r6.status === 200 && r6.body?.stage === 'RESCUE_COORDINATION', r6.body?.stage)
@@ -166,8 +170,8 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   check('COMPLETE_RESCUE → COMPLETED', r7.status === 200 && r7.body?.stage === 'COMPLETED', r7.body?.stage)
   check('滞留人员已获救', (r7.body?.metrics?.rescued || 0) > 0, r7.body?.metrics)
 
-  // ── 5.5 路线算法校验（方案必须来自 shared/evacuation 规划器） ──
-  console.log('\n[5.5] 疏散路线校验')
+  // ── 5.5 LEGACY 单区域方案校验（仅兼容保留，不再是 Demo 疏散方案来源） ──
+  console.log('\n[5.5] LEGACY 单火灾区域方案（仅历史/兼容）')
   const plans = r4.body?.plans || []
   check('方案命名为 方案A/B/C', plans.map((p) => p.name).join(',') === '方案A,方案B,方案C', plans.map((p) => p.name))
   check('每条方案都有节点序列', plans.every((p) => Array.isArray(p.nodes) && p.nodes.length >= 2))
@@ -234,7 +238,19 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   check('演示火警已落库 alarms', Boolean(demoAlarm?.id), demoAlarm)
   check('处置闭环后告警 resolved', demoAlarm?.status === 'resolved', demoAlarm?.status)
   const plansAfter = await api('/api/v1/evacuation-plans?buildingId=B003')
-  check('疏散预案已落库 evacuation_plans', (plansAfter.body || []).length > 0, (plansAfter.body || []).length)
+  check('LEGACY 疏散预案已落库 evacuation_plans', (plansAfter.body || []).length > 0, (plansAfter.body || []).length)
+  // 权威接口：整栋楼方案
+  const bpApi = await api('/api/v1/building-evacuation-plans?buildingId=B003')
+  check('整栋楼方案接口返回 scope=BUILDING', bpApi.body?.scope === 'BUILDING', bpApi.body?.scope)
+  check('整栋楼方案接口返回 3 套 PLAN-A/B/C',
+    (bpApi.body?.plans || []).length === 3 && (bpApi.body?.plans || []).every((p) => /^PLAN-[ABC]$/.test(p.id)),
+    (bpApi.body?.plans || []).map((p) => p.id))
+  check('整栋楼方案接口含 routes / summary',
+    (bpApi.body?.plans || []).every((p) => Array.isArray(p.routes) && p.routes.length > 0 && p.summary && p.summary.zoneCount > 0),
+    (bpApi.body?.plans || []).map((p) => [p.id, (p.routes || []).length]))
+  check('LEGACY 接口不再混入整栋楼方案（type=building）',
+    (plansAfter.body || []).every((p) => p.id !== 'PLAN-A' && p.id !== 'PLAN-B' && p.id !== 'PLAN-C'),
+    (plansAfter.body || []).map((p) => p.id))
   const logsAfter = await api('/api/v1/operation-logs?module=演示流程&limit=20')
   check('演示操作日志已落库', (logsAfter.body || []).length >= 6, (logsAfter.body || []).length)
 
@@ -252,6 +268,39 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   // 心跳
   reconnected.ws.send(JSON.stringify({ type: 'demo.ping' }))
   check('心跳 PING 收到 PONG', await waitFor(() => reconnected.messages.some((m) => m.type === 'demo.pong'), 4000))
+
+  // ── 7.5 整栋楼方案切换回归：A / B / C 全员路线同步切换 ──
+  console.log('\n[7.5] 整栋楼方案切换（A / B / C 全员同步）')
+  const runs = {}
+  for (const id of ['PLAN-A', 'PLAN-B', 'PLAN-C']) {
+    await api(`/api/v1/demo/reset?sessionId=${SESSION}`, { method: 'POST' })
+    await cmd('START_FIRE')
+    await cmd('ACTIVATE_RESPONSE')
+    await cmd('PLAN_ROUTES')
+    const rr = await cmd('CONFIRM_ROUTE', { buildingPlanId: id })
+    const ps = rr.body?.persons || []
+    runs[id] = {
+      active: rr.body?.activeBuildingPlanId,
+      scope: rr.body?.evacuationScope,
+      routeIds: ps.map((p) => p.routeId),
+      floors: [...new Set(ps.map((p) => p.floorId))],
+      allOwned: ps.every((p) => String(p.routeId).startsWith(`${id}:`)),
+      allValid: (rr.body?.buildingPlans || []).find((p) => p.id === id)?.routes?.every((r) => r.valid),
+    }
+  }
+  check('确认 A：全员 routeId 属于 PLAN-A', runs['PLAN-A'].allOwned && runs['PLAN-A'].active === 'PLAN-A', runs['PLAN-A'])
+  check('确认 B：全员 routeId 属于 PLAN-B', runs['PLAN-B'].allOwned && runs['PLAN-B'].active === 'PLAN-B', runs['PLAN-B'])
+  check('确认 C：全员 routeId 属于 PLAN-C', runs['PLAN-C'].allOwned && runs['PLAN-C'].active === 'PLAN-C', runs['PLAN-C'])
+  check('三套方案疏散范围均为 BUILDING',
+    runs['PLAN-A'].scope === 'BUILDING' && runs['PLAN-B'].scope === 'BUILDING' && runs['PLAN-C'].scope === 'BUILDING')
+  check('三套方案所有路线均通过校验', runs['PLAN-A'].allValid && runs['PLAN-B'].allValid && runs['PLAN-C'].allValid)
+  // 切换方案后：每个人的 routeId 都要变（同一个人不允许仍停留在旧方案）
+  const changedAB = runs['PLAN-A'].routeIds.every((rid, i) => rid !== runs['PLAN-B'].routeIds[i])
+  const changedBC = runs['PLAN-B'].routeIds.every((rid, i) => rid !== runs['PLAN-C'].routeIds[i])
+  check('A → B：所有人员路线同步变化', changedAB, [runs['PLAN-A'].routeIds[0], runs['PLAN-B'].routeIds[0]])
+  check('B → C：所有人员路线同步变化', changedBC, [runs['PLAN-B'].routeIds[0], runs['PLAN-C'].routeIds[0]])
+  check('1F~6F 均有人获得路线（不是只疏散 5F）',
+    runs['PLAN-B'].floors.length >= 6, runs['PLAN-B'].floors)
 
   // ── 8. 复位闭环 ──
   console.log('\n[8] 复位')

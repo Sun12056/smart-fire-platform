@@ -9,6 +9,7 @@ import { telemetryRoute } from './routes/telemetry'
 import { alarmsRoute } from './routes/alarms'
 import { inspectionsRoute } from './routes/inspections'
 import { evacuationPlansRoute } from './routes/evacuationPlans'
+import { buildingEvacuationPlansRoute } from './routes/buildingEvacuationPlans'
 import { personPresenceRoute } from './routes/personPresence'
 import { operationLogsRoute } from './routes/operationLogs'
 import { adminRoute } from './routes/admin'
@@ -29,7 +30,10 @@ app.route('/api/v1/devices', devicesRoute)
 app.route('/api/v1/telemetry', telemetryRoute)
 app.route('/api/v1/alarms', alarmsRoute)
 app.route('/api/v1/inspections', inspectionsRoute)
+// ⚠️ LEGACY：旧「单火灾区域 A/B/C 方案」，仅历史/兼容，不再是 Demo 疏散方案来源
 app.route('/api/v1/evacuation-plans', evacuationPlansRoute)
+// 权威：整栋楼疏散方案（scope = BUILDING，PLAN-A/B/C = 均衡/快速/安全）
+app.route('/api/v1/building-evacuation-plans', buildingEvacuationPlansRoute)
 app.route('/api/v1/person-presence', personPresenceRoute)
 app.route('/api/v1/operation-logs', operationLogsRoute)
 app.route('/api/v1/admin', adminRoute)

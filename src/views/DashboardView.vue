@@ -611,13 +611,12 @@
 
               <!-- 火灾处置面板（按六阶段 emergencyStage 分态：决策 / 执行 / 识别 / 救援 / 摘要） -->
               <div v-if="isFloorOnFire(expandedFloor.id)" class="fip-alert">
-                <!-- 阶段3：疏散方案决策（A/B/C/D 四区分组方案，点选实时联动平面图路线） -->
+                <!-- 阶段3：整栋楼疏散方案决策（PLAN-A/B/C 三套整栋楼策略） -->
                 <template v-if="store.emergencyStage === 3 && store.fireEvent">
                   <div class="fip-alert-title plan-title">🧭 整栋楼疏散方案决策</div>
                   <div class="fip-sub">
-                    火灾位置 {{ store.fireEvent.floor }}-{{ store.fireEvent.area }} · 疏散范围
+                    火灾位置 {{ store.fireEvent.floor }}-{{ store.fireEvent.area }}（只描述位置） · 疏散范围
                     <b>整栋楼</b>
-                    <template v-if="buildingSummary">（{{ buildingSummary.zoneCount }} 个区域 / {{ buildingSummary.personCount }} 人 / {{ buildingSummary.floors.join('、') }}）</template>
                   </div>
                   <!-- PLAN-A/B/C：整栋楼三种策略（均衡 / 快速 / 安全），切换后全楼人员路线同步切换 -->
                   <div v-if="store.buildingEvacuationPlans.length" class="fip-plan-list building-plans">
@@ -635,48 +634,35 @@
                         <span v-if="bp.id === store.activeBuildingPlanId" class="plan-sel">已选</span>
                       </div>
                       <div class="fip-plan-meta">
+                        <span class="em-chip num-font">覆盖 {{ bp.summary.floors.length }} 层</span>
+                        <span class="em-chip num-font">{{ bp.summary.zoneCount }} 个区域</span>
+                        <span class="em-chip num-font">{{ bp.summary.personCount }} 人</span>
+                        <span class="em-chip num-font">{{ bp.summary.routeCount }} 条路线</span>
+                        <span class="em-chip">出口 {{ bp.summary.exitLabels.join('、') || '—' }}</span>
                         <span class="em-chip num-font">最慢 {{ bp.summary.maxEstimatedTime }}s</span>
-                        <span class="em-chip num-font">{{ bp.summary.totalDistance }}m</span>
-                        <span class="em-chip">{{ bp.summary.exitLabels.join('、') || '—' }}</span>
                         <span class="em-chip">风险 {{ riskCn(bp.summary.riskLevel) }}</span>
                       </div>
                     </button>
                   </div>
-                  <div class="fip-sub">各区域路线（点选可查看该区域在不同策略下的路线）</div>
-                  <div v-if="zonePlanGroups.length" class="fip-zone-list">
-                    <div v-for="g in zonePlanGroups" :key="g.zone" class="fip-zone-group">
+                  <!-- 整栋楼各区域路线（只读展示：当前方案在本楼层的路线，数据来源 buildingEvacuationPlan） -->
+                  <div class="fip-sub">当前方案 · 本层各区域路线（只读展示）</div>
+                  <div v-if="buildingZoneRoutes.length" class="fip-zone-list">
+                    <div v-for="g in buildingZoneRoutes" :key="g.zone" class="fip-zone-group">
                       <div class="fip-zone-head" :class="{ 'is-fire': g.isFire }">
-                        <span class="fip-zone-name">{{ g.zone }}</span>
+                        <span class="fip-zone-name">{{ g.floorId }} {{ g.zone }}</span>
                         <span v-if="g.isFire" class="fip-zone-fire">🔥 火源区</span>
-                        <span class="fip-zone-exit">推荐出口 {{ g.recommendedExit }}</span>
+                        <span class="fip-zone-exit">{{ g.exitLabel }}</span>
                       </div>
-                      <div v-if="g.plans.length" class="fip-plan-list">
-                        <button
-                          v-for="(p, pi) in g.plans" :key="p.id"
-                          type="button"
-                          class="fip-plan"
-                          :class="{ active: p.id === store.activeRoutePlanId }"
-                          @click="pickPlan(p)"
-                        >
-                          <div class="fip-plan-head">
-                            <span class="plan-badge">{{ g.zone.slice(0, 1) }}{{ pi + 1 }}</span>
-                            <span class="plan-name">{{ p.name }}</span>
-                            <span v-if="p.id === g.recommendedId" class="plan-rec">推荐</span>
-                            <span v-if="p.id === store.activeRoutePlanId" class="plan-sel">已选</span>
-                          </div>
-                          <div class="fip-plan-meta">
-                            <span class="em-chip num-font">{{ p.distance }}m</span>
-                            <span class="em-chip num-font">{{ p.estimatedTime }}s</span>
-                            <span class="em-chip">出口 {{ p.exitLabel }}</span>
-                            <span class="em-chip">风险 {{ p.riskLevel }}</span>
-                          </div>
-                        </button>
+                      <div class="fip-plan-meta">
+                        <span class="em-chip num-font">{{ g.distance }}m</span>
+                        <span class="em-chip num-font">{{ g.estimatedTime }}s</span>
+                        <span class="em-chip">{{ g.personCount }} 人</span>
+                        <span class="em-chip" :title="g.routeId">{{ g.routeId }}</span>
                       </div>
-                      <div v-else class="fip-warn-text">该区域无可通行疏散路线</div>
                     </div>
                   </div>
-                  <button v-else class="fip-warn-text">各区域暂无可通行疏散路线</button>
-                  <button v-if="store.activeRoutePlanId || store.activeBuildingPlanId" class="fip-clear-btn" @click="handleConfirmExec">确认执行整栋楼疏散</button>
+                  <div v-else class="fip-warn-text">当前整栋楼方案暂无本层路线</div>
+                  <button v-if="store.activeBuildingPlanId" class="fip-clear-btn" @click="handleConfirmExec">确认执行整栋楼疏散</button>
                 </template>
                 <!-- 阶段4：智能疏散进行中（实时进度） -->
                 <template v-else-if="store.emergencyStage === 4 && store.fireEvent">
@@ -1340,30 +1326,36 @@ const fireAlertZonePeople = computed(() => {
   return store.persons.filter((p) => p && p.floor === fe.floor && (p.zone || p.area) === fe.area).length
 })
 // 火源区域可用疏散方案（routeMatrix 同源，绝不为凑数造假）
+// ⚠️ 只读展示：火源区在当前整栋楼方案里的那条路线（不再使用 routeMatrix.perZone 做决策）
 const fireZoneInfo = computed(() => {
   const fe = store.fireEvent
-  if (!fe || !store.routeMatrix || !store.routeMatrix.perZone) return null
-  return store.routeMatrix.perZone[fe.area] || null
+  const bp = store.activeBuildingPlan
+  if (!fe || !bp || !bp.routesByZone) return null
+  return bp.routesByZone[`${fe.floor}:${fe.area}`] || null
 })
-// A/B/C/D 四区方案分组（阶段3 右侧决策面板）：每个区域一组，含推荐位与当前选中态
-const zonePlanGroups = computed(() => {
-  const m = store.routeMatrix
-  if (!m || !m.areas || !m.perZone) return []
+/**
+ * 整栋楼方案 · 本层各区域路线（只读投影）
+ * 数据来源恒为 activeBuildingPlan（buildingEvacuationPlans + activeBuildingPlanId），
+ * 不读 routeMatrix.perZone —— perZone 只是兼容投影，不得作为业务状态。
+ */
+const buildingZoneRoutes = computed(() => {
+  const bp = store.activeBuildingPlan
   const fe = store.fireEvent
-  return m.areas.map((zone) => {
-    const info = m.perZone[zone] || { plans: [], recommendedId: null }
-    const plans = (Array.isArray(info.plans) ? info.plans : []).filter((p) => p && p.status !== 'BLOCKED')
-    const rec = plans.find((p) => p.id === info.recommendedId) || null
-    return {
-      zone,
-      isFire: !!(fe && fe.area === zone),
-      plans,
-      recommendedId: info.recommendedId,
-      recommendedExit: rec ? rec.exitLabel : '—',
-    }
-  })
+  if (!bp || !Array.isArray(bp.routes) || !expandedFloor.value) return []
+  const floorId = expandedFloor.value.id
+  return bp.routes
+    .filter((r) => r && r.floorId === floorId)
+    .map((r) => ({
+      zone: r.zone,
+      floorId: r.floorId,
+      routeId: r.routeId,
+      exitLabel: r.exitLabel || r.exitId,
+      distance: Math.round(r.distance || 0),
+      estimatedTime: r.estimatedTime,
+      personCount: r.personCount || 0,
+      isFire: !!(fe && fe.floor === r.floorId && fe.area === r.zone),
+    }))
 })
-const totalPlanCount = computed(() => zonePlanGroups.value.reduce((s, g) => s + g.plans.length, 0))
 // 整栋楼方案汇总（scope = BUILDING）
 const buildingSummary = computed(() => {
   const bp = store.activeBuildingPlan
@@ -1590,29 +1582,15 @@ function devName(dev) {
 // ============ 路线渲染辅助 ============
 // 推荐路线：store.getAllZoneRoutes()（规划楼层全区域）
 const allZoneRoutes = computed(() => store.getAllZoneRoutes())
-// 备用路线 + 推荐路线状态
-const backupSegments = computed(() => {
-  const m = store.routeMatrix
-  const map = {}
-  if (m) {
-    m.areas.forEach(zone => {
-      const info = m.perZone[zone] || {}
-      const bak = store.routePlans.find(p => p.id === info.backupId)
-      map[zone] = bak ? store.getRouteSegmentForFloor(bak, m.floorId) : []
-    })
-  }
-  return map
-})
+// ⚠️ 整栋楼模型下不存在「某区域的备用路线」：A/B/C 是三套整栋楼策略，不是同一区域的三条路线。
+// 2D 平面图只画「当前 activeBuildingPlanId 对应方案」的路线（与 3D / 后端同源），
+// 旧的 backupId / perZone 投影不再用于绘制。
+const backupSegments = computed(() => ({}))
 const recStatusMap = computed(() => {
-  const m = store.routeMatrix
+  // 火源区所在路线标红（避让提示），其余正常
+  const fe = store.fireEvent
   const map = {}
-  if (m) {
-    m.areas.forEach(zone => {
-      const info = m.perZone[zone] || {}
-      const rec = store.routePlans.find(p => p.id === info.recommendedId)
-      map[zone] = rec ? rec.status : 'NORMAL'
-    })
-  }
+  if (fe) map[fe.area] = 'BLOCKED'
   return map
 })
 
@@ -1928,10 +1906,10 @@ onMounted(() => {
   if (store.buildings.length > 0 && !selectedBuildingId.value) {
     selectedBuildingId.value = store.buildings.find(b => b?.name === '3号楼')?.id || store.buildings[0]?.id
   }
-  // 默认生成 3号楼 / 5F 全区域疏散路线
-  if (!store.routeMatrix && store.buildings.length) {
+  // 默认生成 3号楼整栋楼疏散方案（scope = BUILDING，A/B/C 三套策略）
+  if (store.buildings.length && !store.buildingEvacuationPlans.length) {
     const b3 = store.buildings.find(b => b?.name === '3号楼')
-    store.generateRoutePlans({ buildingId: b3 ? b3.id : store.routeBuildingId, floorId: '5F' })
+    store.generateBuildingEvacuationPlans({ buildingId: b3 ? b3.id : store.routeBuildingId })
   }
   store.addOperationLog('进入综合主页', '综合', '', 'info')
   // 3D 查看器：Esc 关闭

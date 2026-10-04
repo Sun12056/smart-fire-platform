@@ -7,7 +7,7 @@ import type { Env } from '../types'
 import { availableCommands, isLegalTransition, nextStage, STAGE_META, DEMO_COMMANDS, type DemoCommand, type DemoStage } from '../demo/stages'
 import {
   applyStageEffects, createWorld, resetWorld, retainedPersons, tickWorld,
-  resolveBuildingPlan, validateConfirmedBuildingPlan,
+  validateConfirmedBuildingPlan,
 } from '../demo/engine'
 import type { DemoBaseline, DemoWorld } from '../demo/world'
 import type { DeviceRuntime, PersonRuntime } from '../demo/world'
@@ -233,21 +233,25 @@ export class DemoRoom extends DurableObject<Env> {
   private async persistPlans(world: DemoWorld, target: DemoStage, at: string): Promise<void> {
     const db = this.env.DB
     const sc = world.scenario
-    const upsert = async (plan: DemoWorld['plans'][number], status: string) => {
+    /**
+     * ⚠️ LEGACY 落库：旧「单火灾区域 A/B/C 方案」只作为历史记录写入（type='zone'），
+     * 不参与任何疏散决策；整栋楼方案见 upsertBuildingPlans（type='building'）。
+     */
+    const upsert = async (plan: DemoWorld['legacyPlans'][number], status: string) => {
       await db.prepare(`INSERT OR REPLACE INTO evacuation_plans
         (id, name, building_id, building_name, start_floor, start_area, exit_id, exit_label, type, status, recommended,
          floors_passed, path, extra, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .bind(
           plan.id,
-          `演示${plan.name}·${sc.buildingName}${sc.floorId}`,
+          `【LEGACY·单区域】演示${plan.name}·${sc.buildingName}${sc.floorId}`,
           sc.buildingId,
           sc.buildingName,
           sc.floorId,
           plan.startZones?.[0] || sc.zone,
           plan.exitId,
           plan.exitLabel,
-          'auto',
+          'zone',
           status,
           plan.recommended ? 1 : 0,
           JSON.stringify(plan.floorsPassed || [sc.floorId]),
@@ -269,23 +273,26 @@ export class DemoRoom extends DurableObject<Env> {
     }
 
     if (target === 'ROUTE_PLANNING') {
-      for (const plan of world.plans) await upsert(plan, 'NORMAL')
+      // LEGACY 历史（不参与决策）
+      for (const plan of world.legacyPlans) await upsert(plan, 'NORMAL')
       await this.upsertBuildingPlans(world, at, 'NORMAL')
     } else if (target === 'SMART_EVACUATION') {
-      for (const plan of world.plans) {
-        await upsert(plan, plan.id === world.activePlanId ? 'EXECUTING' : 'NORMAL')
+      for (const plan of world.legacyPlans) {
+        await upsert(plan, plan.id === world.legacyActivePlanId ? 'EXECUTING' : 'NORMAL')
       }
       await this.upsertBuildingPlans(world, at, (bp) => (bp.id === world.activeBuildingPlanId ? 'EXECUTING' : 'NORMAL'))
-    } else if (target === 'RETAINED_PERSONS' && world.activePlanId) {
-      const plan = world.plans.find((p) => p.id === world.activePlanId)
-      if (plan) await upsert(plan, 'DONE')
+    } else if (target === 'RETAINED_PERSONS' && world.activeBuildingPlanId) {
+      for (const plan of world.legacyPlans) {
+        await upsert(plan, plan.id === world.legacyActivePlanId ? 'DONE' : 'NORMAL')
+      }
       await this.upsertBuildingPlans(world, at, (bp) => (bp.id === world.activeBuildingPlanId ? 'DONE' : 'NORMAL'))
     }
   }
 
   /**
-   * 整栋楼方案落库：一行 = 一栋楼的一套策略（routes / routesByZone / summary 存 extra）。
-   * 与旧的单起点方案并存，旧接口（evacuation_plans）仍可读到完整记录。
+   * 整栋楼方案落库（权威）：一行 = 一栋楼的一套策略（routes / routesByZone / summary 存 extra）。
+   * type = 'building'，供 GET /api/v1/building-evacuation-plans 读取；
+   * 旧的 GET /api/v1/evacuation-plans（legacy）会排除这些行，两者不再混在一起。
    */
   private async upsertBuildingPlans(
     world: DemoWorld,
@@ -310,7 +317,7 @@ export class DemoRoom extends DurableObject<Env> {
           sc.zone,
           Object.keys(bp.summary?.exits || {}).join(','),
           (bp.summary?.exitLabels || []).join('、'),
-          'auto',
+          'building',
           statusVal(bp),
           bp.recommended ? 1 : 0,
           JSON.stringify(bp.summary?.floors || [sc.floorId]),
@@ -342,32 +349,47 @@ export class DemoRoom extends DurableObject<Env> {
     payload: Record<string, unknown>,
   ): Response | null {
     if (command === 'CONFIRM_ROUTE') {
-      if (!world.plans.length) {
+      // ① 必须有整栋楼方案（旧 legacyPlans 不再作为门禁）
+      if (!world.buildingPlans.length) {
         return json({
-          error: '当前没有可执行的疏散方案，请先完成路线规划',
+          error: '当前没有可执行的整栋楼疏散方案，请先完成路线规划',
           stage,
           stageLabel: STAGE_META[stage]?.label,
           allowed: availableCommands(stage),
         }, 409)
       }
-      const requestId = payload.planId ? String(payload.planId) : null
-      // 整栋楼方案 id（PLAN-A/B/C）也是合法入参，不再要求它存在于旧的火源区方案列表里
-      const isBuildingPlanId = requestId && world.buildingPlans.some((p) => p.id === requestId)
-      if (requestId && !isBuildingPlanId && !world.plans.some((p) => p.id === requestId)) {
+      // ② 必须显式携带 buildingPlanId（禁止只确认火源区 / 只确认某楼层 / 只确认 A 区）
+      const buildingPlanId = payload.buildingPlanId ? String(payload.buildingPlanId) : null
+      if (!buildingPlanId) {
         return json({
-          error: `方案 ${requestId} 不存在，请从已生成的方案中选择`,
+          error: 'CONFIRM_ROUTE 必须携带 buildingPlanId（PLAN-A/B/C 整栋楼方案）',
           stage,
           stageLabel: STAGE_META[stage]?.label,
           allowed: availableCommands(stage),
-          plans: world.plans.map((p) => ({ id: p.id, name: p.name })),
+          buildingPlans: world.buildingPlans.map((p) => ({ id: p.id, name: p.name, scope: p.scope, strategy: p.strategy })),
         }, 409)
       }
-      // 整栋楼校验：scope=BUILDING / buildingId 一致 / 所有有人 floor+zone 都有合法路线
-      const bp = resolveBuildingPlan(
-        world,
-        payload.buildingPlanId ? String(payload.buildingPlanId) : requestId,
-      )
-      const v = validateConfirmedBuildingPlan(world, bp)
+      const exact = world.buildingPlans.find((p) => p.id === buildingPlanId)
+      if (!exact) {
+        return json({
+          error: `整栋楼方案 ${buildingPlanId} 不存在，请从 PLAN-A/B/C 中选择`,
+          stage,
+          stageLabel: STAGE_META[stage]?.label,
+          allowed: availableCommands(stage),
+          buildingPlans: world.buildingPlans.map((p) => ({ id: p.id, name: p.name, scope: p.scope, strategy: p.strategy })),
+        }, 409)
+      }
+      // ③ evacuationScope 必须为 BUILDING（火灾只描述位置，疏散范围恒为整栋楼）
+      if (exact.scope !== 'BUILDING' || world.evacuationScope !== 'BUILDING') {
+        return json({
+          error: `疏散范围必须为 BUILDING，实际为 ${exact.scope}`,
+          stage,
+          stageLabel: STAGE_META[stage]?.label,
+          allowed: availableCommands(stage),
+        }, 409)
+      }
+      // ④ buildingId 一致 + 所有有人 floor+zone 都有合法 route（逐条过 routeValidator）
+      const v = validateConfirmedBuildingPlan(world, exact)
       if (!v.ok) {
         return json({
           error: v.error,
@@ -435,10 +457,16 @@ export class DemoRoom extends DurableObject<Env> {
         break
       }
       case 'CONFIRM_ROUTE': {
-        const planId = payload?.planId ? String(payload.planId) : null
-        const plan = world.plans.find((p) => p.id === planId) || world.plans.find((p) => p.recommended)
-        await log('确认疏散路径', `执行方案「${plan?.name ?? '推荐方案'}」，出口 ${plan?.exitLabel ?? '安全出口'} · ${plan?.distance ?? 0}m`, 'danger')
-        await evt('确认疏散路径', `管理员确认执行方案 ${plan?.name ?? ''}`, 'danger')
+        // 权威：整栋楼方案（buildingPlans + activeBuildingPlanId）
+        const bp = world.buildingPlans.find((p) => p.id === world.activeBuildingPlanId) || null
+        await log(
+          '确认疏散路径',
+          bp
+            ? `执行整栋楼方案「${bp.name}」（scope=${bp.scope}）：${bp.summary.zoneCount} 个区域 / ${bp.summary.personCount} 人 / ${bp.summary.routeCount} 条路线，出口 ${bp.summary.exitLabels.join('、') || '安全出口'}`
+            : '执行整栋楼疏散方案',
+          'danger',
+        )
+        await evt('确认疏散路径', `管理员确认执行整栋楼方案 ${bp?.name ?? ''}（${bp?.id ?? ''}）`, 'danger')
         break
       }
       case 'COMPLETE_EVACUATION': {
@@ -487,9 +515,10 @@ export class DemoRoom extends DurableObject<Env> {
       allowedCommands: availableCommands(world.stage as DemoStage),
       fire: world.fire,
       alarmId: world.alarmId,
-      plans: world.plans,
-      activePlanId: world.activePlanId,
-      // 整栋楼疏散方案（scope = BUILDING）：前端 2D/3D 与人员路线都以此为准
+      // ⚠️ LEGACY：旧单区域方案（仅历史/旧接口兼容，前端不得用它做疏散决策）
+      plans: world.legacyPlans,
+      activePlanId: world.legacyActivePlanId,
+      // 权威：整栋楼疏散方案（scope = BUILDING）：前端 2D/3D 与人员路线都以此为准
       buildingPlans: world.buildingPlans,
       activeBuildingPlanId: world.activeBuildingPlanId,
       evacuationScope: world.evacuationScope,

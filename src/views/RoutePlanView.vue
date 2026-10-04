@@ -164,10 +164,16 @@
         </svg>
       </div>
 
-      <!-- 右：分区疏散方案 -->
+      <!-- 右：整栋楼疏散方案 · 本层各区域路线 -->
       <div class="rp-plans">
-        <div class="panel-title-bar"><span class="panel-title">分区疏散方案</span></div>
-        <div v-if="!store.routeMatrix" class="empty-tip">点击左侧「一键自动规划」生成全楼层方案</div>
+        <div class="panel-title-bar">
+          <span class="panel-title">整栋楼疏散方案</span>
+          <span v-if="buildingSummary" class="rp-plan-scope">
+            {{ buildingSummary.floors.length }} 层 · {{ buildingSummary.zoneCount }} 区 ·
+            {{ buildingSummary.personCount }} 人 · {{ buildingSummary.routeCount }} 条路线
+          </span>
+        </div>
+        <div v-if="!store.activeBuildingPlan" class="empty-tip">点击左侧「一键自动规划」生成整栋楼方案</div>
         <div
           v-for="z in zonePlanCards"
           :key="z.zone"
@@ -176,29 +182,21 @@
         >
           <div class="zone-head">
             <span class="zone-dot" :style="{ background: z.color }"></span>
-            <span class="zone-name">{{ z.zone }}</span>
-            <span class="zone-persons">👤 {{ personCount(z.zone) }} 人</span>
+            <span class="zone-name">{{ routeFloorId }} {{ z.zone }}</span>
+            <span class="zone-persons">👤 {{ z.personCount }} 人</span>
             <span v-if="z.blocked" class="tag blk">❌ 无安全路线</span>
           </div>
-          <template v-if="!z.blocked">
-            <div class="zone-rec">
-              <span class="rec-label">推荐</span>
-              <span class="rec-name">{{ z.rec ? z.rec.name : '—' }}</span>
-              <span class="rec-meta">距离 {{ z.rec?.distance }}m · {{ z.rec?.estimatedTime }}s · 风险{{ z.rec?.riskLevel }}</span>
-              <span class="rec-score">★{{ z.rec?.score }}</span>
-            </div>
-            <div class="zone-bak" v-if="z.bak">
-              <span class="bak-label">备用</span>
-              <span class="bak-name">{{ z.bak.name }}</span>
-              <span class="bak-meta">★{{ z.bak.score }}</span>
-            </div>
-            <div class="zone-actions">
-              <button class="mini-btn" @click.stop="viewZone(z.zone)">查看路线</button>
-              <button class="mini-btn primary" @click.stop="setCurrent(z.zone, z.rec?.id)">设为当前</button>
-            </div>
-          </template>
-          <div v-else class="zone-rec">
-            <span class="rec-meta">该区域处于火灾核心，需外部救援，已自动避让</span>
+          <div class="zone-rec">
+            <span class="rec-label">出口</span>
+            <span class="rec-name">{{ z.exitLabel }}</span>
+            <span class="rec-meta">距离 {{ z.distance }}m · {{ z.estimatedTime }}s · 风险{{ z.riskLevel }}</span>
+          </div>
+          <div class="zone-bak">
+            <span class="bak-label">routeId</span>
+            <span class="bak-name">{{ z.routeId }}</span>
+          </div>
+          <div class="zone-actions">
+            <button class="mini-btn" @click.stop="viewZone(z.zone)">查看路线</button>
           </div>
         </div>
       </div>
@@ -289,15 +287,14 @@ function showNotice(title, text, level = 'warning') {
   pageNotice.value = { title, text, level }
 }
 
-// 阶段③ 确认当前疏散路径：仅当处于「疏散路径」阶段且火源区域存在合法推荐方案时可用
+// 阶段③ 确认当前疏散路径：权威判据 = 是否存在当前整栋楼方案（activeBuildingPlanId）
 const canConfirmPlan = computed(() => {
   if (!store.fireEvent || store.emergencyStage !== 3) return false
-  const info = store.routeMatrix && store.routeMatrix.perZone ? store.routeMatrix.perZone[store.fireEvent.area] : null
-  return !!(info && info.recommendedId)
+  return Boolean(store.activeBuildingPlanId && store.activeBuildingPlan)
 })
 const confirmedPlanName = computed(() => {
-  const plan = store.activeRoutePlanId ? store.routePlans.find((p) => p.id === store.activeRoutePlanId) : null
-  return plan ? plan.name : '推荐方案'
+  const bp = store.activeBuildingPlan
+  return bp ? bp.name : '推荐方案'
 })
 function confirmPlan() {
   if (!canConfirmPlan.value) return
@@ -339,6 +336,8 @@ const buildingSummary = computed(() => {
 })
 const STRATEGY_CN = { BALANCED: '均衡疏散', FASTEST: '快速疏散', SAFEST: '安全优先' }
 const strategyName = (bp) => STRATEGY_CN[bp.strategy] || bp.strategy
+const RISK_CN = { LOW: '低', MEDIUM: '中', HIGH: '高' }
+const ZONE_COLOR_MAP = { 'A区': '#4361EE', 'B区': '#22C55E', 'C区': '#F59E0B', 'D区': '#8B5CF6', '走廊': '#64748B' }
 const zoneList = computed(() =>
   allZoneRoutes.value.map((z) => ({ zone: z.zone, color: z.color }))
 )
@@ -378,22 +377,28 @@ function segSeg(x1, y1, x2, y2, x3, y3, x4, y4) {
   return t >= 0 && t <= 1 && u >= 0 && u <= 1
 }
 
-// 右侧分区卡片
+/**
+ * 右侧区域卡片：整栋楼方案在当前楼层的各区域路线（只读展示）
+ * 数据源恒为 activeBuildingPlan（buildingEvacuationPlans + activeBuildingPlanId），
+ * 不再读 routeMatrix.perZone —— perZone 只是兼容投影。
+ */
 const zonePlanCards = computed(() => {
-  const m = store.routeMatrix
-  if (!m) return []
-  return m.areas.map((zone) => {
-    const info = m.perZone[zone]
-    const rec = store.routePlans.find((p) => p.id === info.recommendedId) || null
-    const bak = store.routePlans.find((p) => p.id === info.backupId) || null
-    return {
-      zone,
-      color: m.perZone[zone] ? (rec ? rec.zoneColor : '#94A3B8') : '#94A3B8',
-      rec,
-      bak,
-      blocked: !rec,
-    }
-  })
+  const bp = store.activeBuildingPlan
+  if (!bp || !Array.isArray(bp.routes)) return []
+  const floorId = routeFloorId.value
+  return bp.routes
+    .filter((r) => r && r.floorId === floorId)
+    .map((r) => ({
+      zone: r.zone,
+      color: ZONE_COLOR_MAP[r.zone] || '#4361EE',
+      routeId: r.routeId,
+      exitLabel: r.exitLabel || r.exitId,
+      distance: Math.round(r.distance || 0),
+      estimatedTime: r.estimatedTime,
+      riskLevel: RISK_CN[r.riskLevel] || '低',
+      personCount: r.personCount || 0,
+      blocked: !r.valid,
+    }))
 })
 
 const isRouteFloorOnFire = computed(() =>
@@ -508,7 +513,8 @@ function clearManual() {
 }
 
 onMounted(() => {
-  if (!store.routeMatrix) generate()
+  // 整栋楼方案是唯一权威数据源（routeMatrix 只是兼容投影）
+  if (!store.buildingEvacuationPlans.length) generate()
 })
 </script>
 
@@ -677,6 +683,7 @@ onMounted(() => {
 .legend { display: flex; gap: 6px; }
 .legend i.lg { width: 14px; height: 4px; border-radius: 2px; }
 .empty-tip { color: var(--text-tertiary); font-size: var(--fs-sm, 13px); text-align: center; padding: 30px 0; }
+.rp-plan-scope { margin-left: auto; font-size: var(--fs-xs, 11px); color: var(--text-secondary); opacity: 0.85; }
 .rp-building-tip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: var(--fs-xs, 11px); color: var(--text-secondary); }
 .rp-building-tip .bp-scope { color: #4ADE80; font-weight: 700; }
 .rp-building-tip .bp-stat { opacity: 0.8; }
