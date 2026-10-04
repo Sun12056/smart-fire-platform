@@ -21,10 +21,14 @@ export const endpoints = {
   alarmUpdate: (id) => `${API_PREFIX}/alarms/${id}`,
   inspectionList: `${API_PREFIX}/inspections`,
   inspectionCreate: `${API_PREFIX}/inspections`,
+  // ⚠️ LEGACY：旧「单火灾区域 A/B/C 预案」接口，仅历史/兼容；整栋楼方案见下方 buildingEvacuationPlan*
   evacuationPlanList: `${API_PREFIX}/evacuation-plans`,
   evacuationPlanCreate: `${API_PREFIX}/evacuation-plans`,
   evacuationPlanDetail: (id) => `${API_PREFIX}/evacuation-plans/${id}`,
   evacuationPlanUpdate: (id) => `${API_PREFIX}/evacuation-plans/${id}`,
+  // 权威：整栋楼疏散方案（scope = BUILDING，PLAN-A/B/C = 均衡/快速/安全）
+  buildingEvacuationPlanList: `${API_PREFIX}/building-evacuation-plans`,
+  buildingEvacuationPlanDetail: (id) => `${API_PREFIX}/building-evacuation-plans/${id}`,
   personPresenceList: `${API_PREFIX}/person-presence`,
   personPresenceStats: `${API_PREFIX}/person-presence/stats`,
   personPresenceHeatmap: `${API_PREFIX}/person-presence/heatmap`,

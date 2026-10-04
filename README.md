@@ -93,6 +93,13 @@ curl -X POST http://localhost:8787/api/v1/admin/seed
 
 前端启动：根目录复制 `.env.example` 为 `.env` 后设置 `VITE_DATA_SOURCE`（`mock` / `api` / `demo`），再 `npm run dev`。
 
+### 唯一权威数据源（P1.5.5）
+
+- `buildingPlans` > `activeBuildingPlanId` > `person.routeId/routePoints` —— 旧 `world.plans`（单火灾区域 A/B/C）已降级为 `legacyPlans`，仅历史/旧接口兼容，不参与任何疏散决策
+- `routeMatrix.perZone` 是**只读兼容投影**（不得决定方案 / 人员 routeId / 后端执行 / 3D 路线）
+- 权威 REST：`GET /api/v1/building-evacuation-plans`；`GET /api/v1/evacuation-plans` 标记 legacy
+- `CONFIRM_ROUTE` 必须携带 `buildingPlanId`，并校验 `scope=BUILDING` + `buildingId` 一致 + 全楼有人区域路线合法
+
 ### 整栋楼疏散：一次火灾 = 一栋楼的一次整体疏散
 
 - `fireEvent` 只描述火灾位置（楼/层/区），`evacuationScope` 恒为 `BUILDING`

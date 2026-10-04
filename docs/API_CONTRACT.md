@@ -230,6 +230,43 @@ buildingEvacuationPlanner.js
 - 阶段 4：整栋楼人员按各自 `routePoints` 移动（每人 `routeId` = `${planId}:${floorId}:${zone}`）；`PersonLayer3D` 只消费后端 `routePoints/routeId`，不重新设计。
 - 前端状态从 `routeMatrix/perZone` 迁移到 `buildingEvacuationPlan/routesByZone`（`routeMatrix` 仍按当前查看楼层派生，保证 2D 逐步迁移）。
 
+### 3.1.4 唯一权威数据源（P1.5.5 清理后）
+
+**权威顺序（恒成立）**
+
+```
+buildingPlans（整栋楼方案）
+      ↓
+activeBuildingPlanId（当前执行方案，唯一）
+      ↓
+person.routeId / routePoints（每人所属 floorId+zone 的路线）
+      ↓
+2D RouteLayer / 3D RouteLayer3D / PersonLayer3D / 后端执行
+```
+
+| 数据 | 状态 | 说明 |
+|---|---|---|
+| `buildingPlans` / `activeBuildingPlanId` / `evacuationScope` | **权威** | 唯一疏散方案来源；`evacuationScope` 恒为 `BUILDING` |
+| `person.routeId` | **权威** | `${buildingPlanId}:${floorId}:${zone}`，2D/3D/后端同一个 id |
+| `world.legacyPlans` / `legacyActivePlanId`（快照字段仍为 `plans` / `activePlanId`） | ⚠️ LEGACY | 旧「单火灾区域 A/B/C 方案」，仅历史记录与旧 REST 兼容；不得参与任何疏散决策、不得覆盖 buildingPlans |
+| `routeMatrix.perZone` | ⚠️ 只读投影 | "routeMatrix.perZone is a read-only compatibility projection and must not be used as authoritative evacuation state." 只能用于旧组件兼容 / 当前楼层局部展示 / 旧页面过渡 |
+
+**接口**
+
+| 接口 | 状态 | 返回 |
+|---|---|---|
+| `GET /api/v1/building-evacuation-plans?buildingId=` | ✅ 权威 | `{ scope: "BUILDING", buildingId, count, plans: [BuildingEvacuationPlan] }` |
+| `GET /api/v1/building-evacuation-plans/:id` | ✅ 权威 | `{ scope: "BUILDING", plan }` |
+| `GET /api/v1/evacuation-plans`（及 POST/PATCH） | ⚠️ LEGACY | 只返回 `type != 'building'` 的历史预案行，不再是 Demo 疏散方案来源 |
+
+**CONFIRM_ROUTE 约束（阶段 3 → 4）**
+
+1. 必须携带 `buildingPlanId`（PLAN-A/B/C），仅传旧 `planId` 返回 409；
+2. `plan.scope === 'BUILDING'` 且 `world.evacuationScope === 'BUILDING'`；
+3. `plan.buildingId` 与火情楼栋一致；
+4. 所有「有人员的 floorId + zone」都必须有通过 `routeValidator` 的 route，否则 409；
+5. 禁止只确认火源区 / 只确认某楼层 / 自动从旧 `legacyPlans` 补路线。
+
 ## 3.2 Demo 六阶段状态机（唯一定义）
 
 ```

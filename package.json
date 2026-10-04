@@ -11,6 +11,7 @@
     "test:unit": "node shared/evacuation/route.test.mjs && node shared/evacuation/buildingEvacuation.test.mjs",
     "test:e2e": "node worker/e2e-phase2.cjs",
     "test:e2e:browser": "node worker/e2e-phase2-browser.cjs",
+    "test:demo:building": "node worker/walkthrough-building.cjs",
     "preview": "vite preview"
   },
   "dependencies": {

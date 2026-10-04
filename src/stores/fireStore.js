@@ -2030,9 +2030,21 @@ export const useFireStore = defineStore('fire', () => {
   // 读取所有区域 × 所有安全出口 → 建立可通行路网 → 为每个区域生成多条候选路径
   // → 过滤危险路线 → 计算安全评分 → 选择推荐 + 备用 → 同步消防应急灯方向。
 
+  /**
+   * 当前查看区域在当前整栋楼方案里的那条路线（只读展示用）
+   * ⚠️ 不读 routeMatrix.perZone —— perZone 只是兼容投影；权威来源是 activeBuildingPlan。
+   */
   const currentRoutePlan = computed(() => {
+    const bp = activeBuildingPlan.value
+    if (bp && bp.routes && bp.routes.length) {
+      const route = bp.routes.find((r) => r.zone === selectedZone.value)
+        || buildingRouteOfPerson(bp, { floorId: routeFloorId.value, zone: selectedZone.value })
+      if (route) return routeToRenderable(bp, route)
+      return null
+    }
+    // ⚠️ LEGACY：无整栋楼方案时的旧投影（只读）
     const m = routeMatrix.value
-    if (!m) return null
+    if (!m || !m.perZone) return null
     const recId = m.perZone[selectedZone.value] && m.perZone[selectedZone.value].recommendedId
     return asArray(routePlans.value).find((p) => p.id === recId) || null
   })
