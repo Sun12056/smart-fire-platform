@@ -351,7 +351,9 @@ export class DemoRoom extends DurableObject<Env> {
         }, 409)
       }
       const requestId = payload.planId ? String(payload.planId) : null
-      if (requestId && !world.plans.some((p) => p.id === requestId)) {
+      // 整栋楼方案 id（PLAN-A/B/C）也是合法入参，不再要求它存在于旧的火源区方案列表里
+      const isBuildingPlanId = requestId && world.buildingPlans.some((p) => p.id === requestId)
+      if (requestId && !isBuildingPlanId && !world.plans.some((p) => p.id === requestId)) {
         return json({
           error: `方案 ${requestId} 不存在，请从已生成的方案中选择`,
           stage,

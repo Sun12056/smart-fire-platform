@@ -60,18 +60,21 @@
       <div v-if="demoStore.error" class="demo-error">{{ demoStore.error }}</div>
       <!-- 阶段 3：先选方案，再确认路径（禁止跳过确认直接进入智能疏散） -->
       <div v-if="isRoutePlanning" class="plan-picker">
-        <div class="section-label">选择疏散方案</div>
+        <div class="section-label">选择整栋楼疏散方案（PLAN-A/B/C）</div>
         <button
-          v-for="plan in demoStore.plans"
+          v-for="plan in planOptions"
           :key="plan.id"
           class="plan-chip"
           :class="{ active: isPlanSelected(plan.id) }"
           @click="demoStore.selectPlan(plan.id)"
         >
           <span class="plan-name">{{ plan.name }}</span>
-          <span class="plan-meta">{{ plan.exitLabel }} · {{ plan.distance }}m · {{ plan.estimatedTime }}s</span>
+          <span class="plan-meta">{{ planMeta(plan) }}</span>
           <span class="plan-risk" :class="plan.riskLevel">{{ riskText(plan.riskLevel) }}</span>
         </button>
+        <div v-if="buildingSummary" class="plan-scope-tip">
+          疏散范围：整栋楼（{{ buildingSummary.zoneCount }} 个区域 / {{ buildingSummary.personCount }} 人 / {{ buildingSummary.floors.join('、') }}）
+        </div>
       </div>
       <div class="demo-flow-actions">
         <button class="demo-btn demo-flow" @click="handleDemoFlow">
@@ -123,7 +126,23 @@ const isRoutePlanning = computed(() => dataSource.isDemo && demoStore.stage === 
 const RISK_TEXT = { LOW: '低风险', MEDIUM: '中风险', HIGH: '高风险' }
 const riskText = (lv) => RISK_TEXT[lv] || lv
 function isPlanSelected(id) {
-  return (demoStore.selectedPlanId || demoStore.activePlanId) === id
+  return (demoStore.selectedPlanId || demoStore.activeBuildingPlanId || demoStore.activePlanId) === id
+}
+// 整栋楼方案优先（PLAN-A/B/C = 均衡/快速/安全），没有时回退旧的火源区候选
+const planOptions = computed(() => (
+  demoStore.buildingPlans && demoStore.buildingPlans.length ? demoStore.buildingPlans : demoStore.plans
+))
+const buildingSummary = computed(() => {
+  const list = demoStore.buildingPlans || []
+  const active = list.find((p) => p.id === (demoStore.selectedPlanId || demoStore.activeBuildingPlanId)) || list[0]
+  return active && active.summary ? active.summary : null
+})
+function planMeta(plan) {
+  if (plan && plan.summary) {
+    const s = plan.summary
+    return `${s.zoneCount}区/${s.personCount}人 · 最慢 ${s.maxEstimatedTime}s · ${s.exitLabels.join('、')}`
+  }
+  return `${plan.exitLabel} · ${plan.distance}m · ${plan.estimatedTime}s`
 }
 const flowBtnText = computed(() => {
   if (!platformStore.demoFlowActive) return '启动演示流程'
@@ -135,8 +154,8 @@ const stageDescMap = {
   0: '点击「启动演示流程」开始六阶段消防应急演示。',
   1: '已定位火情建筑/楼层/区域（3号楼 5F A区），设备状态与日志已更新。',
   2: '已确认火灾并启动应急响应：联动应急照明、标记危险区域与风险人员、自动计算疏散路线。',
-  3: '多套疏散路线已生成（避开火灾区、不穿墙），查看推荐/备选路线后「确认疏散路径」。',
-  4: '智能疏散中：疏散指示灯进入脉冲强闪，A/B/C/D 人员沿路线动态撤离。',
+  3: '整栋楼疏散方案已生成（A 均衡 / B 快速 / C 安全，避开火灾区、不穿墙），选择后「确认当前疏散路径」。',
+  4: '智能疏散中：疏散指示灯进入脉冲强闪，整栋楼各楼层人员沿各自路线动态撤离。',
   5: '疏散完成，自动识别滞留人员；页面直接显示滞留人数/位置，点击「确认滞留人员位置」。',
   6: '协同救援已启动：已联系消防救援队伍，建立救援任务与通道。',
 }
@@ -440,6 +459,12 @@ function handleStopAutoDemo() {
 .plan-risk.LOW { color: #22C55E; }
 .plan-risk.MEDIUM { color: #F59E0B; }
 .plan-risk.HIGH { color: #EF4444; }
+.plan-scope-tip {
+  margin-top: 4px;
+  font-size: 9px;
+  line-height: 1.5;
+  opacity: 0.7;
+}
 
 .demo-error {
   font-size: 10px;

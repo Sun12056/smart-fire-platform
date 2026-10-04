@@ -96,6 +96,18 @@
           </span>
           <button class="debug-btn" :class="{ active: store.routeDebug }" @click="store.toggleRouteDebug()">🛰 路网调试 {{ store.routeDebug ? '开' : '关' }}</button>
         </div>
+        <!-- 整栋楼疏散：火灾只描述位置，疏散范围覆盖全部有人的楼层+区域 -->
+        <div v-if="buildingSummary" class="rp-building-tip">
+          <span class="bp-scope">疏散范围：整栋楼</span>
+          <span class="bp-stat">{{ buildingSummary.zoneCount }} 区 / {{ buildingSummary.personCount }} 人 / 最慢 {{ buildingSummary.maxEstimatedTime }}s</span>
+          <span class="bp-chips">
+            <button
+              v-for="bp in store.buildingEvacuationPlans" :key="bp.id"
+              class="bp-chip" :class="{ active: bp.id === store.activeBuildingPlanId }"
+              @click.stop="store.setActiveBuildingPlan(bp.id)"
+            >{{ bp.strategyLabel }}·{{ strategyName(bp) }}</button>
+          </span>
+        </div>
         <svg class="floor-svg" viewBox="0 0 560 300" preserveAspectRatio="xMidYMid meet" @click="onMapClick">
           <!-- 走廊背景 -->
           <rect x="60" y="150" width="440" height="40" fill="rgba(67,97,238,0.05)" stroke="rgba(67,97,238,0.2)"/>
@@ -320,6 +332,13 @@ const routeFloorId = computed({
 })
 
 const allZoneRoutes = computed(() => store.getAllZoneRoutes())
+// 整栋楼方案汇总与策略切换（A 均衡 / B 快速 / C 安全）
+const buildingSummary = computed(() => {
+  const bp = store.activeBuildingPlan
+  return bp && bp.summary ? bp.summary : null
+})
+const STRATEGY_CN = { BALANCED: '均衡疏散', FASTEST: '快速疏散', SAFEST: '安全优先' }
+const strategyName = (bp) => STRATEGY_CN[bp.strategy] || bp.strategy
 const zoneList = computed(() =>
   allZoneRoutes.value.map((z) => ({ zone: z.zone, color: z.color }))
 )
@@ -395,7 +414,12 @@ function onBuildingChange() {
   fireFloor.value = floorOptions.value[0]
 }
 function generate() {
-  store.generateRoutePlans({ buildingId: selBuilding.value, floorId: selFloor.value, targetExit: selExit.value })
+  // 整栋楼疏散：一次规划覆盖该楼全部「有人员的 floorId + zone」，A/B/C = 三种整栋楼策略
+  const res = store.generateBuildingEvacuationPlans({ buildingId: selBuilding.value })
+  if (!res || !res.plans.length) {
+    // 整栋楼规划失败（如无人员数据）时回退旧的按楼层规划，保证页面仍可用
+    store.generateRoutePlans({ buildingId: selBuilding.value, floorId: selFloor.value, targetExit: selExit.value })
+  }
 }
 function pickZone(zone) {
   store.setSelectedZone(zone)
@@ -653,6 +677,13 @@ onMounted(() => {
 .legend { display: flex; gap: 6px; }
 .legend i.lg { width: 14px; height: 4px; border-radius: 2px; }
 .empty-tip { color: var(--text-tertiary); font-size: var(--fs-sm, 13px); text-align: center; padding: 30px 0; }
+.rp-building-tip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: var(--fs-xs, 11px); color: var(--text-secondary); }
+.rp-building-tip .bp-scope { color: #4ADE80; font-weight: 700; }
+.rp-building-tip .bp-stat { opacity: 0.8; }
+.bp-chips { display: flex; gap: 4px; margin-left: auto; }
+.bp-chip { padding: 3px 8px; border: 1px solid rgba(76,201,240,0.3); background: rgba(20,30,50,0.6); color: var(--text-secondary); border-radius: 4px; font-size: var(--fs-xs, 11px); cursor: pointer; }
+.bp-chip:hover { border-color: var(--fire-blue); color: var(--text-primary); }
+.bp-chip.active { border-color: #4ADE80; background: rgba(34,197,94,0.16); color: #4ADE80; font-weight: 700; }
 
 .zone-card { border: 1px solid rgba(76, 201, 240, 0.18); border-radius: 8px; padding: 10px; background: rgba(15, 23, 42, 0.55); cursor: pointer; transition: all 0.2s; }
 .zone-card:hover { border-color: var(--fire-blue); box-shadow: 0 2px 12px rgba(67,97,238,0.15); }

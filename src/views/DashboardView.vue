@@ -613,8 +613,36 @@
               <div v-if="isFloorOnFire(expandedFloor.id)" class="fip-alert">
                 <!-- 阶段3：疏散方案决策（A/B/C/D 四区分组方案，点选实时联动平面图路线） -->
                 <template v-if="store.emergencyStage === 3 && store.fireEvent">
-                  <div class="fip-alert-title plan-title">🧭 疏散方案决策</div>
-                  <div class="fip-sub">A/B/C/D 四区共 {{ totalPlanCount }} 套合法疏散方案，点击方案实时联动平面图路线与疏散灯方向</div>
+                  <div class="fip-alert-title plan-title">🧭 整栋楼疏散方案决策</div>
+                  <div class="fip-sub">
+                    火灾位置 {{ store.fireEvent.floor }}-{{ store.fireEvent.area }} · 疏散范围
+                    <b>整栋楼</b>
+                    <template v-if="buildingSummary">（{{ buildingSummary.zoneCount }} 个区域 / {{ buildingSummary.personCount }} 人 / {{ buildingSummary.floors.join('、') }}）</template>
+                  </div>
+                  <!-- PLAN-A/B/C：整栋楼三种策略（均衡 / 快速 / 安全），切换后全楼人员路线同步切换 -->
+                  <div v-if="store.buildingEvacuationPlans.length" class="fip-plan-list building-plans">
+                    <button
+                      v-for="bp in store.buildingEvacuationPlans" :key="bp.id"
+                      type="button"
+                      class="fip-plan"
+                      :class="{ active: bp.id === store.activeBuildingPlanId }"
+                      @click="store.setActiveBuildingPlan(bp.id)"
+                    >
+                      <div class="fip-plan-head">
+                        <span class="plan-badge">{{ bp.strategyLabel }}</span>
+                        <span class="plan-name">{{ bp.name }}</span>
+                        <span v-if="bp.recommended" class="plan-rec">推荐</span>
+                        <span v-if="bp.id === store.activeBuildingPlanId" class="plan-sel">已选</span>
+                      </div>
+                      <div class="fip-plan-meta">
+                        <span class="em-chip num-font">最慢 {{ bp.summary.maxEstimatedTime }}s</span>
+                        <span class="em-chip num-font">{{ bp.summary.totalDistance }}m</span>
+                        <span class="em-chip">{{ bp.summary.exitLabels.join('、') || '—' }}</span>
+                        <span class="em-chip">风险 {{ riskCn(bp.summary.riskLevel) }}</span>
+                      </div>
+                    </button>
+                  </div>
+                  <div class="fip-sub">各区域路线（点选可查看该区域在不同策略下的路线）</div>
                   <div v-if="zonePlanGroups.length" class="fip-zone-list">
                     <div v-for="g in zonePlanGroups" :key="g.zone" class="fip-zone-group">
                       <div class="fip-zone-head" :class="{ 'is-fire': g.isFire }">
@@ -648,7 +676,7 @@
                     </div>
                   </div>
                   <button v-else class="fip-warn-text">各区域暂无可通行疏散路线</button>
-                  <button v-if="store.activeRoutePlanId" class="fip-clear-btn" @click="handleConfirmExec">确认执行疏散</button>
+                  <button v-if="store.activeRoutePlanId || store.activeBuildingPlanId" class="fip-clear-btn" @click="handleConfirmExec">确认执行整栋楼疏散</button>
                 </template>
                 <!-- 阶段4：智能疏散进行中（实时进度） -->
                 <template v-else-if="store.emergencyStage === 4 && store.fireEvent">
@@ -1336,6 +1364,13 @@ const zonePlanGroups = computed(() => {
   })
 })
 const totalPlanCount = computed(() => zonePlanGroups.value.reduce((s, g) => s + g.plans.length, 0))
+// 整栋楼方案汇总（scope = BUILDING）
+const buildingSummary = computed(() => {
+  const bp = store.activeBuildingPlan
+  return bp && bp.summary ? bp.summary : null
+})
+const RISK_CN_TEXT = { LOW: '低', MEDIUM: '中', HIGH: '高' }
+const riskCn = (lv) => RISK_CN_TEXT[lv] || lv
 // 当前执行/预览方案 + 本层路径段（路线渲染与疏散灯联动共用同一数据源）
 const activePlan = computed(() => {
   const id = store.activeRoutePlanId

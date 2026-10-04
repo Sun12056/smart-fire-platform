@@ -27,8 +27,23 @@ export class RouteLayer3D {
     this.activeCurves = []
   }
 
-  // ── 方案切换：仅当 activeRoutePlanId 变化时重建 tube ──
+  // ── 方案切换：仅当方案 id 变化时重建 tube ──
   update(store) {
+    // 整栋楼方案：一次绘制该方案下「全部区域」的路线（每个 floorId+zone 一条）
+    const bp = store.activeBuildingPlan
+    if (bp && Array.isArray(bp.routes) && bp.routes.length) {
+      const activeId = `${bp.id}:${bp.routes.length}`
+      if (activeId === this.currentPlanId && this.group.visible) return
+      this.currentPlanId = activeId
+      this._disposeTubes()
+      this.group.visible = true
+      this.activeCurves = []
+      bp.routes.forEach((r) => {
+        const pts = this._pointsOfNodes(r.nodes || [], r.points || [])
+        if (pts.length >= 2) this._buildTube(pts)
+      })
+      return
+    }
     const plans = store.routePlans || []
     if (!plans.length) {
       if (this.group.visible) {
@@ -37,12 +52,12 @@ export class RouteLayer3D {
       }
       return
     }
-    const activeId = store.activeRoutePlanId || plans[0].id
-    if (activeId === this.currentPlanId && this.group.visible) return
-    this.currentPlanId = activeId
+    const legacyId = store.activeRoutePlanId || plans[0].id
+    if (legacyId === this.currentPlanId && this.group.visible) return
+    this.currentPlanId = legacyId
 
     this._disposeTubes()
-    const plan = plans.find((p) => p.id === activeId)
+    const plan = plans.find((p) => p.id === legacyId)
     if (!plan) {
       this.group.visible = false
       this.activeCurves = []
@@ -53,6 +68,23 @@ export class RouteLayer3D {
 
     const pts = this._planToPoints(plan)
     if (pts.length < 2) return
+    this._buildTube(pts)
+  }
+
+  /** 节点序列（shared/evacuation 的 route.nodes/points）→ 世界坐标点列 */
+  _pointsOfNodes(nodes, points) {
+    const pts = []
+    nodes.forEach((id, i) => {
+      const pt = points[i]
+      if (!pt || pt.x == null || pt.y == null) return
+      const floorId = String(id).split(':')[0]
+      const w = svgToStand(this.model, pt.x, pt.y, floorId, ROUTE_Y)
+      if (w) pts.push(w)
+    })
+    return pts
+  }
+
+  _buildTube(pts) {
     this._lastPoints = pts // 供救援层反向使用（出口 → 火源）
     const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.35)
     const tube = new THREE.TubeGeometry(curve, Math.max(80, pts.length * 12), 0.16, 12, false)
