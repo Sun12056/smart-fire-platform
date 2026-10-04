@@ -385,6 +385,73 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   }, 12000)
   check('tick 推进 position（权威坐标，3D 只做视觉插值）', posAdvanced)
 
+  // ── 7.7 设备数据链统一（P1.6.2） ──
+  console.log('\n[7.7] 设备数据链统一（D1 → DeviceRuntime → WS → 楼层定位）')
+  // 统一字段：id / type / buildingId / floorId / zone / status / currentMode / direction / brightness / emergencyFlash
+  const DEVICE_FIELDS = ['id', 'type', 'buildingId', 'floorId', 'zone', 'status', 'currentMode', 'direction', 'brightness', 'emergencyFlash']
+  const canonicalDevice = (d) => Boolean(d)
+    && DEVICE_FIELDS.every((f) => d[f] !== undefined)
+    && /^B\d{3}$/.test(String(d.buildingId))
+    && /^\d+F$/.test(String(d.floorId))
+    && typeof d.brightness === 'number' && Number.isFinite(d.brightness)
+    && typeof d.emergencyFlash === 'boolean'
+
+  const devState = await api(`/api/v1/demo/state?sessionId=${SESSION}`)
+  const snapDevs = devState.body?.devices || []
+  check('快照设备含统一字段 10 项', snapDevs.length > 0 && snapDevs.every(canonicalDevice),
+    snapDevs.filter((d) => !canonicalDevice(d)).slice(0, 2))
+  check('快照设备全部属于火警楼栋 B003', snapDevs.every((d) => d.buildingId === 'B003'),
+    [...new Set(snapDevs.map((d) => d.buildingId))])
+  const devFloors = [...new Set(snapDevs.map((d) => d.floorId))].sort()
+  check('WS 快照可准确定位到楼层（floorId 覆盖 1F~6F）',
+    devFloors.length === 6 && devFloors.every((f) => /^[1-6]F$/.test(f)), devFloors)
+  check('zone（所属区域）非空且与楼层归属同源',
+    snapDevs.every((d) => typeof d.zone === 'string' && d.zone.length > 0),
+    snapDevs.filter((d) => !d.zone).slice(0, 2).map((d) => d.id))
+
+  // 与 REST /devices 口径一致（同一设备 id、同一楼层归属）
+  const restDevs = await api('/api/v1/devices?buildingId=B003')
+  const restMap = new Map((restDevs.body || []).map((d) => [String(d.id), d]))
+  check('快照设备 id 与 REST /devices 完全一致',
+    snapDevs.length > 0 && snapDevs.every((d) => restMap.has(String(d.id))),
+    snapDevs.filter((d) => !restMap.has(String(d.id))).slice(0, 3).map((d) => d.id))
+  const devFloorMismatch = snapDevs.filter((d) => {
+    const r = restMap.get(String(d.id))
+    return r && (r.floorId !== d.floorId || String(r.zone ?? '') !== String(d.zone ?? ''))
+  })
+  check('快照设备楼层归属与 REST 一致（floorId / zone）',
+    devFloorMismatch.length === 0, devFloorMismatch.slice(0, 3).map((d) => [d.id, d.floorId, d.zone]))
+
+  // 整栋楼设备联动：范围为「一整栋楼」，不是火警楼层
+  const linked = snapDevs.filter((d) => d.currentMode === 'emergency')
+  const linkedFloors = [...new Set(linked.map((d) => d.floorId))].sort()
+  check('整栋楼设备联动：应急联动覆盖全部 6 层',
+    linkedFloors.length === 6, { linkedFloors, total: linked.length })
+  check('每层联动都含疏散指示灯与应急照明',
+    linkedFloors.every((f) => ['evacuation_light', 'emergency_light'].every(
+      (t) => linked.some((d) => d.floorId === f && d.type === t),
+    )), linkedFloors)
+  check('火警楼层 5F 烟感为 warning',
+    snapDevs.filter((d) => d.type === 'smoke_detector' && d.floorId === '5F').every((d) => d.status === 'warning'),
+    snapDevs.filter((d) => d.type === 'smoke_detector' && d.floorId === '5F').map((d) => d.status))
+  check('联动设备亮度拉满（brightness=100）',
+    linked.filter((d) => d.type === 'emergency_light').every((d) => d.brightness === 100),
+    linked.filter((d) => d.type === 'emergency_light' && d.brightness !== 100).slice(0, 2))
+
+  // WebSocket 广播的设备同样符合统一契约（不只是 REST /state）
+  const lastStage = [...live].reverse().find((m) => m.type === 'demo.stage')
+  const wsDevs = lastStage?.devices || []
+  check('WS demo.stage 广播设备符合统一契约',
+    wsDevs.length > 0 && wsDevs.every(canonicalDevice), wsDevs.filter((d) => !canonicalDevice(d)).slice(0, 2))
+  const wsDevIds = new Set(wsDevs.map((d) => String(d.id)))
+  check('WS 与 /state 使用同一批设备 id',
+    wsDevIds.size === snapDevs.length && snapDevs.every((d) => wsDevIds.has(String(d.id))),
+    { ws: wsDevIds.size, state: snapDevs.length })
+  const wsFloorMap = new Map(wsDevs.map((d) => [String(d.id), `${d.floorId}:${d.zone}`]))
+  check('WS 与 /state 使用同一个楼层归属（floorId:zone）',
+    snapDevs.every((d) => wsFloorMap.get(String(d.id)) === `${d.floorId}:${d.zone}`),
+    snapDevs.slice(0, 3).map((d) => [d.id, wsFloorMap.get(String(d.id))]))
+
   // ── 8. 复位闭环 ──
   console.log('\n[8] 复位')
   const reset2 = await api(`/api/v1/demo/reset?sessionId=${SESSION}`, { method: 'POST' })

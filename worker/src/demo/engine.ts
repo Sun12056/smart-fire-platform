@@ -104,7 +104,10 @@ export function applyStageEffects(
   const personList = () => Object.values(world.persons)
   const floorPersons = () => personList().filter((p) => p.buildingId === scenario.buildingId && p.floorId === scenario.floorId)
   const fireZonePersons = () => floorPersons().filter((p) => p.zone === scenario.zone)
-  const floorDevices = () => Object.values(world.devices).filter((d) => true)
+  // 整栋楼联动（scope = BUILDING）：火灾只描述位置，联动范围是「一整栋楼」，不是火警楼层。
+  // 设备归属用统一三元组判定（buildingId），楼层定位交给 floorId —— 见 devicesOnFloor(floorId)。
+  const buildingDevices = () => Object.values(world.devices)
+    .filter((d) => !d.buildingId || d.buildingId === scenario.buildingId)
 
   switch (stage) {
     case 'IDLE':
@@ -121,7 +124,7 @@ export function applyStageEffects(
         detectedAt: at,
       }
       world.alarmId = payload.alarmId ? String(payload.alarmId) : world.alarmId
-      for (const d of floorDevices()) {
+      for (const d of buildingDevices()) {
         if (d.type === 'smoke_detector') { d.status = 'warning'; d.currentMode = 'daily' }
       }
       world.metrics.riskZones = 1
@@ -131,7 +134,7 @@ export function applyStageEffects(
 
     case 'EMERGENCY_RESPONSE': {
       const rand = seededRand(world.sessionId + scenario.zone)
-      for (const d of floorDevices()) {
+      for (const d of buildingDevices()) {
         if (d.type !== 'emergency_light' && d.type !== 'evacuation_light') continue
         d.status = 'emergency'
         d.currentMode = 'emergency'

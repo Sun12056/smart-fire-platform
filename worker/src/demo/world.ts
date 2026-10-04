@@ -94,9 +94,20 @@ export interface PersonRuntime {
   rescued: boolean
 }
 
+/**
+ * 设备运行时（P1.6.2 统一数据契约）
+ * 对外（WebSocket snapshot）一律经 shared/device/deviceRuntime 的 normalizeDeviceRuntime 序列化为：
+ *   id / type / buildingId / floorId / zone / status / currentMode / direction / brightness / emergencyFlash
+ * buildingId / floorId / zone 是设备的「楼层归属」三元组，来自 D1 devices.building_id / floor_id / zone（唯一权威），
+ * 前端凭 (buildingId, floorId) 即可把 WS 快照准确定位到楼层，无需解析 deviceId 字符串。
+ * 铁律：status / currentMode / direction / brightness 只能由后端产生，前端只消费。
+ */
 export interface DeviceRuntime {
   id: string
   type: string
+  buildingId: string
+  floorId: string
+  zone: string
   status: string
   currentMode: string
   direction: string

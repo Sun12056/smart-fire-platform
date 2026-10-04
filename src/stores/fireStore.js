@@ -50,6 +50,11 @@ import { EVACUATION_SCOPE, STRATEGY, zoneKeyOf } from '../../shared/evacuation/b
 import {
   normalizePersonRuntime, assignPersonRuntime, isCanonicalPerson,
 } from '../../shared/person/personRuntime.js'
+// 设备运行时统一契约（P1.6.2）：后端 / 2D / 3D 同一个设备 id、同一个楼层归属（buildingId/floorId/zone）
+import {
+  normalizeDeviceRuntime, assignDeviceRuntime, isCanonicalDevice,
+  devicesOnFloor, floorsOfDevices, deviceInBuilding,
+} from '../../shared/device/deviceRuntime.js'
 import {
   ROOM_AREAS,
   ZONE_COLORS,
@@ -73,7 +78,8 @@ export const useFireStore = defineStore('fire', () => {
   // ================== State ==================
   const buildings = ref(Array.isArray(initialBuildings) ? [...initialBuildings] : [])
   // 设备统一来自平面空间数据（floorPlanData 生成，4 栋 × 6 层，含坐标/方向/所属区域），不再使用旧 mock 台账
-  const devices = ref(buildSeedDevices())
+  // 统一契约（P1.6.2）：每台设备都有 buildingId / floorId / zone，可与后端 WS 快照按 id 对齐
+  const devices = ref(normalizeDevices(buildSeedDevices()))
   const alarms = ref(Array.isArray(initialAlarms) ? [...initialAlarms] : [])
   const stats = ref(initialStats && typeof initialStats === 'object' ? { ...initialStats } : {})
   const selectedBuilding = ref(null)
@@ -95,6 +101,27 @@ export const useFireStore = defineStore('fire', () => {
   /** 批量规范化人员（统一字段 + 只读别名），mock 与远端数据一律经过这里 */
   function normalizePersons(list) {
     return (Array.isArray(list) ? list : []).map((p) => normalizePersonRuntime(p))
+  }
+
+  /** 批量规范化设备（统一字段 + 只读取别名），mock 与远端数据一律经过这里 */
+  function normalizeDevices(list) {
+    return (Array.isArray(list) ? list : []).map((d) => normalizeDeviceRuntime(d))
+  }
+
+  /**
+   * 设备楼层归属（P1.6.2 核心能力）：WS 快照 / REST / mock 三种来源都按 buildingId + floorId 定位。
+   * 返回 [{ floorId, count }]，楼层按 1F → 6F 升序。
+   */
+  function deviceFloorsOfBuilding(buildingId) {
+    return floorsOfDevices(devices.value, buildingId).map((floorId) => ({
+      floorId,
+      count: devicesOnFloor(devices.value, buildingId, floorId).length,
+    }))
+  }
+
+  /** 统一字段完整性自检（E2E 用）：返回不符合设备契约的设备数 */
+  function countNonCanonicalDevices() {
+    return asArray(devices.value).filter((d) => !isCanonicalDevice(d)).length
   }
 
   /** 位置同步：x / y（旧别名）↔ position（统一字段），2D/3D 读到的始终是同一份坐标 */
@@ -122,7 +149,8 @@ export const useFireStore = defineStore('fire', () => {
         operationLogService.list({ limit: 200 }),
       ])
       if (Array.isArray(blds) && blds.length) buildings.value = blds
-      if (Array.isArray(devs) && devs.length) devices.value = devs
+      // 远端设备同样升级为统一字段（D1 行已含 buildingId / floorId / zone，与后端 DeviceRuntime 同一套 id）
+      if (Array.isArray(devs) && devs.length) devices.value = normalizeDevices(devs)
       if (Array.isArray(alms) && alms.length) alarms.value = alms
       if (Array.isArray(insps) && insps.length) inspectionHistory.value = insps
       if (Array.isArray(ppl) && ppl.length) {
@@ -278,17 +306,13 @@ export const useFireStore = defineStore('fire', () => {
     if (Array.isArray(snap.plans)) applyDemoPlans(snap)
     // ③ 人员（按 id 合并后端运行时）
     if (Array.isArray(snap.persons)) applyDemoPersons(snap.persons)
-    // ④ 设备（状态 / 模式 / 方向 / 亮度）
+    // ④ 设备（按 id 合并后端运行时：状态 / 模式 / 方向 / 亮度 + 楼层归属 buildingId/floorId/zone）
     if (Array.isArray(snap.devices)) {
       const dmap = new Map(snap.devices.map((d) => [String(d.id), d]))
       asArray(devices.value).forEach((d) => {
         const r = dmap.get(String(d.id))
         if (!r) return
-        if (r.status !== undefined) d.status = r.status
-        if (r.currentMode !== undefined) d.currentMode = r.currentMode
-        if (r.direction !== undefined) { d.direction = r.direction; d.recommendedDirection = r.direction }
-        if (r.brightness !== undefined) d.brightness = r.brightness
-        d.emergencyFlash = !!r.emergencyFlash
+        assignDeviceRuntime(d, r)
       })
     }
     // ⑤ 照明
@@ -551,9 +575,10 @@ export const useFireStore = defineStore('fire', () => {
     addOperationLog('批量调整疏散灯方向', '设备控制', reason + ' ' + newDirection)
     const devs = asArray(devices.value).filter((d) => {
       if (!d || d.type !== 'evacuation_light') return false
+      if (filters.buildingId && d.buildingId !== filters.buildingId) return false
       if (filters.building && d.building !== filters.building) return false
-      if (filters.floors && filters.floors.length > 0 && !filters.floors.includes(d.floor)) return false
-      if (filters.areas && filters.areas.length > 0 && !filters.areas.includes(d.area)) return false
+      if (filters.floors && filters.floors.length > 0 && !filters.floors.includes(d.floorId) && !filters.floors.includes(d.floor)) return false
+      if (filters.areas && filters.areas.length > 0 && !filters.areas.includes(d.area) && !filters.areas.includes(d.zone)) return false
       return true
     })
 
@@ -1160,12 +1185,16 @@ export const useFireStore = defineStore('fire', () => {
     return true
   }
   // 按楼栋+楼层+类型筛选设备
+  // P1.6.2：统一字段（buildingId / floorId / zone）优先，旧中文名 / 旧 area 过滤器仍兼容
   function getDevicesFiltered(filters = {}) {
     return asArray(devices.value).filter((d) => {
       if (!d) return false
+      if (filters.buildingId && d.buildingId !== filters.buildingId) return false
       if (filters.building && d.building !== filters.building) return false
+      if (filters.floorId && d.floorId !== filters.floorId) return false
       if (filters.floor && d.floor !== filters.floor) return false
-      if (filters.floors && filters.floors.length > 0 && !filters.floors.includes(d.floor)) return false
+      if (filters.floors && filters.floors.length > 0 && !filters.floors.includes(d.floorId) && !filters.floors.includes(d.floor)) return false
+      if (filters.zone && d.zone !== filters.zone && d.area !== filters.zone) return false
       if (filters.area && d.area !== filters.area) return false
       if (filters.type && d.type !== filters.type) return false
       if (filters.types && filters.types.length > 0 && !filters.types.includes(d.type)) return false
@@ -1622,8 +1651,8 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   function resetDemoState() {
-    // 重置设备为初始状态（平面空间数据源重新生成，保证与首页平面图同源）
-    devices.value = buildSeedDevices()
+    // 重置设备为初始状态（平面空间数据源重新生成，保证与首页平面图同源；统一字段规范化）
+    devices.value = normalizeDevices(buildSeedDevices())
     // 重置建筑聚合
     buildings.value = JSON.parse(JSON.stringify(initialBuildings))
     // 重置告警
@@ -2632,15 +2661,17 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   // 根据路线出口方向自动联动沿途疏散灯
+  // P1.6.2：楼层归属用统一三元组判定 —— buildingId（兼容旧 buildingName）+ floorId + 路线途经楼层
   function applyRouteToDevices(plan, bindingsAcc) {
     if (!plan) return
-    const buildingName = plan.buildingName
+    const buildingKey = plan.buildingId || plan.buildingName
+    const floorsPassed = plan.floorsPassed || []
     const bindings = bindingsAcc || []
     asArray(devices.value).forEach((d) => {
       if (
         d &&
-        d.building === buildingName &&
-        plan.floorsPassed.includes(d.floor) &&
+        deviceInBuilding(d, buildingKey) &&
+        floorsPassed.includes(d.floorId || d.floor) &&
         (d.type === 'evacuation_light' || d.type === 'emergency_light')
       ) {
         if (d.type === 'evacuation_light') {
@@ -2892,6 +2923,9 @@ export const useFireStore = defineStore('fire', () => {
     personRuntimes,
     personRouteId,
     countNonCanonicalPersons,
+    // ── 设备统一数据链（P1.6.2）：后端 / 2D / 3D 同一设备 id、同一楼层归属 ──
+    deviceFloorsOfBuilding,
+    countNonCanonicalDevices,
     onlineSensorCount,
     riskAreaCount,
     deviceHealthScore,

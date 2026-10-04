@@ -138,6 +138,23 @@ const cmd = (command, payload = {}) =>
     })
     check('mock 模式人员字段符合统一契约',
       mockPersons.total > 0 && mockPersons.allHaveFields && mockPersons.nonCanonical === 0, mockPersons)
+    // 设备统一契约（P1.6.2）：mock 设备的楼层归属同样齐全（buildingId / floorId / zone）
+    const mockDevices = await page.evaluate(() => {
+      const s = window.__demo.store
+      const FIELDS = ['id', 'type', 'buildingId', 'floorId', 'zone', 'status', 'currentMode', 'direction', 'brightness', 'emergencyFlash']
+      const ds = s.devices || []
+      return {
+        total: ds.length,
+        nonCanonical: s.countNonCanonicalDevices ? s.countNonCanonicalDevices() : -1,
+        allHaveFields: ds.every((d) => FIELDS.every((f) => d[f] !== undefined)),
+        floors: s.deviceFloorsOfBuilding ? s.deviceFloorsOfBuilding('B003') : null,
+        sample: ds.slice(0, 2).map((d) => [d.id, d.buildingId, d.floorId, d.zone, d.status]),
+      }
+    })
+    check('mock 模式设备字段符合统一契约',
+      mockDevices.total > 0 && mockDevices.allHaveFields && mockDevices.nonCanonical === 0, mockDevices)
+    check('mock 设备可按楼层归属枚举（B003 1F~6F）',
+      (mockDevices.floors || []).length === 6, mockDevices.floors)
     check('无 JS 运行时错误', !consoleLogs.some((l) => l.startsWith('[error]')), consoleLogs.filter((l) => l.startsWith('[error]')).slice(0, 2))
   } else if (EXPECT_OFFLINE) {
     console.log('\n[后端不可用：禁止静默回退 mock]')
@@ -627,6 +644,56 @@ const cmd = (command, payload = {}) =>
     check('后端 → 3D：3D 路线指纹携带同一 routeId', chain.keyNoRoute === 0, chain)
     check('后端 → 2D：position 同源', chain.posMismatch === 0, chain)
     check('3D 未自行生成路线（无本地 mock 路线指纹）', chain.selfGenerated === 0, chain)
+
+    // ── ④·补3 设备数据链统一（P1.6.2） ──
+    console.log('\n[④·补3] 设备数据链统一（后端 / 2D 同一设备 ID 与楼层归属）')
+    const dchain = await page.evaluate(() => {
+      const demo = window.__demo.demoStore   // 后端 WebSocket 快照
+      const store = window.__demo.store      // fireStore（2D 平面图 / 3D 消费）
+      const FIELDS = ['id', 'type', 'buildingId', 'floorId', 'zone', 'status', 'currentMode', 'direction', 'brightness', 'emergencyFlash']
+      const canonical = (d) => Boolean(d)
+        && FIELDS.every((f) => d[f] !== undefined)
+        && /^B\d{3}$/.test(String(d.buildingId))
+        && /^\d+F$/.test(String(d.floorId))
+        && typeof d.brightness === 'number'
+        && typeof d.emergencyFlash === 'boolean'
+      const backend = demo.devices || []
+      const twoD = store.devices || []
+      const bIds = backend.map((d) => String(d.id))
+      const dMap = new Map(twoD.map((d) => [String(d.id), d]))
+      // 楼层归属一致性：同一 id 在后端与 2D 必须落在同一层
+      const floorMismatch = backend.filter((d) => {
+        const t = dMap.get(String(d.id))
+        return t && (t.floorId !== d.floorId || t.buildingId !== d.buildingId || String(t.zone ?? '') !== String(d.zone ?? ''))
+      })
+      const missing = backend.filter((d) => !dMap.has(String(d.id)))
+      // 整栋楼联动：dispatch 后每层都应有 emergency 联动设备
+      const linked = backend.filter((d) => d.currentMode === 'emergency')
+      const linkedFloors = [...new Set(linked.map((d) => d.floorId))].sort()
+      return {
+        backendCount: backend.length,
+        twoDCount: twoD.length,
+        allInBuilding: backend.every((d) => d.buildingId === 'B003'),
+        backendFloors: [...new Set(backend.map((d) => d.floorId))].sort(),
+        nonCanonicalBackend: backend.filter((d) => !canonical(d)).length,
+        selfCheck: store.countNonCanonicalDevices ? store.countNonCanonicalDevices() : -1,
+        missingIn2D: missing.length,
+        floorMismatch: floorMismatch.length,
+        storeFloorSummary: store.deviceFloorsOfBuilding ? store.deviceFloorsOfBuilding('B003') : null,
+        linkedFloors,
+        sample: backend.slice(0, 2).map((d) => [d.id, d.buildingId, d.floorId, d.zone, d.currentMode]),
+      }
+    })
+    check('设备快照含统一字段 10 项', dchain.backendCount > 0 && dchain.nonCanonicalBackend === 0, dchain)
+    check('设备全部归属火警楼栋 B003', dchain.allInBuilding, dchain.backendFloors)
+    check('WS 设备快照可准确定位到楼层（floorId 覆盖 1F~6F）',
+      dchain.backendFloors.length === 6 && dchain.backendFloors.every((f) => /^[1-6]F$/.test(f)), dchain.backendFloors)
+    check('2D 设备同样符合统一契约', dchain.selfCheck === 0, dchain)
+    check('后端 → 2D：同一批设备 ID', dchain.missingIn2D === 0, dchain)
+    check('后端 → 2D：同一楼层归属（buildingId / floorId / zone）', dchain.floorMismatch === 0, dchain)
+    check('store 可按楼层枚举设备（deviceFloorsOfBuilding）',
+      (dchain.storeFloorSummary || []).length === 6, dchain.storeFloorSummary)
+    check('整栋楼设备联动：6 层全部进入 emergency', dchain.linkedFloors.length === 6, dchain.linkedFloors)
 
     await clickByText('推进下一步')
     check('⑤ 滞留人员识别', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'RETAINED_PERSONS'), 8000),

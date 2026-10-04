@@ -10,6 +10,8 @@ import { WS_MSG, DEMO_FLOW_STAGES } from '../api/contract'
 import { dataSource } from '../api'
 // 人员运行时统一契约（P1.6.1）：后端 → demoStore → fireStore → 2D/3D 同一套字段
 import { normalizePersonRuntime } from '../../shared/person/personRuntime.js'
+// 设备运行时统一契约（P1.6.2）：后端 → demoStore → fireStore → 2D/3D 同一套设备 id 与楼层归属
+import { normalizeDeviceRuntime } from '../../shared/device/deviceRuntime.js'
 
 export const useDemoStore = defineStore('demo', () => {
   // ── 状态（全部来自后端） ──
@@ -101,7 +103,10 @@ export const useDemoStore = defineStore('demo', () => {
     if (snap.persons !== undefined) {
       persons.value = (snap.persons || []).map((p) => normalizePersonRuntime(p))
     }
-    if (snap.devices !== undefined) devices.value = snap.devices || []
+    // 设备：统一契约（后端权威的 buildingId / floorId / zone → 楼层归属）
+    if (snap.devices !== undefined) {
+      devices.value = (snap.devices || []).map((d) => normalizeDeviceRuntime(d))
+    }
     if (snap.eventLog !== undefined) eventLog.value = snap.eventLog || []
     if (snap.evacuationSettled !== undefined) evacuationSettled.value = snap.evacuationSettled
 
@@ -118,6 +123,8 @@ export const useDemoStore = defineStore('demo', () => {
       case WS_MSG.TICK:
         // 实时疏散动态：只更新人员与指标（人员同样按统一契约规范化）
         if (msg.persons) persons.value = msg.persons.map((p) => normalizePersonRuntime(p))
+        // 设备状态变化同样可能随 tick 下发（当前后端只在 snapshot/stage 带设备，这里做兼容）
+        if (msg.devices) devices.value = msg.devices.map((d) => normalizeDeviceRuntime(d))
         if (msg.metrics) metrics.value = msg.metrics
         if (msg.evacuationSettled !== undefined) evacuationSettled.value = msg.evacuationSettled
         if (msg.seq !== undefined) seq.value = msg.seq

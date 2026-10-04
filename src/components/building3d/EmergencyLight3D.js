@@ -28,11 +28,15 @@ export class EmergencyLight3D {
     this.emMap = new Map()   // deviceId → { light, baseIntensity, baseY }
   }
 
-  // ── 从 store 同步：按 device.type / building 筛选 ──
+  // ── 从 store 同步：按统一楼层归属（buildingId，兼容旧 building 名）+ type 筛选 ──
   update(store) {
     if (!this.model.idx.entries.length) return
     const bldName = currentBuildingName(store)
-    const devs = (store.devices || []).filter((d) => d.building === bldName)
+    const bldId = (store.dashboardView || {}).selectedBuildingId
+    const devs = (store.devices || []).filter((d) => d && (
+      (bldId && String(d.buildingId || '') === String(bldId))
+      || (!bldId && d.building === bldName)
+    ))
     if (!devs.length) {
       this.evacGroup.visible = false
       this.emGroup.visible = false

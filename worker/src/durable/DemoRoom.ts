@@ -14,10 +14,13 @@ import type { DeviceRuntime, PersonRuntime } from '../demo/world'
 import { fmtSH } from '../db'
 // 人员运行时统一契约（P1.6.1）：后端 → WS → 2D/3D 同一套字段
 import { normalizePersonRuntime } from '../../../shared/person/personRuntime.js'
+// 设备运行时统一契约（P1.6.2）：后端 → WS → 2D/3D 同一套设备 id 与楼层归属
+import { normalizeDeviceRuntime } from '../../../shared/device/deviceRuntime.js'
 
 const TICK_MS = 1000
-// v2：基线覆盖整栋楼各楼层（scope = BUILDING），旧缓存只有火警楼层，需失效重建
-const BASELINE_KEY = 'baseline.v2'
+// v3：基线覆盖整栋楼各楼层（scope = BUILDING）且设备带 buildingId/floorId/zone，
+// 旧缓存（v2）设备缺楼层归属字段，需失效重建
+const BASELINE_KEY = 'baseline.v3'
 const WORLD_KEY = 'world'
 const DEFAULT_SCENARIO = { buildingId: 'B003', floorId: '5F', zone: 'A区' }
 
@@ -39,7 +42,7 @@ export class DemoRoom extends DurableObject<Env> {
        WHERE building_id = ? ORDER BY floor_id, id LIMIT 400`,
     ).bind(DEFAULT_SCENARIO.buildingId).all<Record<string, unknown>>()
     const deviceRows = await db.prepare(
-      `SELECT id, type, status, current_mode, direction, brightness, emergency_flash FROM devices
+      `SELECT id, type, building_id, floor_id, zone, status, current_mode, direction, brightness, emergency_flash FROM devices
        WHERE building_id = ? AND type IN ('evacuation_light','emergency_light','smoke_detector','radar_sensor') ORDER BY id LIMIT 600`,
     ).bind(DEFAULT_SCENARIO.buildingId).all<Record<string, unknown>>()
 
@@ -67,6 +70,10 @@ export class DemoRoom extends DurableObject<Env> {
     const devices: DeviceRuntime[] = (deviceRows.results ?? []).map((r) => ({
       id: String(r.id),
       type: String(r.type),
+      // 楼层归属三元组（P1.6.2）：D1 devices.building_id / floor_id / zone 是唯一权威来源
+      buildingId: String(r.building_id ?? DEFAULT_SCENARIO.buildingId),
+      floorId: String(r.floor_id ?? ''),
+      zone: String(r.zone ?? ''),
       status: String(r.status ?? 'normal'),
       currentMode: String(r.current_mode ?? 'daily'),
       direction: String(r.direction ?? 'right'),
@@ -535,7 +542,8 @@ export class DemoRoom extends DurableObject<Env> {
       rescue: world.rescue,
       // 人员：统一契约（id/buildingId/floorId/zone/status/routeId/routePoints/progress/position）
       persons: personDTOs(world),
-      devices: Object.values(world.devices),
+      // 设备：统一契约（id/type/buildingId/floorId/zone/status/currentMode/direction/brightness/emergencyFlash）
+      devices: deviceDTOs(world),
       eventLog: world.eventLog.slice(0, 30),
       evacuationSettled: world.evacuationSettled,
       tick: world.tick,
@@ -556,6 +564,20 @@ function personDTOs(world: DemoWorld) {
     buildingId: p.buildingId || world.scenario.buildingId,
     floorId: p.floorId,
     zone: p.zone,
+  }))
+}
+
+/**
+ * 设备运行时 → 统一 wire 结构（P1.6.2）
+ * 后端是唯一权威：buildingId / floorId / zone 来自 D1 devices（设备的楼层归属），
+ * status / currentMode / direction / brightness 来自 DeviceRuntime 当前状态；
+ * 前端（fireStore）凭 (buildingId, floorId) 即可把快照设备准确定位到楼层。
+ */
+function deviceDTOs(world: DemoWorld) {
+  return Object.values(world.devices).map((d) => normalizeDeviceRuntime(d, {
+    buildingId: d.buildingId || world.scenario.buildingId,
+    floorId: d.floorId,
+    zone: d.zone,
   }))
 }
 
