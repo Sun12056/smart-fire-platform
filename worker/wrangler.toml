@@ -10,6 +10,16 @@ binding = "DB"
 database_name = "smart-fire-db"
 database_id = "00000000-0000-0000-0000-000000000000"
 
+# Durable Objects：DemoRoom 负责六阶段状态机的实时协调与 WebSocket 广播
+[[durable_objects.bindings]]
+name = "DEMO_ROOM"
+class_name = "DemoRoom"
+script_name = "smart-fire-api"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DemoRoom"]
+
 # 种子数据保护令牌（生产环境务必设置；本地 dev 留空即可免校验）
 # [vars]
 # SEED_TOKEN = "change-me"

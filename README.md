@@ -48,30 +48,59 @@ npm run build
 npm run preview
 ```
 
-## 架构与双数据源
+## 架构与三种运行模式
 
 ```
-Vue 视图 → Pinia (fireStore) → Service 层（8 个领域服务） → Repository ┬ MockRepository（src/mock，默认）
-                                                                      └ ApiRepository → Workers(Hono) → D1
+Vue 视图 → Pinia (fireStore / demoStore) → Service 层（8 个领域服务 + demoService）
+                                        → Repository ┬ MockRepository（src/mock）
+                                                     └ ApiRepository → Workers(Hono) ┬ D1（业务与历史）
+                                                                                      └ Durable Object（实时协调 + WS 广播）
 ```
 
-- 数据契约见 `docs/API_CONTRACT.md`（Building / Device / Telemetry / Alarm / Inspection / EvacuationPlan / PersonPresence / OperationLog 八类核心实体）
-- `VITE_DATA_SOURCE=mock`（默认）：纯前端演示，行为不变；`=api`：走 Workers + D1，初始化失败自动回退 mock
-- 远程模式下操作日志、告警处置、巡检结果等写路径为"本地即时生效 + 远端异步落库"
+| 模式 | `VITE_DATA_SOURCE` | 数据源 | 状态来源 | 后端失败行为 |
+|---|---|---|---|---|
+| mock | `mock`（默认） | `src/mock/*` | 前端本地推演 | 不涉及后端 |
+| api | `api` | Workers → D1 | 后端 REST | **显式告警，不静默回退 mock** |
+| demo | `demo` | Workers → D1 + DO | 后端状态机（WebSocket 广播） | 显式告警 + WS 指数退避重连 |
 
-### 本地启动后端（Cloudflare Workers + D1）
+- 数据契约见 `docs/API_CONTRACT.md`（八类核心实体 + Demo 状态机 + WS 消息）
+- 远端模式下操作日志、告警处置、巡检结果等写路径为"本地即时生效 + 远端异步落库"
+
+### Demo Simulation Engine（阶段二）
+
+六阶段状态机由后端唯一定义（`worker/src/demo/stages.ts`），前端只发起指令与呈现状态：
+
+```
+IDLE ─START_FIRE→ FIRE_DETECTED ─ACTIVATE_RESPONSE→ EMERGENCY_RESPONSE ─PLAN_ROUTES→ ROUTE_PLANNING
+     ─CONFIRM_ROUTE→ SMART_EVACUATION ─COMPLETE_EVACUATION→ RETAINED_PERSONS
+     ─CONFIRM_RETAINED→ RESCUE_COORDINATION ─COMPLETE_RESCUE→ COMPLETED ─RESET→ IDLE
+```
+
+- 与 Alarm 七步事件流（`pending→processing→reviewing→resolved`）、EvacuationPlan 生命周期（`CONFIRMED→EXECUTING→DONE`）严格区分，互不覆盖
+- Durable Object 只做实时协调与广播（人员位置、设备状态、疏散动态、火灾状态、灯光状态）；D1 只落业务与历史数据，不作实时消息总线
+
+### 本地启动后端（Cloudflare Workers + D1 + Durable Objects）
 
 ```bash
 cd worker
 npm install
-npm run migrate:local     # 本地 D1 建表
+npm run migrate:local     # 本地 D1 建表（八类实体）
+npx wrangler d1 execute smart-fire-db --local --file=migrations/0002_demo.sql
 npm run dev               # 启动 API（http://localhost:8787）
 # 另开终端灌入种子数据（复用前端 mock 同源数据）
 curl -X POST http://localhost:8787/api/v1/admin/seed
 ```
 
-前端以 api 模式启动：根目录复制 `.env.example` 为 `.env` 后设置 `VITE_DATA_SOURCE=api`，再 `npm run dev`。
-E2E 冒烟脚本：`node worker/e2e-smoke.cjs`（需先以 api 模式启动前后端，依赖系统 Edge）。
+前端启动：根目录复制 `.env.example` 为 `.env` 后设置 `VITE_DATA_SOURCE`（`mock` / `api` / `demo`），再 `npm run dev`。
+
+### 测试
+
+```bash
+cd worker
+npm run test:e2e           # 后端 E2E：状态机全链路 / WS 广播 / 非法转换 / 重复操作 / 断线重连 / 关键 REST
+npm run test:e2e:browser   # 浏览器 E2E：真实 UI 驱动后端状态机（依赖系统 Edge，需先启动前端）
+EXPECT_OFFLINE=1 npm run test:e2e:browser   # 校验后端不可用时"不静默回退 mock"
+```
 
 ## 部署
 
@@ -83,9 +112,10 @@ E2E 冒烟脚本：`node worker/e2e-smoke.cjs`（需先以 api 模式启动前�
 
 - [x] 统一数据模型与 API Contract（八类核心实体，REST v1）
 - [x] MockRepository / ApiRepository 双数据源 + Vue→Pinia→Service→Workers→D1 闭环
-- [ ] Durable Objects + WebSocket（实时人员位置、设备状态、疏散动态）
-- [ ] Demo Simulation Engine（后端状态机驱动"模拟火灾→启动预案→路径确认→智能疏散→滞留人员→救援"全流程）
-- [ ] ESP32 + 毫米波雷达接入 telemetry / command API
+- [x] Durable Objects + WebSocket（人员位置、设备状态、疏散动态、火灾状态、灯光状态）
+- [x] Demo Simulation Engine：后端状态机驱动"模拟火灾→启动预案→路径确认→智能疏散→滞留人员→救援"
+- [x] mock / api / demo 三模式；api 模式后端失败显式告警，不静默回退
+- [ ] ESP32 + 毫米波雷达接入 telemetry / command API（双向闭环）
 - [ ] 登录与多角色权限
 
 ## 目录结构

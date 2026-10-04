@@ -2,6 +2,8 @@
 
 export interface Env {
   DB: D1Database
+  /** Demo Simulation Engine 的实时状态协调器（Durable Object） */
+  DEMO_ROOM: DurableObjectNamespace
   SEED_TOKEN?: string
 }
 

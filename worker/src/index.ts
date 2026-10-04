@@ -12,6 +12,10 @@ import { evacuationPlansRoute } from './routes/evacuationPlans'
 import { personPresenceRoute } from './routes/personPresence'
 import { operationLogsRoute } from './routes/operationLogs'
 import { adminRoute } from './routes/admin'
+import { demoRoute } from './routes/demo'
+
+// Durable Object 必须由入口模块导出，供 wrangler 绑定
+export { DemoRoom } from './durable/DemoRoom'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -29,6 +33,8 @@ app.route('/api/v1/evacuation-plans', evacuationPlansRoute)
 app.route('/api/v1/person-presence', personPresenceRoute)
 app.route('/api/v1/operation-logs', operationLogsRoute)
 app.route('/api/v1/admin', adminRoute)
+// 阶段二：Demo 六阶段状态机（REST + WebSocket，状态在 Durable Object）
+app.route('/api/v1/demo', demoRoute)
 
 app.notFound((c) => c.json({ error: '接口不存在' }, 404))
 app.onError((err, c) => {

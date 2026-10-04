@@ -124,6 +124,11 @@
 | GET | `/api/v1/operation-logs` | 日志查询：`module, level, limit(≤500, 默认200)` |
 | POST | `/api/v1/operation-logs` | 写入日志 |
 | POST | `/api/v1/admin/seed` | 灌入种子数据（生产环境需 `X-Seed-Token` 头，与 `SEED_TOKEN` 环境变量匹配） |
+| GET | `/api/v1/demo/transitions` | Demo 状态机元信息（阶段、命令、转移表） |
+| GET | `/api/v1/demo/state` | Demo 状态快照（`sessionId` 默认 `default`） |
+| POST | `/api/v1/demo/command` | 发送业务指令 `{ command, payload? }`；非法转换 409（含 `allowed`） |
+| POST | `/api/v1/demo/reset` | 复位到 IDLE（IDLE 下调用视为非法转换 409） |
+| GET | `/api/v1/demo/ws` | WebSocket 实时通道（Upgrade: websocket） |
 | GET | `/healthz` | 健康检查 |
 
 **响应包络**：列表直接返回数组（与现有 store 消费方式一致，减少前端适配层）；单对象返回对象；错误返回 `{ error: string }` + 4xx/5xx。
@@ -139,13 +144,51 @@
 ```
 
 - `VITE_DATA_SOURCE=mock`（默认）：MockRepository 直接复用 `src/mock/*`，行为与当前 Demo 完全一致。
-- `VITE_DATA_SOURCE=api`：同一 Service 接口走 `fetch → Workers → D1`；初始化失败自动回退 mock 并告警。
-- 写路径（addOperationLog / resolveAlarm / completeInspection / 预案保存）在 api 模式下"本地即时生效 + 远端异步落库"（fire-and-forget），保证 UI 不因网络阻塞。
+- `VITE_DATA_SOURCE=api`：同一 Service 接口走 `fetch → Workers → D1`；**初始化失败不静默回退 mock**，置位 `remoteError / dataSourceDegraded` 并由 UI 明确告警，避免真实系统出现数据假象。
+- `VITE_DATA_SOURCE=demo`：后端驱动演示（REST + WebSocket），六阶段处置由后端状态机驱动，前端只发起指令与呈现状态。
+- 写路径（addOperationLog / resolveAlarm / completeInspection / 预案保存）在远端模式下"本地即时生效 + 远端异步落库"（fire-and-forget），保证 UI 不因网络阻塞。
+
+## 3.1 三种运行模式
+
+| 模式 | 数据源 | 状态来源 | 后端失败行为 |
+|---|---|---|---|
+| `mock` | `src/mock/*` | 前端本地推演 | 不涉及后端 |
+| `api` | Workers → D1 | 后端 REST | **显式告警**（`dataSourceDegraded` + 横幅），不静默回退 |
+| `demo` | Workers → D1 + DO | 后端状态机（WS 广播） | 显式告警 + WS 自动重连（指数退避） |
+
+## 3.2 Demo 六阶段状态机（唯一定义）
+
+```
+IDLE ──START_FIRE──▶ FIRE_DETECTED ──ACTIVATE_RESPONSE──▶ EMERGENCY_RESPONSE
+      ──PLAN_ROUTES──▶ ROUTE_PLANNING ──CONFIRM_ROUTE──▶ SMART_EVACUATION
+      ──COMPLETE_EVACUATION──▶ RETAINED_PERSONS ──CONFIRM_RETAINED──▶ RESCUE_COORDINATION
+      ──COMPLETE_RESCUE──▶ COMPLETED ──RESET──▶ IDLE
+```
+
+- 定义位置：`worker/src/demo/stages.ts`（后端权威）、`src/api/contract.js`（前端镜像），二者必须同步。
+- 非法转换一律 409，响应体含当前阶段与 `allowed` 命令列表；重复同一命令亦为 409。
+- **与另两套状态严格区分**：
+  - Alarm 七步事件流 `pending → processing → reviewing → resolved`（业务处置状态，落 D1）
+  - EvacuationPlan 生命周期 `NORMAL|WARNING|BLOCKED → CONFIRMED → EXECUTING → DONE`（预案对象状态，落 D1）
+  - Demo 阶段属于"一次演示处置流程"的推进阶段，只存在 DO；阶段推进时**写入**上述业务记录，但互不覆盖。
+
+## 3.3 WebSocket 消息契约
+
+| 方向 | type | 载荷 | 说明 |
+|---|---|---|---|
+| → | `demo.ping` | `{ at }` | 心跳（客户端每 15s） |
+| → | `demo.sync` | — | 重连后请求全量快照 |
+| ← | `demo.snapshot` | 全量快照 | 连接建立即下发 |
+| ← | `demo.stage` | 全量快照 + `stage` | 阶段变化广播 |
+| ← | `demo.tick` | `{ persons, metrics, seq, evacuationSettled }` | 疏散实时推进（1s/次，仅 SMART_EVACUATION） |
+| ← | `demo.pong` | `{ at }` | 心跳应答 |
+
+**职责边界**：Durable Object 只做实时状态协调与广播；D1 只保存业务与历史数据（alarms / evacuation_plans / operation_logs / demo_sessions / demo_events），**实时位置与设备运行时不落 D1**。
 
 ## 4. 阶段路线（与本契约的关系）
 
 | 阶段 | 内容 | 契约影响 |
 |---|---|---|
-| 一（当前） | 8 类实体 + Mock/Api 双源 + Vue→Pinia→Service→Workers→D1 闭环 | 本文件 v1 |
-| 二 | Durable Objects + WebSocket（实时人员/设备/疏散）；Demo Simulation Engine（后端状态机驱动六阶段） | 新增 WS 消息契约与 `/simulations` 资源；alarm 七步事件流落地 |
-| 三 | ESP32 + 毫米波雷达接入 `POST /telemetry`、`PATCH /devices/:id`（command 下发走 DO） | 复用 telemetry/device 契约，新增设备鉴权 |
+| 一 | 8 类实体 + Mock/Api 双源 + Vue→Pinia→Service→Workers→D1 闭环 | v1 |
+| 二（当前） | Durable Objects + WebSocket（人员位置/设备状态/疏散动态/火灾状态/灯光状态）；Demo Simulation Engine 后端状态机驱动六阶段；mock/api/demo 三模式 | 新增 §3.1~§3.3 |
+| 三 | ESP32 + 毫米波雷达接入 `POST /telemetry`、`PATCH /devices/:id`（command 下发走 DO） | 复用 telemetry/device/command 契约，新增设备鉴权 |

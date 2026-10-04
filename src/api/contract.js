@@ -32,6 +32,75 @@ export const endpoints = {
   operationLogList: `${API_PREFIX}/operation-logs`,
   operationLogCreate: `${API_PREFIX}/operation-logs`,
   adminSeed: `${API_PREFIX}/admin/seed`,
+  // ── 阶段二：Demo 六阶段状态机（REST + WebSocket） ──
+  demoState: `${API_PREFIX}/demo/state`,
+  demoTransitions: `${API_PREFIX}/demo/transitions`,
+  demoCommand: `${API_PREFIX}/demo/command`,
+  demoReset: `${API_PREFIX}/demo/reset`,
+  demoWs: (sessionId = 'default') => `${API_PREFIX}/demo/ws?sessionId=${encodeURIComponent(sessionId)}`,
+}
+
+// ── Demo 六阶段状态机（唯一定义，与 worker/src/demo/stages.ts 同步） ──
+export const DEMO_STAGES = [
+  'IDLE',
+  'FIRE_DETECTED',
+  'EMERGENCY_RESPONSE',
+  'ROUTE_PLANNING',
+  'SMART_EVACUATION',
+  'RETAINED_PERSONS',
+  'RESCUE_COORDINATION',
+  'COMPLETED',
+]
+export const DEMO_COMMANDS = [
+  'START_FIRE',
+  'ACTIVATE_RESPONSE',
+  'PLAN_ROUTES',
+  'CONFIRM_ROUTE',
+  'COMPLETE_EVACUATION',
+  'CONFIRM_RETAINED',
+  'COMPLETE_RESCUE',
+  'RESET',
+]
+/** 与 Alarm 七步四态、EvacuationPlan 生命周期互不覆盖的转移表 */
+export const DEMO_TRANSITIONS = {
+  IDLE: { START_FIRE: 'FIRE_DETECTED' },
+  FIRE_DETECTED: { ACTIVATE_RESPONSE: 'EMERGENCY_RESPONSE', RESET: 'IDLE' },
+  EMERGENCY_RESPONSE: { PLAN_ROUTES: 'ROUTE_PLANNING', RESET: 'IDLE' },
+  ROUTE_PLANNING: { CONFIRM_ROUTE: 'SMART_EVACUATION', RESET: 'IDLE' },
+  SMART_EVACUATION: { COMPLETE_EVACUATION: 'RETAINED_PERSONS', RESET: 'IDLE' },
+  RETAINED_PERSONS: { CONFIRM_RETAINED: 'RESCUE_COORDINATION', RESET: 'IDLE' },
+  RESCUE_COORDINATION: { COMPLETE_RESCUE: 'COMPLETED', RESET: 'IDLE' },
+  COMPLETED: { RESET: 'IDLE' },
+}
+export const STAGE_LABELS = {
+  IDLE: '正常状态',
+  FIRE_DETECTED: '发现火灾',
+  EMERGENCY_RESPONSE: '启动应急响应',
+  ROUTE_PLANNING: '疏散路径规划',
+  SMART_EVACUATION: '智能疏散',
+  RETAINED_PERSONS: '滞留人员识别',
+  RESCUE_COORDINATION: '协同消防救援',
+  COMPLETED: '处置完成',
+}
+
+export const DEMO_FLOW_STAGES = [
+  'FIRE_DETECTED',
+  'EMERGENCY_RESPONSE',
+  'ROUTE_PLANNING',
+  'SMART_EVACUATION',
+  'RETAINED_PERSONS',
+  'RESCUE_COORDINATION',
+]
+
+// ── WebSocket 消息类型（阶段二实时协调） ──
+export const WS_MSG = {
+  SNAPSHOT: 'demo.snapshot',   // 服务端→客户端：全量快照
+  STAGE: 'demo.stage',         // 服务端→客户端：阶段变化（含全量快照）
+  TICK: 'demo.tick',           // 服务端→客户端：疏散实时推进（人员位置 + 指标）
+  EVENT: 'demo.event',         // 服务端→客户端：事件流水
+  PONG: 'demo.pong',           // 服务端→客户端：心跳应答
+  PING: 'demo.ping',           // 客户端→服务端：心跳
+  SYNC: 'demo.sync',           // 客户端→服务端：请求全量快照（重连后补齐）
 }
 
 // ── 枚举 ──────────────────────────────────────────────────
@@ -53,6 +122,11 @@ export const ENUMS = {
   movementType: ['static', 'moving'],
   logModule: ['device', 'alarm', 'evacuation', 'inspection', 'route', 'lighting', 'person', 'system', '综合'],
   logLevel: ['info', 'success', 'warning', 'danger'],
+  // Demo 状态机枚举（独立于 alarmStatus 与 planStatus）
+  demoStage: DEMO_STAGES,
+  demoCommand: DEMO_COMMANDS,
+  // 三种运行模式
+  runMode: ['mock', 'api', 'demo'],
 }
 
 // ── 通用工具 ──────────────────────────────────────────────

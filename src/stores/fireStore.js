@@ -82,10 +82,14 @@ export const useFireStore = defineStore('fire', () => {
   // 人员初始坐标/状态基线（重置演示后恢复；不对外导出）
   let personsOrigin = JSON.parse(JSON.stringify(Array.isArray(initialPersons) ? initialPersons : []))
 
-  // ── 远程数据源（VITE_DATA_SOURCE=api 时经 Service 层加载 Workers/D1 数据） ──
+  // ── 远程数据源（api / demo 模式经 Service 层加载 Workers/D1 数据） ──
+  // 重要：远端失败时【不静默回退 mock】，必须显式置位 remoteError / dataSourceDegraded 交由 UI 告警，
+  // 避免真实系统出现“数据假象”。
   const remoteReady = ref(false)
+  const remoteError = ref(null)
+  const dataSourceDegraded = ref(false)
   async function initFromRemote() {
-    if (!dataSource.isApi || remoteReady.value) return false
+    if (!dataSource.isRemote || remoteReady.value) return false
     try {
       const [blds, devs, alms, insps, ppl, logs] = await Promise.all([
         buildingService.list(),
@@ -110,12 +114,149 @@ export const useFireStore = defineStore('fire', () => {
       refreshStats()
       refreshPersonStats()
       remoteReady.value = true
+      remoteError.value = null
+      dataSourceDegraded.value = false
       console.info('[fireStore] 远程数据源初始化完成（Workers → D1）')
       return true
     } catch (err) {
-      console.warn('[fireStore] 远程数据源初始化失败，回退本地 mock 数据：', err?.message || err)
+      // 不静默回退：记录错误并标记降级，由 UI 明确提示当前数据并非真实后端数据
+      remoteReady.value = false
+      dataSourceDegraded.value = true
+      remoteError.value = err?.message || String(err)
+      console.error('[fireStore] 远程数据源初始化失败，未加载真实数据：', err?.message || err)
       return false
     }
+  }
+
+  // ── 阶段二：应用后端 Demo 状态机快照（前端不自行推演，仅镜像后端状态） ──
+  const STAGE_TO_LEGACY = { IDLE: 0, FIRE_DETECTED: 1, EMERGENCY_RESPONSE: 2, ROUTE_PLANNING: 3, SMART_EVACUATION: 4, RETAINED_PERSONS: 5, RESCUE_COORDINATION: 6, COMPLETED: 6 }
+
+  function applyDemoSnapshot(snap) {
+    if (!snap) return
+    // ① 阶段：唯一来源是后端状态机
+    if (snap.stage) {
+      const legacy = STAGE_TO_LEGACY[snap.stage] ?? 0
+      emergencyStage.value = legacy
+      fireAlertVisible.value = legacy >= 1
+      fireConfirmed.value = legacy >= 2
+      emergencyResponseConfirmed.value = legacy >= 2
+      routeDecisionConfirmed.value = legacy >= 4
+    }
+    // ② 火情
+    if (snap.fire) {
+      fireEvent.value = {
+        id: snap.fire.id,
+        building: snap.fire.buildingName || snap.fire.buildingId,
+        floor: snap.fire.floorId,
+        area: snap.fire.zone,
+        level: snap.fire.level || 'danger',
+        time: snap.fire.detectedAt,
+        status: (STAGE_TO_LEGACY[snap.stage] ?? 0) >= 2 ? 'active' : 'pending',
+      }
+    } else if (snap.stage === 'IDLE') {
+      fireEvent.value = null
+      fireAlertVisible.value = false
+      fireConfirmed.value = false
+      emergencyResponseConfirmed.value = false
+      routeDecisionConfirmed.value = false
+      emergencyStage.value = 0
+    }
+    // ③ 人员（按 id 合并后端运行时）
+    if (Array.isArray(snap.persons)) applyDemoPersons(snap.persons)
+    // ④ 设备（状态 / 模式 / 方向 / 亮度）
+    if (Array.isArray(snap.devices)) {
+      const dmap = new Map(snap.devices.map((d) => [String(d.id), d]))
+      asArray(devices.value).forEach((d) => {
+        const r = dmap.get(String(d.id))
+        if (!r) return
+        if (r.status !== undefined) d.status = r.status
+        if (r.currentMode !== undefined) d.currentMode = r.currentMode
+        if (r.direction !== undefined) { d.direction = r.direction; d.recommendedDirection = r.direction }
+        if (r.brightness !== undefined) d.brightness = r.brightness
+        d.emergencyFlash = !!r.emergencyFlash
+      })
+    }
+    // ⑤ 照明
+    if (snap.lighting) {
+      lightingStatus.value = {
+        ...lightingStatus.value,
+        brightness: snap.lighting.brightness ?? lightingStatus.value?.brightness,
+        currentMode: snap.lighting.mode === 'emergency'
+          ? (lightingModes.emergency || lightingStatus.value?.currentMode)
+          : lightingStatus.value?.currentMode,
+      }
+      emergencyMode.value = snap.lighting.mode === 'emergency'
+    }
+    // ⑥ 疏散指标
+    if (snap.metrics) {
+      const m = snap.metrics
+      evacStats.value = {
+        total: m.total ?? 0,
+        evacuated: m.evacuated ?? 0,
+        remaining: (m.evacuating ?? 0) + (m.retained ?? 0),
+        pct: m.total ? Math.round(((m.evacuated ?? 0) / m.total) * 100) : 0,
+      }
+      evacRun.value = (m.evacuating ?? 0) > 0
+    }
+    // ⑦ 滞留人员与协同救援
+    const retained = asArray(persons.value).filter((p) => ['stranded', 'located'].includes(p.status))
+    strandedPersons.value = retained
+    if (snap.rescue) {
+      rescueState.value = !!snap.rescue.active
+      rescueCompleted.value = !!snap.rescue.completed
+      rescueTask.value = snap.rescue.task
+      strandedLocated.value = !!snap.rescue.active
+    }
+    // ⑧ 事件流水 → 后台日志（按事件 id 去重）
+    if (Array.isArray(snap.eventLog)) {
+      const known = new Set(asArray(evacuationLogs.value).map((l) => l.id))
+      snap.eventLog.forEach((e) => {
+        if (known.has(e.id)) return
+        evacuationLogs.value.unshift({
+          id: e.id,
+          time: String(e.at || '').slice(11) || new Date().toLocaleTimeString('zh-CN'),
+          action: e.action,
+          detail: e.detail,
+          operator: '后端状态机',
+          level: e.level,
+        })
+      })
+      if (evacuationLogs.value.length > 200) evacuationLogs.value.length = 200
+    }
+    refreshBuildings()
+    refreshStats()
+    refreshPersonStats()
+  }
+
+  function applyDemoPersons(list) {
+    const pmap = new Map(list.map((p) => [String(p.id), p]))
+    asArray(persons.value).forEach((p) => {
+      const r = pmap.get(String(p.id))
+      if (!r) return
+      if (typeof r.x === 'number') p.x = r.x
+      if (typeof r.y === 'number') p.y = r.y
+      if (r.status) p.status = r.status
+      if (r.movementType) p.movementType = r.movementType
+      if (r.retained) p._stranded = true
+      if (r.rescued) p._stranded = false
+    })
+  }
+
+  // 实时疏散推进（仅人员位置与指标，不重复刷新整表）
+  function applyDemoTick(msg) {
+    if (Array.isArray(msg.persons)) applyDemoPersons(msg.persons)
+    if (msg.metrics) {
+      const m = msg.metrics
+      evacStats.value = {
+        total: m.total ?? 0,
+        evacuated: m.evacuated ?? 0,
+        remaining: (m.evacuating ?? 0) + (m.retained ?? 0),
+        pct: m.total ? Math.round(((m.evacuated ?? 0) / m.total) * 100) : 0,
+      }
+      evacRun.value = (m.evacuating ?? 0) > 0
+    }
+    strandedPersons.value = asArray(persons.value).filter((p) => ['stranded', 'located'].includes(p.status))
+    refreshPersonStats()
   }
 
   // ══════════ 六阶段演示流程状态（统一单一数据源；0=正常 / 1=发现火灾 / 2=启动应急响应 / 3=疏散路径 / 4=智能疏散 / 5=滞留人员识别 / 6=协同救援） ══════════
@@ -217,8 +358,8 @@ export const useFireStore = defineStore('fire', () => {
     if (operationLogs.value.length > 200) {
       operationLogs.value = operationLogs.value.slice(0, 200)
     }
-    // api 模式：异步落库（fire-and-forget，失败不影响本地）
-    if (dataSource.isApi) {
+    // 远端模式（api / demo）：异步落库（fire-and-forget，失败不影响本地）
+    if (dataSource.isRemote) {
       operationLogService.create({ action, module, detail, level }).catch(() => {})
     }
   }
@@ -1251,8 +1392,8 @@ export const useFireStore = defineStore('fire', () => {
     if (alarm) {
       alarm.status = 'resolved'
       alarm.progress = 100
-      // api 模式：异步落库（fire-and-forget）
-      if (dataSource.isApi) {
+      // 远端模式：异步落库（fire-and-forget）
+      if (dataSource.isRemote) {
         alarmService.update(alarmId, { status: 'resolved', progress: 100 }).catch(() => {})
       }
     }
@@ -1479,8 +1620,8 @@ export const useFireStore = defineStore('fire', () => {
     inspectionHistory.value.unshift(result)
     if (inspectionHistory.value.length > 20) inspectionHistory.value.pop()
 
-    // api 模式：巡检结果异步归档（fire-and-forget）
-    if (dataSource.isApi && result) {
+    // 远端模式：巡检结果异步归档（fire-and-forget）
+    if (dataSource.isRemote && result) {
       inspectionService.create(result).catch(() => {})
     }
 
@@ -2283,6 +2424,10 @@ export const useFireStore = defineStore('fire', () => {
     updateRandomData,
     initFromRemote,
     remoteReady,
+    remoteError,
+    dataSourceDegraded,
+    applyDemoSnapshot,
+    applyDemoTick,
     persons,
     personStats,
     lightingStatus,

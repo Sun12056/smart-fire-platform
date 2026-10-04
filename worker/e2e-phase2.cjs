@@ -1,0 +1,198 @@
+/**
+ * 阶段二 E2E 测试
+ * 覆盖：六阶段状态机全链路、WebSocket 连接与广播、非法状态转换、重复操作、
+ *       断线重连、关键 REST API。
+ * 运行：先启动 wrangler dev（8787），再 node worker/e2e-phase2.cjs
+ */
+const WebSocket = require('ws')
+
+const BASE = process.env.API_BASE || 'http://127.0.0.1:8787'
+const WS_BASE = BASE.replace(/^http/, 'ws')
+const SESSION = 'e2e-session'
+
+let passed = 0
+let failed = 0
+const failures = []
+
+function check(name, cond, extra) {
+  if (cond) { passed++; console.log(`  ✓ ${name}`) }
+  else { failed++; failures.push(name); console.log(`  ✗ ${name}${extra ? ' → ' + JSON.stringify(extra) : ''}`) }
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(`${BASE}${path}`, options)
+  const text = await res.text()
+  let body = null
+  try { body = JSON.parse(text) } catch { /* 非 JSON */ }
+  return { status: res.status, body }
+}
+
+const cmd = (command, payload = {}) =>
+  api(`/api/v1/demo/command?sessionId=${SESSION}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command, payload }),
+  })
+
+function openWs(sessionId = SESSION) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${WS_BASE}/api/v1/demo/ws?sessionId=${sessionId}`)
+    const messages = []
+    ws.on('message', (raw) => {
+      try { messages.push(JSON.parse(raw.toString())) } catch { /* ignore */ }
+    })
+    ws.on('open', () => resolve({ ws, messages }))
+    ws.on('error', reject)
+    setTimeout(() => reject(new Error('WS 连接超时')), 8000)
+  })
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+async function waitFor(fn, timeoutMs = 6000, interval = 200) {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (fn()) return true
+    await sleep(interval)
+  }
+  return false
+}
+
+;(async () => {
+  console.log(`\n=== 阶段二 E2E（${BASE}）===\n`)
+
+  // ── 0. 健康检查 ──
+  console.log('[0] 服务健康与关键 REST')
+  const health = await api('/healthz')
+  check('healthz 返回 200', health.status === 200, health.body)
+  const buildings = await api('/api/v1/buildings')
+  check('GET /buildings 返回 4 栋', buildings.status === 200 && Array.isArray(buildings.body) && buildings.body.length === 4)
+  const devices = await api('/api/v1/devices?buildingId=B003&floorId=5F')
+  check('GET /devices 过滤查询可用', devices.status === 200 && Array.isArray(devices.body) && devices.body.length > 0)
+  const alarms = await api('/api/v1/alarms?limit=5')
+  check('GET /alarms 可用', alarms.status === 200 && Array.isArray(alarms.body))
+  const logs = await api('/api/v1/operation-logs?limit=5')
+  check('GET /operation-logs 可用', logs.status === 200 && Array.isArray(logs.body))
+
+  // ── 1. 状态机元信息 ──
+  console.log('\n[1] 状态机元信息')
+  const meta = await api('/api/v1/demo/transitions')
+  const flow = meta.body?.flow || []
+  check('六阶段顺序正确', JSON.stringify(flow.map((f) => f.id)) === JSON.stringify([
+    'FIRE_DETECTED', 'EMERGENCY_RESPONSE', 'ROUTE_PLANNING', 'SMART_EVACUATION', 'RETAINED_PERSONS', 'RESCUE_COORDINATION',
+  ]), flow.map((f) => f.id))
+  check('IDLE 仅允许 START_FIRE', JSON.stringify(meta.body?.transitions?.IDLE) === '{"START_FIRE":"FIRE_DETECTED"}')
+
+  // ── 2. 复位（IDLE 下 RESET 属于非法转换，应为 409） ──
+  console.log('\n[2] 复位语义')
+  const idleReset = await api(`/api/v1/demo/reset?sessionId=${SESSION}`, { method: 'POST' })
+  check('IDLE 下 RESET 判定为非法转换（409）', idleReset.status === 409, idleReset.body)
+  const startThenReset = await cmd('START_FIRE')
+  check('START_FIRE 成功（用于验证可复位）', startThenReset.status === 200, startThenReset.body?.stage)
+  const reset = await api(`/api/v1/demo/reset?sessionId=${SESSION}`, { method: 'POST' })
+  check('非 IDLE 下 RESET 回到 IDLE', reset.status === 200 && reset.body?.stage === 'IDLE', reset.body?.stage)
+
+  // ── 3. 非法转换与重复操作 ──
+  console.log('\n[3] 非法状态转换 / 重复操作')
+  const illegal = await cmd('COMPLETE_RESCUE')
+  check('IDLE 下 COMPLETE_RESCUE 返回 409', illegal.status === 409, illegal.body)
+  check('409 响应带允许命令列表', Array.isArray(illegal.body?.allowed) && illegal.body.allowed.includes('START_FIRE'))
+  const unknown = await cmd('NO_SUCH_COMMAND')
+  check('未知命令返回 400', unknown.status === 400, unknown.body)
+
+  const fire1 = await cmd('START_FIRE')
+  check('START_FIRE 成功 → FIRE_DETECTED', fire1.status === 200 && fire1.body?.stage === 'FIRE_DETECTED', fire1.body?.stage)
+  const fire2 = await cmd('START_FIRE')
+  check('重复 START_FIRE 返回 409', fire2.status === 409, fire2.body)
+  const skip = await cmd('CONFIRM_ROUTE')
+  check('跳阶段 CONFIRM_ROUTE 返回 409', skip.status === 409, skip.body)
+
+  // ── 4. WebSocket 连接与广播 ──
+  console.log('\n[4] WebSocket 连接与广播')
+  const { ws, messages } = await openWs()
+  check('WS 连接成功并收到快照', await waitFor(() => messages.some((m) => m.type === 'demo.snapshot')), messages.map((m) => m.type))
+  const snapshot = messages.find((m) => m.type === 'demo.snapshot')
+  check('快照含阶段与人员', Boolean(snapshot?.stage) && Array.isArray(snapshot?.persons), snapshot?.stage)
+
+  const before = messages.length
+  const resp = await cmd('ACTIVATE_RESPONSE')
+  check('ACTIVATE_RESPONSE → EMERGENCY_RESPONSE', resp.status === 200 && resp.body?.stage === 'EMERGENCY_RESPONSE', resp.body?.stage)
+  check('WS 收到阶段广播 demo.stage', await waitFor(() => messages.slice(before).some((m) => m.type === 'demo.stage')))
+  const stageMsg = messages.slice(before).find((m) => m.type === 'demo.stage')
+  check('广播阶段与接口一致', stageMsg?.stage === 'EMERGENCY_RESPONSE', stageMsg?.stage)
+  check('应急响应联动应急照明', (stageMsg?.devices || []).some((d) => d.currentMode === 'emergency'), (stageMsg?.devices || []).slice(0, 2))
+  check('应急照明灯光状态切换', stageMsg?.lighting?.mode === 'emergency', stageMsg?.lighting)
+
+  // ── 5. 全链路推进 ──
+  console.log('\n[5] 六阶段全链路推进')
+  const r3 = await cmd('PLAN_ROUTES')
+  check('PLAN_ROUTES → ROUTE_PLANNING', r3.status === 200 && r3.body?.stage === 'ROUTE_PLANNING', r3.body?.stage)
+  check('生成多套疏散方案', (r3.body?.plans || []).length >= 2, (r3.body?.plans || []).length)
+
+  const r4 = await cmd('CONFIRM_ROUTE')
+  check('CONFIRM_ROUTE → SMART_EVACUATION', r4.status === 200 && r4.body?.stage === 'SMART_EVACUATION', r4.body?.stage)
+  check('方案进入 EXECUTING（EvacuationPlan 生命周期）', (r4.body?.plans || []).some((p) => p.status === 'EXECUTING'))
+  check('人员进入 evacuating', (r4.body?.persons || []).some((p) => p.evacuating))
+
+  // 实时推进：等待 tick 广播
+  const beforeTick = messages.length
+  check('WS 收到实时疏散 tick 广播', await waitFor(() => messages.slice(beforeTick).some((m) => m.type === 'demo.tick'), 8000))
+  const tickMsg = messages.slice(beforeTick).find((m) => m.type === 'demo.tick')
+  check('tick 携带人员位置更新', Array.isArray(tickMsg?.persons) && tickMsg.persons.length > 0)
+  const moved = await waitFor(() => (messages.filter((m) => m.type === 'demo.tick').slice(-1)[0]?.metrics?.evacuated || 0) > 0, 15000)
+  check('疏散推进产生已撤离人数', moved, messages.filter((m) => m.type === 'demo.tick').slice(-1)[0]?.metrics)
+
+  const r5 = await cmd('COMPLETE_EVACUATION')
+  check('COMPLETE_EVACUATION → RETAINED_PERSONS', r5.status === 200 && r5.body?.stage === 'RETAINED_PERSONS', r5.body?.stage)
+  check('识别出滞留人员', (r5.body?.metrics?.retained || 0) > 0, r5.body?.metrics)
+  check('方案置为 DONE', (r5.body?.plans || []).some((p) => p.status === 'DONE'))
+
+  const r6 = await cmd('CONFIRM_RETAINED')
+  check('CONFIRM_RETAINED → RESCUE_COORDINATION', r6.status === 200 && r6.body?.stage === 'RESCUE_COORDINATION', r6.body?.stage)
+  check('生成救援任务', Boolean(r6.body?.rescue?.task), r6.body?.rescue)
+
+  const r7 = await cmd('COMPLETE_RESCUE')
+  check('COMPLETE_RESCUE → COMPLETED', r7.status === 200 && r7.body?.stage === 'COMPLETED', r7.body?.stage)
+  check('滞留人员已获救', (r7.body?.metrics?.rescued || 0) > 0, r7.body?.metrics)
+
+  // ── 6. D1 业务落库校验（Alarm / EvacuationPlan / OperationLog） ──
+  console.log('\n[6] D1 业务数据落库')
+  const alarmId = r7.body?.alarmId
+  const demoAlarm = alarmId ? (await api(`/api/v1/alarms/${alarmId}`)).body : null
+  check('演示火警已落库 alarms', Boolean(demoAlarm?.id), demoAlarm)
+  check('处置闭环后告警 resolved', demoAlarm?.status === 'resolved', demoAlarm?.status)
+  const plansAfter = await api('/api/v1/evacuation-plans?buildingId=B003')
+  check('疏散预案已落库 evacuation_plans', (plansAfter.body || []).length > 0, (plansAfter.body || []).length)
+  const logsAfter = await api('/api/v1/operation-logs?module=演示流程&limit=20')
+  check('演示操作日志已落库', (logsAfter.body || []).length >= 6, (logsAfter.body || []).length)
+
+  // ── 7. 断线重连 ──
+  console.log('\n[7] 断线重连')
+  ws.close()
+  await sleep(500)
+  const reconnected = await openWs()
+  check('断线后可重新连接', Boolean(reconnected.ws))
+  const gotSnap2 = await waitFor(() => reconnected.messages.some((m) => m.type === 'demo.snapshot'), 6000)
+  const snap2 = reconnected.messages.find((m) => m.type === 'demo.snapshot')
+  check('重连后立即收到全量快照', gotSnap2, reconnected.messages.map((m) => m.type))
+  check('重连快照与当前阶段一致', snap2?.stage === 'COMPLETED', snap2?.stage)
+
+  // 心跳
+  reconnected.ws.send(JSON.stringify({ type: 'demo.ping' }))
+  check('心跳 PING 收到 PONG', await waitFor(() => reconnected.messages.some((m) => m.type === 'demo.pong'), 4000))
+
+  // ── 8. 复位闭环 ──
+  console.log('\n[8] 复位')
+  const reset2 = await api(`/api/v1/demo/reset?sessionId=${SESSION}`, { method: 'POST' })
+  check('再次 RESET 回到 IDLE', reset2.status === 200 && reset2.body?.stage === 'IDLE', reset2.body?.stage)
+  check('RESET 后火情清空', reset2.body?.fire === null, reset2.body?.fire)
+
+  reconnected.ws.close()
+  ws.close?.()
+
+  console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`)
+  if (failed) { console.log('失败项：'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1) }
+  process.exit(0)
+})().catch((err) => {
+  console.error('E2E 执行异常：', err)
+  process.exit(1)
+})

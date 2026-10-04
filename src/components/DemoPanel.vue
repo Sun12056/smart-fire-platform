@@ -52,6 +52,12 @@
         </div>
       </div>
       <div class="stage-desc" v-if="stageDesc">{{ stageDesc }}</div>
+      <!-- demo 模式：连接状态与后端状态机错误 -->
+      <div v-if="dataSource.isDemo" class="demo-link" :class="demoStore.wsStatus">
+        <span class="link-dot"></span>
+        <span>{{ linkText }}</span>
+      </div>
+      <div v-if="demoStore.error" class="demo-error">{{ demoStore.error }}</div>
       <div class="demo-flow-actions">
         <button class="demo-btn demo-flow" @click="handleDemoFlow">
           <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -79,10 +85,23 @@
 <script setup>
 import { useFireStore } from '../stores/fireStore'
 import { usePlatformStore } from '../stores/platformStore'
+import { useDemoStore } from '../stores/demoStore'
+import { dataSource } from '../api'
 import { computed } from 'vue'
 
 const store = useFireStore()
 const platformStore = usePlatformStore()
+const demoStore = useDemoStore()
+
+const LINK_TEXT = {
+  idle: '未连接',
+  connecting: '连接中…',
+  open: '已连接·后端状态机驱动',
+  reconnecting: '断线重连中…',
+  closed: '已断开',
+  error: '连接异常',
+}
+const linkText = computed(() => LINK_TEXT[demoStore.wsStatus] || demoStore.wsStatus)
 
 const stageDescMap = {
   0: '点击「启动演示流程」开始六阶段消防应急演示。',
@@ -339,6 +358,35 @@ function handleStopAutoDemo() {
   border-radius: 50%;
   background: #4CC9F0;
   animation: blink 1s ease-in-out infinite;
+}
+
+.demo-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: #475569;
+  padding: 4px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--fire-border);
+}
+.demo-link.open { color: #22C55E; border-color: rgba(34,197,94,0.3); }
+.demo-link.reconnecting { color: #F59E0B; border-color: rgba(245,158,11,0.3); }
+.demo-link.error { color: #EF4444; border-color: rgba(239,68,68,0.3); }
+.link-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.demo-error {
+  font-size: 10px;
+  color: #FCA5A5;
+  background: rgba(239,68,68,0.08);
+  border: 1px solid rgba(239,68,68,0.25);
+  border-radius: 2px;
+  padding: 5px 8px;
+  line-height: 1.4;
 }
 
 .stage-desc {

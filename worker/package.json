@@ -9,13 +9,17 @@
     "migrate:local": "wrangler d1 execute smart-fire-db --local --file=migrations/0001_init.sql",
     "migrate:remote": "wrangler d1 execute smart-fire-db --remote --file=migrations/0001_init.sql",
     "seed:local": "curl -X POST http://localhost:8787/api/v1/admin/seed",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "test:e2e": "node e2e-phase2.cjs",
+    "test:e2e:browser": "node e2e-phase2-browser.cjs"
   },
   "dependencies": {
     "hono": "^4.6.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261001.1",
-    "wrangler": "^4.0.0"
+    "playwright-core": "^1.49.0",
+    "wrangler": "^4.0.0",
+    "ws": "^8.18.0"
   }
 }
