@@ -263,9 +263,12 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useFireStore } from '../stores/fireStore'
+import { useDemoStore } from '../stores/demoStore'
+import { dataSource } from '../api'
 import { getFloorTopology, WALLS } from '../mock/routeGraph'
 
 const store = useFireStore()
+const demoStore = useDemoStore()
 const router = useRouter()
 
 // 页面内提示（替代业务弹窗：手动规划校验失败等）
@@ -404,9 +407,18 @@ function setCurrent(zone, id) {
   if (id) store.setCurrentRoutePlan(zone, id)
 }
 function startFire() {
+  // demo 模式：火情必须经后端状态机 START_FIRE，禁止本地模拟绕过状态机
+  if (dataSource.isDemo) {
+    demoStore.startFire()
+    return
+  }
   store.simulateRouteFire(currentBuildingName.value, fireFloor.value, fireArea.value)
 }
 function clearFire() {
+  if (dataSource.isDemo) {
+    demoStore.reset()
+    return
+  }
   store.clearRouteFire()
 }
 

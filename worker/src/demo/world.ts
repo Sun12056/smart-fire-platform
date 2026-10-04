@@ -19,9 +19,15 @@ export interface PersonRuntime {
   movementType: string
   /** 疏散进度 0~1，1 表示已抵达安全出口 */
   progress: number
-  /** 撤离目标点（出口/楼梯节点） */
+  /** 撤离目标点（出口节点） */
   targetX: number
   targetY: number
+  /** 沿用的疏散路线（节点 id 序列，来自 shared/evacuation 规划器） */
+  route: string[]
+  /** 路线折线点（SVG 平面图坐标），逐段推进用 */
+  routePoints: Array<{ x: number; y: number }>
+  /** 当前所处折线段下标 */
+  waypoint: number
   evacuating: boolean
   retained: boolean
   rescued: boolean
@@ -37,16 +43,39 @@ export interface DeviceRuntime {
   emergencyFlash: boolean
 }
 
+/** 疏散方案 —— 结构与 shared/evacuation/routePlanner 的输出一致（前端/3D 直接复用） */
 export interface DemoPlan {
   id: string
   name: string
+  /** 起点区域（如 A区） */
+  startZones: string[]
+  startNode: string
   exitId: string
   exitLabel: string
+  /** 路线距离（m） */
   distance: number
+  /** 预计时间（s） */
   estimatedTime: number
+  /** 风险等级：由脱离火源的快慢推导 */
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH'
+  /** 距火源最近距离（m） */
+  fireDistance: number
+  /** 脱离距离：路线上第一个楼梯/出口距火源（m） */
+  escapeDistance: number
+  /** 起点到出口直线距离（m） */
+  exitDistance: number
+  /** 途经楼层（自上而下，末位为 1F） */
+  floorsPassed: string[]
+  /** 路线节点 id 序列 */
+  nodes: string[]
+  /** 路线折线点（SVG 平面图坐标 560×300） */
+  points: Array<{ x: number; y: number }>
   congestion: number
+  score: number
   recommended: boolean
-  /** EvacuationPlan 生命周期（与 Demo 阶段互相独立） */
+  valid: boolean
+  reasons: string[]
+  /** EvacuationPlan 生命周期（与 Demo 六阶段互相独立） */
   status: 'NORMAL' | 'WARNING' | 'BLOCKED' | 'CONFIRMED' | 'EXECUTING' | 'DONE'
 }
 

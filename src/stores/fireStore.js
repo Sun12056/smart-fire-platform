@@ -131,6 +131,75 @@ export const useFireStore = defineStore('fire', () => {
   // ── 阶段二：应用后端 Demo 状态机快照（前端不自行推演，仅镜像后端状态） ──
   const STAGE_TO_LEGACY = { IDLE: 0, FIRE_DETECTED: 1, EMERGENCY_RESPONSE: 2, ROUTE_PLANNING: 3, SMART_EVACUATION: 4, RETAINED_PERSONS: 5, RESCUE_COORDINATION: 6, COMPLETED: 6 }
 
+  const RISK_CN = { LOW: '低', MEDIUM: '中', HIGH: '高' }
+
+  /** 后端方案（shared/evacuation 规划器输出）→ 前端渲染结构（含 3D 使用的 path） */
+  function toRenderablePlan(plan, ctx) {
+    const path = (plan.points || []).map((pt, i) => {
+      const id = (plan.nodes || [])[i] || ''
+      const [floorId, key] = String(id).split(':')
+      return {
+        id,
+        floorId: floorId || ctx.floorId,
+        key: key || '',
+        x: pt.x,
+        y: pt.y,
+        type: /^EXIT_/.test(key) ? 'exit'
+          : /^STAIR_/.test(key) ? 'stair'
+            : /^CORRIDOR/.test(key) ? 'corridor' : 'room',
+      }
+    })
+    return {
+      ...plan,
+      buildingId: ctx.buildingId,
+      buildingName: ctx.buildingName,
+      startFloor: ctx.floorId,
+      startArea: (plan.startZones && plan.startZones[0]) || ctx.zone,
+      exit: plan.exitId,
+      exitSide: /EXIT_E/.test(plan.exitId) ? 'right' : 'left',
+      corridor: '走廊',
+      stair: (plan.nodes || []).find((n) => /STAIR_/.test(n)) || '楼梯',
+      floorsPassed: plan.floorsPassed || [ctx.floorId],
+      riskLevel: RISK_CN[plan.riskLevel] || '低',
+      type: 'auto',
+      zoneColor: ZONE_COLORS[(plan.startZones && plan.startZones[0]) || ctx.zone] || '#4361EE',
+      deviceCount: 0,
+      path,
+    }
+  }
+
+  /** 用后端方案刷新前端路线矩阵（平面图 2D / 3D 都读这里） */
+  function applyDemoPlans(snap) {
+    const zone = snap.fire?.zone || 'A区'
+    const floorId = snap.fire?.floorId || routeFloorId.value || '5F'
+    const ctx = {
+      floorId,
+      zone,
+      buildingId: snap.fire?.buildingId || 'B003',
+      buildingName: snap.fire?.buildingName || '3号楼',
+    }
+    routePlans.value = (snap.plans || []).map((p) => toRenderablePlan(p, ctx))
+    const activeId = snap.activePlanId
+      || (routePlans.value.find((p) => p.recommended) || {}).id
+      || routePlans.value[0]?.id
+      || null
+    activeRoutePlanId.value = activeId
+    routeMatrix.value = {
+      buildingId: ctx.buildingId,
+      buildingName: ctx.buildingName,
+      floorId,
+      areas: [zone],
+      exits: [...new Set(routePlans.value.map((p) => p.exitId))],
+      perZone: {
+        [zone]: {
+          plans: routePlans.value,
+          recommendedId: activeId,
+          backupId: routePlans.value[1]?.id || null,
+        },
+      },
+    }
+  }
+
   function applyDemoSnapshot(snap) {
     if (!snap) return
     // ① 阶段：唯一来源是后端状态机
@@ -161,6 +230,8 @@ export const useFireStore = defineStore('fire', () => {
       routeDecisionConfirmed.value = false
       emergencyStage.value = 0
     }
+    // ②·补充：疏散方案 —— 前端/3D 直接复用后端规划器的结果（同一套路线，不再各算一套）
+    if (Array.isArray(snap.plans)) applyDemoPlans(snap)
     // ③ 人员（按 id 合并后端运行时）
     if (Array.isArray(snap.persons)) applyDemoPersons(snap.persons)
     // ④ 设备（状态 / 模式 / 方向 / 亮度）
@@ -1183,7 +1254,13 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   // 区域级火灾联动
+  // ⚠️ demo 模式禁止使用：火情必须经后端六阶段状态机（START_FIRE）产生，
+  //    本地直接改状态会绕过状态机，导致阶段与真实状态不一致。
   function triggerFireScenario(building = '3号楼', floor = '5F', area = 'A区') {
+    if (dataSource.isDemo) {
+      console.error('[fireStore] demo 模式禁止本地模拟火灾，请通过后端状态机 START_FIRE 触发')
+      return false
+    }
     fireEvent.value = {
       id: `FE-${Date.now()}`,
       building,
@@ -2229,6 +2306,11 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   function simulateRouteFire(building = '3号楼', floor = '5F', area = 'A区') {
+    // demo 模式：火情由后端状态机驱动，本地不模拟（返回 false 由调用方提示）
+    if (dataSource.isDemo) {
+      console.error('[fireStore] demo 模式禁止本地模拟火灾，请通过后端状态机 START_FIRE 触发')
+      return false
+    }
     // triggerFireScenario 内部已对已有路线做 applyFireBlocking + replanRoutesForFire，
     // 此处只触发一次，避免重复重规划导致封堵边被二次改写、丢失火灾效果。
     return triggerFireScenario(building, floor, area)

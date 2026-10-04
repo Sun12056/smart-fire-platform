@@ -93,13 +93,26 @@ curl -X POST http://localhost:8787/api/v1/admin/seed
 
 前端启动：根目录复制 `.env.example` 为 `.env` 后设置 `VITE_DATA_SOURCE`（`mock` / `api` / `demo`），再 `npm run dev`。
 
+### 疏散路线：一套算法，三端共用
+
+```
+shared/evacuation ─┬─ Vue（2D 平面图 / 3D 数字孪生）
+                   └─ Worker（Demo Simulation Engine）
+```
+
+- 拓扑：房间门口 → 走廊 → 四角楼梯 → 1F 安全出口；火灾区域作为**动态障碍**先剔除再寻路
+- 算法：Dijkstra + Yen K 最短路 → A/B/C 三套候选 → 校验（不穿墙 / 不经火区 / 必达出口）→ 评分排序
+- 后端 Demo Engine 与前端渲染的是**同一份规划结果**（人员沿 `routePoints` 逐段撤离）
+
 ### 测试
 
 ```bash
+npm run test:route          # 路线算法单测（拓扑/三方案/不穿墙/不经火区/必达出口）
 cd worker
-npm run test:e2e           # 后端 E2E：状态机全链路 / WS 广播 / 非法转换 / 重复操作 / 断线重连 / 关键 REST
-npm run test:e2e:browser   # 浏览器 E2E：真实 UI 驱动后端状态机（依赖系统 Edge，需先启动前端）
+npm run test:e2e            # 后端 E2E：状态机全链路 / WS 广播 / 非法转换 / 重复操作 / 断线重连 / 关键 REST
+npm run test:e2e:browser    # 浏览器 E2E：真实 UI 驱动后端状态机（依赖系统 Edge，需先启动前端）
 EXPECT_OFFLINE=1 npm run test:e2e:browser   # 校验后端不可用时"不静默回退 mock"
+EXPECT_MOCK=1 npm run test:e2e:browser      # mock 模式路线规划页回归
 ```
 
 ## 部署

@@ -58,6 +58,21 @@
         <span>{{ linkText }}</span>
       </div>
       <div v-if="demoStore.error" class="demo-error">{{ demoStore.error }}</div>
+      <!-- 阶段 3：先选方案，再确认路径（禁止跳过确认直接进入智能疏散） -->
+      <div v-if="isRoutePlanning" class="plan-picker">
+        <div class="section-label">选择疏散方案</div>
+        <button
+          v-for="plan in demoStore.plans"
+          :key="plan.id"
+          class="plan-chip"
+          :class="{ active: isPlanSelected(plan.id) }"
+          @click="demoStore.selectPlan(plan.id)"
+        >
+          <span class="plan-name">{{ plan.name }}</span>
+          <span class="plan-meta">{{ plan.exitLabel }} · {{ plan.distance }}m · {{ plan.estimatedTime }}s</span>
+          <span class="plan-risk" :class="plan.riskLevel">{{ riskText(plan.riskLevel) }}</span>
+        </button>
+      </div>
       <div class="demo-flow-actions">
         <button class="demo-btn demo-flow" @click="handleDemoFlow">
           <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -67,7 +82,7 @@
                 <path d="M19 5v14"/>
               </template>
             </svg>
-          <span>{{ platformStore.demoFlowActive ? '推进下一步' : '启动演示流程' }}</span>
+          <span>{{ flowBtnText }}</span>
         </button>
         <button class="demo-btn demo-auto" @click="handleAutoDemo">
           <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
@@ -103,6 +118,19 @@ const LINK_TEXT = {
 }
 const linkText = computed(() => LINK_TEXT[demoStore.wsStatus] || demoStore.wsStatus)
 
+// 阶段 3（ROUTE_PLANNING）：先选方案再确认，禁止跳过确认直接疏散
+const isRoutePlanning = computed(() => dataSource.isDemo && demoStore.stage === 'ROUTE_PLANNING')
+const RISK_TEXT = { LOW: '低风险', MEDIUM: '中风险', HIGH: '高风险' }
+const riskText = (lv) => RISK_TEXT[lv] || lv
+function isPlanSelected(id) {
+  return (demoStore.selectedPlanId || demoStore.activePlanId) === id
+}
+const flowBtnText = computed(() => {
+  if (!platformStore.demoFlowActive) return '启动演示流程'
+  if (isRoutePlanning.value) return '确认当前疏散路径'
+  return '推进下一步'
+})
+
 const stageDescMap = {
   0: '点击「启动演示流程」开始六阶段消防应急演示。',
   1: '已定位火情建筑/楼层/区域（3号楼 5F A区），设备状态与日志已更新。',
@@ -130,6 +158,11 @@ function handleSimulateAlarm() {
 }
 
 function handleSimulateFire() {
+  // demo 模式：走后端状态机 START_FIRE（保证六阶段与真实状态一致）
+  if (dataSource.isDemo) {
+    demoStore.startFire()
+    return
+  }
   store.simulateFireAlarm()
 }
 
@@ -379,6 +412,35 @@ function handleStopAutoDemo() {
   border-radius: 50%;
   background: currentColor;
 }
+.plan-picker { margin-bottom: 8px; }
+.plan-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 5px 8px;
+  border: 1px solid var(--fire-border);
+  border-radius: 2px;
+  background: rgba(76, 201, 240, 0.04);
+  color: var(--fire-text);
+  font-size: 10px;
+  cursor: pointer;
+  text-align: left;
+}
+.plan-chip:hover { background: rgba(76, 201, 240, 0.1); }
+.plan-chip.active {
+  border-color: rgba(76, 201, 240, 0.6);
+  background: rgba(76, 201, 240, 0.16);
+}
+.plan-name { font-weight: 600; }
+.plan-meta { flex: 1; opacity: 0.75; }
+.plan-risk { font-size: 9px; padding: 1px 4px; border-radius: 2px; }
+.plan-risk.LOW { color: #22C55E; }
+.plan-risk.MEDIUM { color: #F59E0B; }
+.plan-risk.HIGH { color: #EF4444; }
+
 .demo-error {
   font-size: 10px;
   color: #FCA5A5;

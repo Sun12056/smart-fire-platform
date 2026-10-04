@@ -149,6 +149,11 @@ export class DemoRoom extends DurableObject<Env> {
         allowed: availableCommands(current),
       }, 409)
     }
+    // 阶段语义强校验：ROUTE_PLANNING 只能由 CONFIRM_ROUTE 推进到 SMART_EVACUATION，
+    // 且必须是基于已生成的方案确认 —— 不允许「选择阶段」直接跳到疏散执行。
+    const guard = this.guardCommand(current, command, world, payload)
+    if (guard) return guard
+
     const target = nextStage(current, command) as DemoStage
     const at = fmtSH()
 
@@ -169,12 +174,14 @@ export class DemoRoom extends DurableObject<Env> {
     }
 
     // ① 业务数据落 D1（Alarm / EvacuationPlan / OperationLog / demo_*）
-    const sideEffect = await this.persistTransition(world, target, command, at)
+    const sideEffect = await this.persistTransition(world, target, command, at, payload)
 
     // ② 内存态推进（仿真引擎）
     world.stage = target
     world.enteredAt = at
     const events = applyStageEffects(world, target, at, { ...payload, ...sideEffect })
+    // 方案在引擎生成后落 D1（A/B/C 与执行中的方案都来自同一套规划器结果）
+    await this.persistPlans(world, target, at)
     await this.saveWorld()
 
     // ③ 广播全量快照（阶段变化）
@@ -213,12 +220,100 @@ export class DemoRoom extends DurableObject<Env> {
     }
   }
 
+  /**
+   * 疏散方案落库（引擎生成之后调用）：
+   * 方案内容完全来自 shared/evacuation 规划器 —— exit_id / 距离 / 路径节点均为真实规划结果。
+   */
+  private async persistPlans(world: DemoWorld, target: DemoStage, at: string): Promise<void> {
+    const db = this.env.DB
+    const sc = world.scenario
+    const upsert = async (plan: DemoWorld['plans'][number], status: string) => {
+      await db.prepare(`INSERT OR REPLACE INTO evacuation_plans
+        (id, name, building_id, building_name, start_floor, start_area, exit_id, exit_label, type, status, recommended,
+         floors_passed, path, extra, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(
+          plan.id,
+          `演示${plan.name}·${sc.buildingName}${sc.floorId}`,
+          sc.buildingId,
+          sc.buildingName,
+          sc.floorId,
+          plan.startZones?.[0] || sc.zone,
+          plan.exitId,
+          plan.exitLabel,
+          'auto',
+          status,
+          plan.recommended ? 1 : 0,
+          JSON.stringify(plan.floorsPassed || [sc.floorId]),
+          JSON.stringify(plan.nodes || []),
+          JSON.stringify({
+            distance: plan.distance,
+            estimatedTime: plan.estimatedTime,
+            riskLevel: plan.riskLevel,
+            fireDistance: plan.fireDistance,
+            escapeDistance: plan.escapeDistance,
+            exitDistance: plan.exitDistance,
+            congestion: plan.congestion,
+            score: plan.score,
+            points: plan.points || [],
+          }),
+          at,
+          at,
+        ).run()
+    }
+
+    if (target === 'ROUTE_PLANNING') {
+      for (const plan of world.plans) await upsert(plan, 'NORMAL')
+    } else if (target === 'SMART_EVACUATION') {
+      for (const plan of world.plans) {
+        await upsert(plan, plan.id === world.activePlanId ? 'EXECUTING' : 'NORMAL')
+      }
+    } else if (target === 'RETAINED_PERSONS' && world.activePlanId) {
+      const plan = world.plans.find((p) => p.id === world.activePlanId)
+      if (plan) await upsert(plan, 'DONE')
+    }
+  }
+
+  /**
+   * 命令前置校验（阶段语义，而非转移表）：
+   *   - CONFIRM_ROUTE 必须先有方案，且指定方案必须存在（禁止凭空进入 SMART_EVACUATION）
+   */
+  private guardCommand(
+    stage: DemoStage,
+    command: DemoCommand,
+    world: DemoWorld,
+    payload: Record<string, unknown>,
+  ): Response | null {
+    if (command === 'CONFIRM_ROUTE') {
+      if (!world.plans.length) {
+        return json({
+          error: '当前没有可执行的疏散方案，请先完成路线规划',
+          stage,
+          stageLabel: STAGE_META[stage]?.label,
+          allowed: availableCommands(stage),
+        }, 409)
+      }
+      const requestId = payload.planId ? String(payload.planId) : null
+      if (requestId && !world.plans.some((p) => p.id === requestId)) {
+        return json({
+          error: `方案 ${requestId} 不存在，请从已生成的方案中选择`,
+          stage,
+          stageLabel: STAGE_META[stage]?.label,
+          allowed: availableCommands(stage),
+          plans: world.plans.map((p) => ({ id: p.id, name: p.name })),
+        }, 409)
+      }
+    }
+    return null
+  }
+
   // ── D1 落库：业务数据与历史（不做实时状态存储） ──
   private async persistTransition(
     world: DemoWorld,
     target: DemoStage,
     command: DemoCommand,
     at: string,
+    payload: Record<string, unknown> = {},
   ): Promise<Record<string, unknown>> {
     const db = this.env.DB
     const extra: Record<string, unknown> = {}
@@ -259,25 +354,20 @@ export class DemoRoom extends DurableObject<Env> {
         break
       }
       case 'PLAN_ROUTES': {
-        // 方案由引擎生成后落库（此处先按三出口生成占位，状态 NORMAL）
+        // 方案由仿真引擎（shared/evacuation 规划器）生成后落库，见 persistPlans()
         await log('生成疏散方案', '系统自动生成多套合法疏散方案', 'success')
         await evt('生成疏散方案', '多套疏散方案已生成', 'success')
         break
       }
       case 'CONFIRM_ROUTE': {
-        await log('确认疏散路径', `执行方案，出口 ${world.plans.find((p) => p.recommended)?.exitLabel ?? '安全出口'}`, 'danger')
-        await evt('确认疏散路径', '管理员确认执行疏散方案', 'danger')
+        const planId = payload?.planId ? String(payload.planId) : null
+        const plan = world.plans.find((p) => p.id === planId) || world.plans.find((p) => p.recommended)
+        await log('确认疏散路径', `执行方案「${plan?.name ?? '推荐方案'}」，出口 ${plan?.exitLabel ?? '安全出口'} · ${plan?.distance ?? 0}m`, 'danger')
+        await evt('确认疏散路径', `管理员确认执行方案 ${plan?.name ?? ''}`, 'danger')
         break
       }
       case 'COMPLETE_EVACUATION': {
-        if (world.activePlanId) {
-          await db.prepare(`INSERT OR REPLACE INTO evacuation_plans
-            (id, name, building_id, building_name, start_floor, start_area, exit_id, exit_label, type, status, recommended,
-             floors_passed, path, extra, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-            .bind(world.activePlanId, `演示方案·${sc.buildingName}${sc.floorId}`, sc.buildingId, sc.buildingName, sc.floorId, sc.zone,
-              'EXIT-E', '东侧安全出口', 'auto', 'DONE', 1, JSON.stringify([sc.floorId]), JSON.stringify([]), JSON.stringify({}), at, at).run()
-        }
+        // 方案生命周期置为 DONE（EvacuationPlan 生命周期，与 Demo 阶段互相独立）
         await log('识别滞留人员', '疏散完成，自动识别滞留人员', 'warning')
         await evt('识别滞留人员', '进入 RETAINED_PERSONS 阶段', 'warning')
         break

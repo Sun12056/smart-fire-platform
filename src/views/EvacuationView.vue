@@ -443,10 +443,13 @@
 <script setup>
 import { ref, computed, watch, reactive } from 'vue'
 import { useFireStore } from '../stores/fireStore'
+import { useDemoStore } from '../stores/demoStore'
+import { dataSource } from '../api'
 import { directionMap, directionAngle, floorOptions } from '../mock/evacuation'
 import OperationLog from '../components/OperationLog.vue'
 
 const fireStore = useFireStore()
+const demoStore = useDemoStore()
 
 // 疏散演示固定建筑（与 Dashboard 默认展示建筑一致）
 const EVAC_BUILDING = '3号楼'
@@ -626,6 +629,11 @@ function handleSimulateFire() {
   const building = currentDevice.value?.building || '3号楼'
   const floor = currentFloor.value
   const area = currentDevice.value?.area || 'A区'
+  // demo 模式：火情必须经后端状态机 START_FIRE，禁止本地模拟绕过状态机
+  if (dataSource.isDemo) {
+    demoStore.startFire()
+    return
+  }
   // 触发火灾场景（回指挥中心时由状态机同步阶段），风险信息通过页面内风险提示面板直接显示
   fireStore.triggerFireScenario(building, floor, area)
 }

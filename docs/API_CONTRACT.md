@@ -156,6 +156,33 @@
 | `api` | Workers → D1 | 后端 REST | **显式告警**（`dataSourceDegraded` + 横幅），不静默回退 |
 | `demo` | Workers → D1 + DO | 后端状态机（WS 广播） | 显式告警 + WS 自动重连（指数退避） |
 
+## 3.1.1 疏散路线统一算法（shared/evacuation）
+
+前端（Vue/平面图/3D）与 Worker（Demo Engine）共用 `shared/evacuation/`：
+
+```
+shared/evacuation ┬ routeGraph.js     楼层拓扑（节点/边/墙）+ Dijkstra + Yen K 最短路
+                  ├ routePlanner.js  A/B/C 候选方案（距离/时间/风险/距火/出口）
+                  ├ routeValidator.js 绝不穿墙校验（4 项检查）
+                  └ routeTypes.js    统一数据结构与常量
+        ┌─────────┴─────────┐
+      Vue（2D/3D）      Worker Demo Engine
+```
+
+- 楼层拓扑（SVG 平面图 560×300，1m=10px）：`A/B/C/D_CENTER` → `CORRIDOR_N/S/CENTER/W/E` → `STAIR_NW/NE/SW/SE` → `EXIT_W/EXIT_E`（1F）。
+- 火灾区域是**动态障碍**：`blockedNodesForFire()` 先剔除火源节点，再交由 `findPaths()` 的 K 最短路求解；校验不通过的路线一律不展示。
+- 方案输出（A/B/C 唯一来源）：
+
+```json
+{ "id": "PLAN-A", "name": "方案A", "startZones": ["A区"], "exitId": "1F:EXIT_E",
+  "distance": 81.3, "estimatedTime": 88, "riskLevel": "LOW",
+  "fireDistance": 2, "escapeDistance": 35.8, "floorsPassed": ["5F","4F","3F","2F","1F"],
+  "nodes": ["5F:A_CENTER", "...", "1F:EXIT_E"], "points": [{ "x": 140, "y": 150 }] }
+```
+
+- Worker 不再自带出口常量与硬编码方案；`engine.ts` 调用同一规划器，人员沿 `routePoints` 逐段推进。
+- 前端 `src/mock/routeGraph.js` 只保留旧签名适配，算法全部转发到 shared（不再有两套实现）。
+
 ## 3.2 Demo 六阶段状态机（唯一定义）
 
 ```
@@ -167,6 +194,8 @@ IDLE ──START_FIRE──▶ FIRE_DETECTED ──ACTIVATE_RESPONSE──▶ EM
 
 - 定义位置：`worker/src/demo/stages.ts`（后端权威）、`src/api/contract.js`（前端镜像），二者必须同步。
 - 非法转换一律 409，响应体含当前阶段与 `allowed` 命令列表；重复同一命令亦为 409。
+- 阶段 3 → 4 只能由 `CONFIRM_ROUTE` 推进，且必须基于已生成的方案：`planId` 不存在返回 409，无方案返回 409（禁止跳过确认直接进入智能疏散）。
+- `RESET` 在 IDLE 下视为非法转换（409）。
 - **与另两套状态严格区分**：
   - Alarm 七步事件流 `pending → processing → reviewing → resolved`（业务处置状态，落 D1）
   - EvacuationPlan 生命周期 `NORMAL|WARNING|BLOCKED → CONFIRMED → EXECUTING → DONE`（预案对象状态，落 D1）

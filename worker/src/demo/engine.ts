@@ -5,6 +5,8 @@ import { STAGE_META, type DemoStage } from './stages'
 import type {
   DemoEvent, DemoPlan, DemoWorld, DeviceRuntime, PersonRuntime,
 } from './world'
+// 疏散路线唯一算法来源（与前端、3D 共用同一份）：shared/evacuation
+import { planEvacuationRoutes } from '../../../shared/evacuation/routePlanner.js'
 
 // ── 确定性伪随机（同一 session 可复现，避免演示每次不一样） ──
 function seededRand(seedStr: string) {
@@ -13,11 +15,8 @@ function seededRand(seedStr: string) {
   return () => { h = Math.imul(h ^ (h >>> 15), 2246822507); h ^= h >>> 13; return (h >>> 0) / 4294967296 }
 }
 
-const EXIT_NODES: Array<{ id: string; label: string; x: number; y: number }> = [
-  { id: 'EXIT-E', label: '东侧安全出口', x: 840, y: 150 },
-  { id: 'EXIT-W', label: '西侧安全出口', x: 60, y: 150 },
-  { id: 'EXIT-N', label: '北侧安全出口', x: 450, y: 60 },
-]
+/** 楼层拓扑与路线算法一律来自 shared/evacuation，后端不再自带出口常量 */
+const MAX_FLOOR = 6
 
 export interface DemoBaseline {
   persons: PersonRuntime[]
@@ -30,8 +29,11 @@ export function createWorld(sessionId: string, scenario: DemoWorld['scenario'], 
     persons[p.id] = {
       ...p,
       progress: 0,
-      targetX: EXIT_NODES[0].x,
-      targetY: EXIT_NODES[0].y,
+      targetX: p.x,
+      targetY: p.y,
+      route: [],
+      routePoints: [],
+      waypoint: 0,
       evacuating: false,
       retained: false,
       rescued: false,
@@ -136,18 +138,29 @@ export function applyStageEffects(
     }
 
     case 'ROUTE_PLANNING': {
-      world.plans = EXIT_NODES.map((n, i) => ({
-        id: `PLAN-${world.sessionId}-${i + 1}`,
-        name: `方案${i + 1}·经${n.label}`,
-        exitId: n.id,
-        exitLabel: n.label,
-        distance: Number((28 + i * 9.5).toFixed(1)),
-        estimatedTime: 42 + i * 11,
-        congestion: Math.max(1, Math.round(floorPersons().length * (0.5 - i * 0.12))),
-        recommended: i === 0,
-        status: 'NORMAL' as const,
-      }))
-      pushEvent(world, '生成疏散方案', `已生成 ${world.plans.length} 套合法疏散方案，推荐：${world.plans[0].name}`, 'success', at)
+      // 路线来自共享规划器：拓扑寻路 → 剔除火源 → K 最短路 → 校验 → A/B/C
+      const congestion = fireZonePersons().length || floorPersons().length
+      const { plans } = planEvacuationRoutes({
+        floorId: scenario.floorId,
+        zone: scenario.zone,
+        fireZone: scenario.zone,
+        maxFloor: MAX_FLOOR,
+        congestion,
+        limit: 3,
+        idPrefix: `PLAN-${world.sessionId}`,
+      })
+      world.plans = plans as DemoPlan[]
+      if (!world.plans.length) {
+        pushEvent(world, '路线规划失败', '未找到不穿墙且不经过火区的合法路线，请检查火情区域', 'danger', at)
+        break
+      }
+      pushEvent(
+        world,
+        '生成疏散方案',
+        `已生成 ${world.plans.length} 套合法疏散方案，推荐：${world.plans[0].name}（${world.plans[0].exitLabel}·${world.plans[0].distance}m）`,
+        'success',
+        at,
+      )
       break
     }
 
@@ -158,18 +171,41 @@ export function applyStageEffects(
         world.activePlanId = plan.id
         world.plans.forEach((p) => { p.status = p.id === plan.id ? 'EXECUTING' : 'NORMAL' })
       }
-      const exitNode = EXIT_NODES.find((n) => n.id === plan?.exitId) || EXIT_NODES[0]
+      // 每个区域的人员沿「同一套规划器」算出的路线撤离：火源区执行已确认方案，其余区按各自最优方案
+      const routesByZone = new Map<string, { nodes: string[]; points: Array<{ x: number; y: number }> }>()
+      if (plan && plan.nodes?.length) {
+        routesByZone.set(scenario.zone, { nodes: plan.nodes, points: plan.points || [] })
+      }
+      const otherZones = [...new Set(floorPersons().map((p) => p.zone))].filter((z) => z !== scenario.zone)
+      for (const zone of otherZones) {
+        const res = planEvacuationRoutes({
+          floorId: scenario.floorId,
+          zone,
+          fireZone: scenario.zone,
+          maxFloor: MAX_FLOOR,
+          congestion: floorPersons().filter((p) => p.zone === zone).length,
+          limit: 1,
+          idPrefix: `SUB-${world.sessionId}`,
+        })
+        const best = res.plans[0]
+        if (best && best.nodes?.length) routesByZone.set(zone, { nodes: best.nodes, points: best.points || [] })
+      }
+
       floorPersons().forEach((p) => {
+        const route = routesByZone.get(p.zone) || routesByZone.get(scenario.zone)
         p.evacuating = true
         p.status = 'evacuating'
         p.movementType = 'moving'
         p.progress = 0
-        p.targetX = exitNode.x
-        p.targetY = exitNode.y
+        p.route = route ? route.nodes : []
+        p.routePoints = route ? route.points : []
+        p.waypoint = 0
+        const last = p.routePoints[p.routePoints.length - 1]
+        if (last) { p.targetX = last.x; p.targetY = last.y }
       })
       world.metrics.evacuating = floorPersons().length
       world.evacuationSettled = false
-      pushEvent(world, '确认疏散路径', `执行方案「${plan?.name ?? '推荐方案'}」，出口 ${plan?.exitLabel ?? exitNode.label}`, 'danger', at)
+      pushEvent(world, '确认疏散路径', `执行方案「${plan?.name ?? '推荐方案'}」，出口 ${plan?.exitLabel ?? '—'}`, 'danger', at)
       break
     }
 
@@ -226,6 +262,25 @@ export function applyStageEffects(
   return world.eventLog.slice(0, world.eventLog.length - before)
 }
 
+function routeLength(pts: Array<{ x: number; y: number }>): number {
+  let s = 0
+  for (let i = 0; i < pts.length - 1; i++) {
+    s += Math.sqrt((pts[i + 1].x - pts[i].x) ** 2 + (pts[i + 1].y - pts[i].y) ** 2)
+  }
+  return Math.max(s, 1)
+}
+
+/** 当前位置到路线终点的剩余长度 */
+function remainingLength(pts: Array<{ x: number; y: number }>, waypoint: number, x: number, y: number): number {
+  const nextIdx = waypoint + 1
+  let s = 0
+  if (pts[nextIdx]) s += Math.sqrt((pts[nextIdx].x - x) ** 2 + (pts[nextIdx].y - y) ** 2)
+  for (let i = nextIdx; i < pts.length - 1; i++) {
+    s += Math.sqrt((pts[i + 1].x - pts[i].x) ** 2 + (pts[i + 1].y - pts[i].y) ** 2)
+  }
+  return s
+}
+
 export function retainedPersons(world: DemoWorld): PersonRuntime[] {
   return Object.values(world.persons).filter((p) => p.retained && !p.rescued)
 }
@@ -250,10 +305,39 @@ export function tickWorld(world: DemoWorld, at: string): boolean {
   let moving = 0
   for (const p of Object.values(world.persons)) {
     if (!p.evacuating) continue
-    p.progress = Math.min(1, p.progress + 0.08 + rand() * 0.06)
-    // 沿直线向出口插值
-    p.x = Number((p.x + (p.targetX - p.x) * 0.12).toFixed(1))
-    p.y = Number((p.y + (p.targetY - p.y) * 0.12).toFixed(1))
+    // 沿规划路线的折线推进（waypoint 逐段前进），不再是「直线穿墙扑向出口」
+    const pts = p.routePoints && p.routePoints.length ? p.routePoints : null
+    if (pts) {
+      // 演示节奏：每 tick（1s）推进约 55px，整条路线约 8~12s 走完
+      const step = 55 + rand() * 20
+      let remain = step
+      while (remain > 0 && p.waypoint < pts.length - 1) {
+        const cur = { x: p.x, y: p.y }
+        const next = pts[p.waypoint + 1]
+        const dx = next.x - cur.x
+        const dy = next.y - cur.y
+        const d = Math.sqrt(dx * dx + dy * dy)
+        if (d <= 0.5) { p.waypoint += 1; continue }
+        if (d <= remain) {
+          p.x = next.x
+          p.y = next.y
+          p.waypoint += 1
+          remain -= d
+        } else {
+          p.x = Number((cur.x + (dx / d) * remain).toFixed(1))
+          p.y = Number((cur.y + (dy / d) * remain).toFixed(1))
+          remain = 0
+        }
+      }
+      const total = routeLength(pts)
+      const walked = total - remainingLength(pts, p.waypoint, p.x, p.y)
+      p.progress = Math.min(1, Number((walked / Math.max(total, 1)).toFixed(3)))
+      if (p.waypoint >= pts.length - 1) p.progress = 1
+    } else {
+      p.progress = Math.min(1, p.progress + 0.08 + rand() * 0.06)
+      p.x = Number((p.x + (p.targetX - p.x) * 0.12).toFixed(1))
+      p.y = Number((p.y + (p.targetY - p.y) * 0.12).toFixed(1))
+    }
     if (p.progress >= 1) {
       p.evacuating = false
       p.status = 'safe'

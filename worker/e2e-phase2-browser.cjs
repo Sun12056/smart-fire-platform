@@ -37,11 +37,37 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
   check('页面挂载并暴露开发钩子', await page.evaluate(() => Boolean(window.__demo)))
 
   const mode = await page.evaluate(() => window.__demo.dataSource.mode)
-  const expectMode = EXPECT_OFFLINE ? 'api' : 'demo'
+  const expectMode = EXPECT_OFFLINE ? 'api' : (process.env.EXPECT_MOCK === '1' ? 'mock' : 'demo')
   check(`运行模式为 ${expectMode}（实际 ${mode}）`, mode === expectMode, mode)
-  check('远端模式下未使用 mock 数据源', await page.evaluate(() => window.__demo.dataSource.isRemote === true))
+  if (expectMode !== 'mock') {
+    check('远端模式下未使用 mock 数据源', await page.evaluate(() => window.__demo.dataSource.isRemote === true))
+  }
 
-  if (EXPECT_OFFLINE) {
+  if (process.env.EXPECT_MOCK === '1') {
+    // ── mock 模式回归：本地路线规划页仍能生成合法路线（算法已切到 shared/evacuation） ──
+    console.log('\n[mock 模式 · 路线规划页回归]')
+    // 进入路线规划页并触发自动规划
+    await page.goto(`${PAGE_URL}#/route`, { waitUntil: 'load' })
+    await waitFor(() => page.evaluate(() => Boolean(window.__demo && window.__demo.store.routeMatrix)), 8000)
+    if (!(await page.evaluate(() => Boolean(window.__demo.store.routeMatrix)))) {
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('button')).find((b) => b.textContent.includes('自动规划'))
+        if (btn) btn.click()
+      })
+      await waitFor(() => page.evaluate(() => Boolean(window.__demo.store.routeMatrix)), 8000)
+    }
+    const m = await page.evaluate(() => window.__demo.store.routeMatrix)
+    check('routeMatrix 已生成', Boolean(m && m.perZone), m ? Object.keys(m.perZone) : null)
+    const zones = m ? Object.keys(m.perZone) : []
+    const allHavePlans = zones.every((z) => (m.perZone[z].plans || []).length > 0)
+    check('每个区域都有候选方案', allHavePlans, zones.map((z) => (m.perZone[z].plans || []).length))
+    const allValid = zones.every((z) => (m.perZone[z].plans || []).every((p) => Array.isArray(p.path) && p.path.length >= 2 && p.distance > 0))
+    check('方案含 path 与距离', allValid)
+    const zoneRoutes = await page.evaluate(() => window.__demo.store.getAllZoneRoutes())
+    check('平面图取到区域路线', Array.isArray(zoneRoutes) && zoneRoutes.some((r) => (r.segment || []).length > 1),
+      (zoneRoutes || []).map((r) => (r.segment || []).length))
+    check('无 JS 运行时错误', !consoleLogs.some((l) => l.startsWith('[error]')), consoleLogs.filter((l) => l.startsWith('[error]')).slice(0, 2))
+  } else if (EXPECT_OFFLINE) {
     console.log('\n[后端不可用：禁止静默回退 mock]')
     const degraded = await page.evaluate(() => window.__demo.store.dataSourceDegraded)
     const remoteError = await page.evaluate(() => window.__demo.store.remoteError)
@@ -97,9 +123,40 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
       await page.evaluate(() => window.__demo.demoStore.stage))
     check('生成多套方案', await page.evaluate(() => (window.__demo.demoStore.plans || []).length >= 2))
 
-    await clickByText('推进下一步')
+    // 阶段 3 必须先选方案再确认（禁止跳过确认直接进入智能疏散）
+    check('阶段3 显示方案选择器', await page.locator('.plan-picker').isVisible().catch(() => false))
+    const chips = await page.locator('.plan-chip').count()
+    check('阶段3 列出 A/B/C 三套方案', chips === 3, chips)
+    const btnText3 = await page.locator('.demo-btn.demo-flow').first().textContent()
+    check('按钮显示为「确认当前疏散路径」', btnText3.includes('确认当前疏散路径'), btnText3)
+    // 选非推荐方案，验证「确认的是所选方案」（同样用 DOM click 规避弹窗遮罩）
+    await page.evaluate(() => {
+      const chips = document.querySelectorAll('.plan-chip')
+      if (chips[1]) chips[1].click()
+    })
+    const pickedId = await page.evaluate(() => window.__demo.demoStore.selectedPlanId)
+    check('点选方案被记录', Boolean(pickedId), pickedId)
+
+    await clickByText('确认当前疏散路径')
     check('④ 智能疏散', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'SMART_EVACUATION'), 8000),
       await page.evaluate(() => window.__demo.demoStore.stage))
+    check('执行的是所选方案', await page.evaluate((id) => window.__demo.demoStore.activePlanId === id, pickedId),
+      await page.evaluate(() => window.__demo.demoStore.activePlanId))
+    // 前端渲染的路线必须来自后端规划器（3D/平面图同源）
+    const routeSame = await page.evaluate(() => {
+      const p = window.__demo.store.routePlans || []
+      const backend = window.__demo.demoStore.plans || []
+      if (!p.length || !backend.length) return { ok: false, p: p.length, b: backend.length }
+      const first = p[0]
+      return {
+        ok: Boolean(first.path && first.path.length && first.exit && first.distance > 0),
+        pathLen: first.path.length,
+        exit: first.exit,
+        active: window.__demo.store.activeRoutePlanId,
+      }
+    })
+    check('前端路线来自后端方案（含 path/出口/距离）', routeSame.ok, routeSame)
+    check('3D 使用的 activeRoutePlanId 已同步', Boolean(routeSame.active), routeSame.active)
     check('前端 emergencyStage 与后端同步为 4', await waitFor(() => page.evaluate(() => window.__demo.store.emergencyStage === 4), 8000),
       await page.evaluate(() => window.__demo.store.emergencyStage))
     const tickOk = await waitFor(() => page.evaluate(() => window.__demo.demoStore.metrics.evacuated > 0), 20000)

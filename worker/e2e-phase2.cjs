@@ -84,6 +84,13 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
 
   // ── 2. 复位（IDLE 下 RESET 属于非法转换，应为 409） ──
   console.log('\n[2] 复位语义')
+  // 会话是持久的（Durable Object），先确保回到 IDLE 再断言
+  let cur = await api(`/api/v1/demo/state?sessionId=${SESSION}`)
+  if (cur.body?.stage !== 'IDLE') {
+    await api(`/api/v1/demo/reset?sessionId=${SESSION}`, { method: 'POST' })
+    cur = await api(`/api/v1/demo/state?sessionId=${SESSION}`)
+  }
+  check('已回到 IDLE', cur.body?.stage === 'IDLE', cur.body?.stage)
   const idleReset = await api(`/api/v1/demo/reset?sessionId=${SESSION}`, { method: 'POST' })
   check('IDLE 下 RESET 判定为非法转换（409）', idleReset.status === 409, idleReset.body)
   const startThenReset = await cmd('START_FIRE')
@@ -128,8 +135,13 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   check('PLAN_ROUTES → ROUTE_PLANNING', r3.status === 200 && r3.body?.stage === 'ROUTE_PLANNING', r3.body?.stage)
   check('生成多套疏散方案', (r3.body?.plans || []).length >= 2, (r3.body?.plans || []).length)
 
+  // 阶段 3 → 4：必须由 CONFIRM_ROUTE 推进，且必须基于已存在的方案
+  const badPlan = await cmd('CONFIRM_ROUTE', { planId: 'PLAN-NOT-EXIST' })
+  check('确认不存在的方案返回 409', badPlan.status === 409, badPlan.body)
+
   const r4 = await cmd('CONFIRM_ROUTE')
   check('CONFIRM_ROUTE → SMART_EVACUATION', r4.status === 200 && r4.body?.stage === 'SMART_EVACUATION', r4.body?.stage)
+  check('执行方案被标记', Boolean(r4.body?.activePlanId), r4.body?.activePlanId)
   check('方案进入 EXECUTING（EvacuationPlan 生命周期）', (r4.body?.plans || []).some((p) => p.status === 'EXECUTING'))
   check('人员进入 evacuating', (r4.body?.persons || []).some((p) => p.evacuating))
 
@@ -153,6 +165,22 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   const r7 = await cmd('COMPLETE_RESCUE')
   check('COMPLETE_RESCUE → COMPLETED', r7.status === 200 && r7.body?.stage === 'COMPLETED', r7.body?.stage)
   check('滞留人员已获救', (r7.body?.metrics?.rescued || 0) > 0, r7.body?.metrics)
+
+  // ── 5.5 路线算法校验（方案必须来自 shared/evacuation 规划器） ──
+  console.log('\n[5.5] 疏散路线校验')
+  const plans = r4.body?.plans || []
+  check('方案命名为 方案A/B/C', plans.map((p) => p.name).join(',') === '方案A,方案B,方案C', plans.map((p) => p.name))
+  check('每条方案都有节点序列', plans.every((p) => Array.isArray(p.nodes) && p.nodes.length >= 2))
+  check('每条方案都有折线点', plans.every((p) => Array.isArray(p.points) && p.points.length === p.nodes.length))
+  check('每条方案都有距离与时间', plans.every((p) => p.distance > 0 && p.estimatedTime > 0), plans.map((p) => [p.distance, p.estimatedTime]))
+  check('每条方案都有风险等级', plans.every((p) => ['LOW', 'MEDIUM', 'HIGH'].includes(p.riskLevel)), plans.map((p) => p.riskLevel))
+  check('方案终点均为安全出口', plans.every((p) => /EXIT_/.test(p.exitId || '')), plans.map((p) => p.exitId))
+  check('方案路线终点落在 1F', plans.every((p) => (p.nodes || []).some((n) => n.startsWith('1F:'))))
+  check('方案起点为火源区域', plans.every((p) => (p.startZones || []).includes('A区')), plans.map((p) => p.startZones))
+  check('方案不经过火源房间（除起点）', plans.every((p) => p.nodes.slice(1).every((n) => n !== '5F:A_CENTER')))
+  check('方案覆盖多个安全出口（真正可选）', new Set(plans.map((p) => p.exitId)).size >= 2, plans.map((p) => p.exitId))
+  check('路线跨层下降经过楼梯', plans.every((p) => (p.nodes || []).some((n) => /STAIR_/.test(n))))
+  check('人员已绑定路线（沿路线撤离而非直线）', (r4.body?.persons || []).some((p) => Array.isArray(p.routePoints) && p.routePoints.length > 1))
 
   // ── 6. D1 业务落库校验（Alarm / EvacuationPlan / OperationLog） ──
   console.log('\n[6] D1 业务数据落库')
