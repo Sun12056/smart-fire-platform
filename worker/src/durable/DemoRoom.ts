@@ -5,13 +5,17 @@
 import { DurableObject } from 'cloudflare:workers'
 import type { Env } from '../types'
 import { availableCommands, isLegalTransition, nextStage, STAGE_META, DEMO_COMMANDS, type DemoCommand, type DemoStage } from '../demo/stages'
-import { applyStageEffects, createWorld, resetWorld, retainedPersons, tickWorld } from '../demo/engine'
+import {
+  applyStageEffects, createWorld, resetWorld, retainedPersons, tickWorld,
+  resolveBuildingPlan, validateConfirmedBuildingPlan,
+} from '../demo/engine'
 import type { DemoBaseline, DemoWorld } from '../demo/world'
 import type { DeviceRuntime, PersonRuntime } from '../demo/world'
 import { fmtSH } from '../db'
 
 const TICK_MS = 1000
-const BASELINE_KEY = 'baseline'
+// v2：基线覆盖整栋楼各楼层（scope = BUILDING），旧缓存只有火警楼层，需失效重建
+const BASELINE_KEY = 'baseline.v2'
 const WORLD_KEY = 'world'
 const DEFAULT_SCENARIO = { buildingId: 'B003', floorId: '5F', zone: 'A区' }
 
@@ -26,14 +30,16 @@ export class DemoRoom extends DurableObject<Env> {
     if (cached && cached.persons?.length) { this.baseline = cached; return cached }
     const db = this.env.DB
     const bld = await db.prepare('SELECT id, name FROM buildings WHERE id = ?').bind(DEFAULT_SCENARIO.buildingId).first<{ id: string; name: string }>()
+    // 整栋楼疏散（scope = BUILDING）：基线必须覆盖整栋楼各楼层的人员与联动设备，
+    // 否则「火灾在 5F、疏散只覆盖 5F」会与业务需求相悖。
     const personRows = await db.prepare(
       `SELECT id, building_id, floor_id, zone, x, y, status, movement_type FROM person_presence
-       WHERE building_id = ? AND floor_id = ? ORDER BY id LIMIT 400`,
-    ).bind(DEFAULT_SCENARIO.buildingId, DEFAULT_SCENARIO.floorId).all<Record<string, unknown>>()
+       WHERE building_id = ? ORDER BY floor_id, id LIMIT 400`,
+    ).bind(DEFAULT_SCENARIO.buildingId).all<Record<string, unknown>>()
     const deviceRows = await db.prepare(
       `SELECT id, type, status, current_mode, direction, brightness, emergency_flash FROM devices
-       WHERE building_id = ? AND floor_id = ? AND type IN ('evacuation_light','emergency_light','smoke_detector','radar_sensor') ORDER BY id LIMIT 400`,
-    ).bind(DEFAULT_SCENARIO.buildingId, DEFAULT_SCENARIO.floorId).all<Record<string, unknown>>()
+       WHERE building_id = ? AND type IN ('evacuation_light','emergency_light','smoke_detector','radar_sensor') ORDER BY id LIMIT 600`,
+    ).bind(DEFAULT_SCENARIO.buildingId).all<Record<string, unknown>>()
 
     const persons: PersonRuntime[] = (personRows.results ?? []).map((r) => ({
       id: String(r.id),
@@ -264,13 +270,64 @@ export class DemoRoom extends DurableObject<Env> {
 
     if (target === 'ROUTE_PLANNING') {
       for (const plan of world.plans) await upsert(plan, 'NORMAL')
+      await this.upsertBuildingPlans(world, at, 'NORMAL')
     } else if (target === 'SMART_EVACUATION') {
       for (const plan of world.plans) {
         await upsert(plan, plan.id === world.activePlanId ? 'EXECUTING' : 'NORMAL')
       }
+      await this.upsertBuildingPlans(world, at, (bp) => (bp.id === world.activeBuildingPlanId ? 'EXECUTING' : 'NORMAL'))
     } else if (target === 'RETAINED_PERSONS' && world.activePlanId) {
       const plan = world.plans.find((p) => p.id === world.activePlanId)
       if (plan) await upsert(plan, 'DONE')
+      await this.upsertBuildingPlans(world, at, (bp) => (bp.id === world.activeBuildingPlanId ? 'DONE' : 'NORMAL'))
+    }
+  }
+
+  /**
+   * 整栋楼方案落库：一行 = 一栋楼的一套策略（routes / routesByZone / summary 存 extra）。
+   * 与旧的单起点方案并存，旧接口（evacuation_plans）仍可读到完整记录。
+   */
+  private async upsertBuildingPlans(
+    world: DemoWorld,
+    at: string,
+    statusOf: string | ((bp: DemoWorld['buildingPlans'][number]) => string),
+  ): Promise<void> {
+    const db = this.env.DB
+    const sc = world.scenario
+    const statusVal = (bp: DemoWorld['buildingPlans'][number]) =>
+      (typeof statusOf === 'string' ? statusOf : statusOf(bp))
+    for (const bp of world.buildingPlans) {
+      await db.prepare(`INSERT OR REPLACE INTO evacuation_plans
+        (id, name, building_id, building_name, start_floor, start_area, exit_id, exit_label, type, status, recommended,
+         floors_passed, path, extra, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(
+          bp.id,
+          `${bp.name}·${sc.buildingName}整栋楼疏散（${bp.summary.zoneCount}区/${bp.summary.personCount}人）`,
+          sc.buildingId,
+          sc.buildingName,
+          sc.floorId,
+          sc.zone,
+          Object.keys(bp.summary?.exits || {}).join(','),
+          (bp.summary?.exitLabels || []).join('、'),
+          'auto',
+          statusVal(bp),
+          bp.recommended ? 1 : 0,
+          JSON.stringify(bp.summary?.floors || [sc.floorId]),
+          JSON.stringify((bp.routes || []).map((r) => r.nodes)),
+          JSON.stringify({
+            scope: bp.scope,
+            strategy: bp.strategy,
+            strategyLabel: bp.strategyLabel,
+            evacuationScope: bp.scope,
+            summary: bp.summary,
+            routes: bp.routes,
+            routesByZone: Object.keys(bp.routesByZone || {}),
+            fire: bp.fire,
+          }),
+          at,
+          at,
+        ).run()
     }
   }
 
@@ -301,6 +358,22 @@ export class DemoRoom extends DurableObject<Env> {
           stageLabel: STAGE_META[stage]?.label,
           allowed: availableCommands(stage),
           plans: world.plans.map((p) => ({ id: p.id, name: p.name })),
+        }, 409)
+      }
+      // 整栋楼校验：scope=BUILDING / buildingId 一致 / 所有有人 floor+zone 都有合法路线
+      const bp = resolveBuildingPlan(
+        world,
+        payload.buildingPlanId ? String(payload.buildingPlanId) : requestId,
+      )
+      const v = validateConfirmedBuildingPlan(world, bp)
+      if (!v.ok) {
+        return json({
+          error: v.error,
+          detail: v.detail,
+          stage,
+          stageLabel: STAGE_META[stage]?.label,
+          allowed: availableCommands(stage),
+          buildingPlans: world.buildingPlans.map((p) => ({ id: p.id, name: p.name, scope: p.scope, strategy: p.strategy })),
         }, 409)
       }
     }
@@ -414,6 +487,10 @@ export class DemoRoom extends DurableObject<Env> {
       alarmId: world.alarmId,
       plans: world.plans,
       activePlanId: world.activePlanId,
+      // 整栋楼疏散方案（scope = BUILDING）：前端 2D/3D 与人员路线都以此为准
+      buildingPlans: world.buildingPlans,
+      activeBuildingPlanId: world.activeBuildingPlanId,
+      evacuationScope: world.evacuationScope,
       lighting: world.lighting,
       metrics: world.metrics,
       rescue: world.rescue,

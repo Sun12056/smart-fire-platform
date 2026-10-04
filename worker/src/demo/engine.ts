@@ -3,10 +3,16 @@
 // Durable Object 负责调用本引擎并广播；D1 负责业务与历史落库。
 import { STAGE_META, type DemoStage } from './stages'
 import type {
-  DemoEvent, DemoPlan, DemoWorld, DeviceRuntime, PersonRuntime,
+  DemoEvent, DemoPlan, DemoWorld, DeviceRuntime, PersonRuntime, BuildingEvacuationPlan,
 } from './world'
 // 疏散路线唯一算法来源（与前端、3D 共用同一份）：shared/evacuation
 import { planEvacuationRoutes } from '../../../shared/evacuation/routePlanner.js'
+import { buildBuildingGraph } from '../../../shared/evacuation/routeGraph.js'
+// 整栋楼疏散：一次火灾 = 一栋楼的一次整体疏散任务（火灾只描述位置，不改变疏散范围）
+import {
+  planBuildingStrategies, routeOfPerson, groupPersonsByZone, resolvePlanningZone,
+} from '../../../shared/evacuation/buildingEvacuationPlanner.js'
+import { zoneKeyOf } from '../../../shared/evacuation/buildingEvacuationTypes.js'
 
 // ── 确定性伪随机（同一 session 可复现，避免演示每次不一样） ──
 function seededRand(seedStr: string) {
@@ -51,6 +57,9 @@ export function createWorld(sessionId: string, scenario: DemoWorld['scenario'], 
     alarmId: null,
     plans: [],
     activePlanId: null,
+    buildingPlans: [],
+    activeBuildingPlanId: null,
+    evacuationScope: 'BUILDING',
     persons,
     devices,
     lighting: { mode: 'daily', brightness: 60, pulse: false, updatedAt: at },
@@ -154,6 +163,21 @@ export function applyStageEffects(
         pushEvent(world, '路线规划失败', '未找到不穿墙且不经过火区的合法路线，请检查火情区域', 'danger', at)
         break
       }
+      // 整栋楼疏散方案（scope = BUILDING）：火灾只作为动态障碍，疏散范围始终是一栋楼
+      // PLAN-A/B/C = 均衡 / 快速 / 安全，每套覆盖全部「有人员的 floorId + zone」
+      const buildingRes = planBuildingStrategies({
+        buildingId: scenario.buildingId,
+        buildingName: scenario.buildingName,
+        persons: buildingPersons(world).map((p) => ({
+          id: p.id, buildingId: p.buildingId, floorId: p.floorId, zone: p.zone, status: p.status,
+        })),
+        fire: { buildingId: scenario.buildingId, floorId: scenario.floorId, zone: scenario.zone },
+        maxFloor: MAX_FLOOR,
+        idPrefix: 'PLAN',
+      })
+      world.buildingPlans = buildingRes.plans as unknown as BuildingEvacuationPlan[]
+      world.activeBuildingPlanId = (world.buildingPlans.find((p) => p.recommended) || world.buildingPlans[0])?.id ?? null
+      world.evacuationScope = 'BUILDING'
       pushEvent(
         world,
         '生成疏散方案',
@@ -161,60 +185,79 @@ export function applyStageEffects(
         'success',
         at,
       )
+      if (world.buildingPlans.length) {
+        const a = world.buildingPlans[0]
+        pushEvent(
+          world,
+          '生成整栋楼疏散方案',
+          `${scenario.buildingName} 整体疏散：${a.summary.zoneCount} 个有人区域 / ${a.summary.personCount} 人，PLAN-A/B/C = 均衡/快速/安全，最慢 ${a.summary.maxEstimatedTime}s`,
+          'success',
+          at,
+        )
+      }
       break
     }
 
     case 'SMART_EVACUATION': {
       const requested = payload.planId ? String(payload.planId) : null
+      // 旧结构（火源区 A/B/C）保持联动，供落库与旧接口使用
       const plan = world.plans.find((p) => p.id === requested) || world.plans.find((p) => p.recommended)
       if (plan) {
         world.activePlanId = plan.id
         world.plans.forEach((p) => { p.status = p.id === plan.id ? 'EXECUTING' : 'NORMAL' })
       }
-      // 每个区域的人员沿「同一套规划器」算出的路线撤离：火源区执行已确认方案，其余区按各自最优方案
-      const routesByZone = new Map<string, { nodes: string[]; points: Array<{ x: number; y: number }> }>()
-      if (plan && plan.nodes?.length) {
-        routesByZone.set(scenario.zone, { nodes: plan.nodes, points: plan.points || [] })
+      // 整栋楼方案：确认的是 PLAN-A/B/C 整栋楼策略
+      const bp = resolveBuildingPlan(world, payload.buildingPlanId || requested)
+      if (bp) {
+        world.activeBuildingPlanId = bp.id
+        world.buildingPlans.forEach((p) => { p.status = p.id === bp.id ? 'EXECUTING' : 'NORMAL' })
       }
-      const otherZones = [...new Set(floorPersons().map((p) => p.zone))].filter((z) => z !== scenario.zone)
-      for (const zone of otherZones) {
-        const res = planEvacuationRoutes({
-          floorId: scenario.floorId,
-          zone,
-          fireZone: scenario.zone,
-          maxFloor: MAX_FLOOR,
-          congestion: floorPersons().filter((p) => p.zone === zone).length,
-          limit: 1,
-          idPrefix: `SUB-${world.sessionId}`,
-        })
-        const best = res.plans[0]
-        if (best && best.nodes?.length) routesByZone.set(zone, { nodes: best.nodes, points: best.points || [] })
-      }
+      const activeBuilding = bp || null
 
-      floorPersons().forEach((p) => {
-        const route = routesByZone.get(p.zone) || routesByZone.get(scenario.zone)
+      // 整栋楼人员：每人按自己 floorId+zone 的路线撤离（火灾只影响路线走向，不影响参与范围）
+      const bg = buildBuildingGraph(MAX_FLOOR)
+      buildingPersons(world).forEach((p) => {
+        // 走廊等公共区域没有房间节点 → 与规划阶段同一套归属规则，保证人人取到路线
+        const zone = resolvePlanningZone(bg, p)
+        const route = activeBuilding ? routeOfPerson(activeBuilding, { floorId: p.floorId, zone }) : null
         p.evacuating = true
         p.status = 'evacuating'
         p.movementType = 'moving'
         p.progress = 0
-        p.route = route ? route.nodes : []
-        p.routePoints = route ? route.points : []
+        if (route) {
+          p.routeId = route.routeId
+          p.route = route.nodes
+          p.routePoints = route.points.map((pt) => ({ x: pt.x, y: pt.y }))
+        } else {
+          // 无整栋楼方案时回退：沿用火源区已确认方案（旧行为）
+          p.route = plan ? plan.nodes : []
+          p.routePoints = plan ? (plan.points || []).map((pt) => ({ x: pt.x, y: pt.y })) : []
+        }
         p.waypoint = 0
         const last = p.routePoints[p.routePoints.length - 1]
         if (last) { p.targetX = last.x; p.targetY = last.y }
       })
-      world.metrics.evacuating = floorPersons().length
+      world.metrics.evacuating = buildingPersons(world).length
       world.evacuationSettled = false
-      pushEvent(world, '确认疏散路径', `执行方案「${plan?.name ?? '推荐方案'}」，出口 ${plan?.exitLabel ?? '—'}`, 'danger', at)
+      pushEvent(
+        world,
+        '确认疏散路径',
+        activeBuilding
+          ? `执行整栋楼方案「${activeBuilding.name}」：${activeBuilding.summary.zoneCount} 个区域 / ${activeBuilding.summary.personCount} 人，最慢 ${activeBuilding.summary.maxEstimatedTime}s`
+          : `执行方案「${plan?.name ?? '推荐方案'}」，出口 ${plan?.exitLabel ?? '—'}`,
+        'danger',
+        at,
+      )
       break
     }
 
     case 'RETAINED_PERSONS': {
-      const unfinished = floorPersons().filter((p) => p.progress < 1)
+      // 整栋楼疏散：未完成撤离的人员来自全楼（不再只看火警楼层）
+      const unfinished = buildingPersons(world).filter((p) => p.evacuating && p.progress < 1)
       let retained = unfinished
       // 若所有人都已撤离，则按确定性规则在火源区保留人员，保证救援阶段有真实对象
       if (!retained.length) {
-        retained = fireZonePersons().slice(0, 2)
+        retained = (fireZonePersons().length ? fireZonePersons() : buildingPersons(world)).slice(0, 2)
       }
       retained.forEach((p) => {
         p.evacuating = false
@@ -283,6 +326,69 @@ function remainingLength(pts: Array<{ x: number; y: number }>, waypoint: number,
 
 export function retainedPersons(world: DemoWorld): PersonRuntime[] {
   return Object.values(world.persons).filter((p) => p.retained && !p.rescued)
+}
+
+/** 整栋楼参与疏散的人员（疏散范围 = BUILDING，与火灾所在楼层无关） */
+export function buildingPersons(world: DemoWorld): PersonRuntime[] {
+  return Object.values(world.persons).filter((p) => p.buildingId === world.scenario.buildingId)
+}
+
+/**
+ * 解析「要执行的整栋楼方案」：优先精确匹配 planId，
+ * 其次把旧的火源区方案 id（...-A/B/C）映射到同策略的整栋楼方案，最后回退推荐方案。
+ */
+export function resolveBuildingPlan(world: DemoWorld, requestedId?: string | null): BuildingEvacuationPlan | null {
+  const list = world.buildingPlans || []
+  if (!list.length) return null
+  if (requestedId) {
+    const exact = list.find((p) => p.id === requestedId)
+    if (exact) return exact
+    const m = /(?:^|[-_])([ABC])$/.exec(String(requestedId))
+    if (m) {
+      const byLabel = list.find((p) => p.strategyLabel === m[1] || p.id === `PLAN-${m[1]}`)
+      if (byLabel) return byLabel
+    }
+  }
+  return list.find((p) => p.recommended) || list[0] || null
+}
+
+/**
+ * CONFIRM_ROUTE 的整栋楼校验（阶段 3 → 4 的前置条件）：
+ *   · plan.scope === BUILDING
+ *   · buildingId 与火灾楼栋一致
+ *   · 所有「有人员的 floorId + zone」都存在合法 route
+ *   · 每条 route 都通过 shared/evacuation 的 validateRoute
+ */
+export function validateConfirmedBuildingPlan(
+  world: DemoWorld,
+  plan: BuildingEvacuationPlan | null,
+): { ok: boolean; error?: string; detail?: Record<string, unknown> } {
+  if (!world.buildingPlans.length) {
+    return { ok: false, error: '当前没有整栋楼疏散方案，请先完成路线规划' }
+  }
+  if (!plan) return { ok: false, error: '未找到可执行的整栋楼方案（PLAN-A/B/C）' }
+  if (plan.scope !== 'BUILDING') {
+    return { ok: false, error: `疏散范围必须为 BUILDING，实际为 ${plan.scope}` }
+  }
+  if (String(plan.buildingId) !== String(world.scenario.buildingId)) {
+    return { ok: false, error: `方案楼栋 ${plan.buildingId} 与火情楼栋 ${world.scenario.buildingId} 不一致` }
+  }
+  const groups = groupPersonsByZone(buildingPersons(world).map((p) => ({
+    id: p.id, buildingId: p.buildingId, floorId: p.floorId, zone: p.zone, status: p.status, x: p.x, y: p.y,
+  })), { buildingId: world.scenario.buildingId, graph: buildBuildingGraph(MAX_FLOOR) })
+  const missing = groups.filter((g) => !plan.routesByZone || !plan.routesByZone[zoneKeyOf(g.floorId, g.zone)])
+  const invalid = (plan.routes || []).filter((r) => !r.valid)
+  if (missing.length || invalid.length) {
+    return {
+      ok: false,
+      error: `整栋楼方案不完整：${missing.length} 个有人区域缺少路线、${invalid.length} 条路线未通过校验`,
+      detail: {
+        missing: missing.map((g) => g.zoneKey),
+        invalid: invalid.map((r) => r.routeId),
+      },
+    }
+  }
+  return { ok: true }
 }
 
 export function recomputeMetrics(world: DemoWorld) {

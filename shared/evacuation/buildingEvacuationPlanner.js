@@ -16,7 +16,7 @@ import {
   EVACUATION_SCOPE, STRATEGY, STRATEGY_META, RISK_RANK,
   emptyRoute, emptyBuildingPlan, emptySummary, zoneKeyOf,
 } from './buildingEvacuationTypes.js'
-import { RISK_LEVEL } from './routeTypes.js'
+import { RISK_LEVEL, NODE_TYPE } from './routeTypes.js'
 import {
   buildBuildingGraph, exitIdsOf, blockedNodesForFire, floorNum, ZONE_NODE_KEY, ZONE_CORRIDOR_KEY,
 } from './routeGraph.js'
@@ -26,6 +26,25 @@ import { validateRoute } from './routeValidator.js'
 const finite = (v) => (isFinite(v) ? v : 0)
 
 /**
+ * 人员 → 规划区域（起点必须在拓扑里是房间节点，否则路线无法通过 validateRoute）
+ * 「走廊」等公共区域没有房间节点，按最近房间节点归属到同层某个区域，
+ * 保证整栋楼每一个人都有合法起点与路线（不修改 routeGraph 的基础拓扑）。
+ */
+export function resolvePlanningZone(graph, person) {
+  const floorId = String(person.floorId)
+  const key = ZONE_NODE_KEY[person.zone]
+  if (key && graph.nodes[`${floorId}:${key}`]) return person.zone
+  let best = null
+  let bestD = Infinity
+  Object.values(graph.nodes).forEach((n) => {
+    if (n.floorId !== floorId || n.type !== NODE_TYPE.ROOM || !n.zone) return
+    const d = (n.x - Number(person.x || 0)) ** 2 + (n.y - Number(person.y || 0)) ** 2
+    if (d < bestD) { bestD = d; best = n }
+  })
+  return best ? best.zone : person.zone
+}
+
+/**
  * ① 整栋楼人员 → 按 floorId + zone 分组（ evacuationScope = BUILDING 的基础）
  * @param {Array<{id:string, buildingId:string, floorId:string, zone:string, status?:string}>} persons
  * @param {object} opts
@@ -33,13 +52,15 @@ const finite = (v) => (isFinite(v) ? v : 0)
  * @param {string[]} [opts.excludeStatuses] 排除的状态（如已撤离 safe）
  */
 export function groupPersonsByZone(persons = [], opts = {}) {
-  const { buildingId = null, excludeStatuses = [] } = opts
+  const { buildingId = null, excludeStatuses = [], graph = null } = opts
   const map = new Map()
   for (const p of persons) {
     if (!p || !p.floorId || !p.zone) continue
     if (buildingId && p.buildingId && String(p.buildingId) !== String(buildingId)) continue
     if (excludeStatuses.length && excludeStatuses.includes(p.status)) continue
-    const key = zoneKeyOf(p.floorId, p.zone)
+    // 走廊等公共区域不是房间节点 → 归到同层最近的房间区域（保证人人有合法起点）
+    const zone = graph ? resolvePlanningZone(graph, p) : p.zone
+    const key = zoneKeyOf(p.floorId, zone)
     if (!map.has(key)) {
       map.set(key, { zoneKey: key, floorId: p.floorId, zone: p.zone, personCount: 0, personIds: [] })
     }
@@ -198,7 +219,7 @@ export function planBuildingEvacuation(opts = {}) {
   const g = graph || buildBuildingGraph(maxFloor)
   const meta = STRATEGY_META[strategy] || STRATEGY_META[STRATEGY.BALANCED]
   const planId = `${idPrefix}-${meta.label}`
-  const groups = groupPersonsByZone(persons, { buildingId: buildingId || null, excludeStatuses })
+  const groups = groupPersonsByZone(persons, { buildingId: buildingId || null, excludeStatuses, graph: g })
 
   const exitLoad = new Map()
   const routes = []

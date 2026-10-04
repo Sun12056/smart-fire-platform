@@ -2248,7 +2248,7 @@ export const useFireStore = defineStore('fire', () => {
     return asArray(persons.value)
       .filter((p) => p && (!buildingName || p.building === buildingName))
       .map((p) => ({
-        id: p.id, buildingId, floorId: p.floor, zone: p.zone || p.area, status: p.status,
+        id: p.id, buildingId, floorId: p.floor, zone: p.zone || p.area, status: p.status, x: p.x, y: p.y,
       }))
       .filter((p) => p.floorId && p.zone)
   }

@@ -8,6 +8,58 @@ export interface DemoScenario {
   zone: string
 }
 
+// ── 整栋楼疏散方案（scope = BUILDING） ──
+// fireEvent 只描述火灾位置；一次火灾 = 一栋楼的一次整体疏散任务。
+// PLAN-A/B/C 是三种整栋楼策略（均衡/快速/安全），每套内部为每个「有人的 floorId+zone」生成一条路线。
+export interface EvacuationRoute {
+  routeId: string          // `${planId}:${floorId}:${zone}` —— 后端下发与前端/3D 消费同一个 id
+  floorId: string
+  zone: string
+  startNode: string
+  exitId: string
+  exitLabel: string
+  nodes: string[]
+  points: Array<{ x: number; y: number }>
+  distance: number
+  estimatedTime: number
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH'
+  valid: boolean
+  reasons: string[]
+  floorsPassed: string[]
+  personCount: number
+}
+
+export interface BuildingEvacuationPlan {
+  id: string
+  name: string
+  buildingId: string
+  buildingName: string
+  scope: 'BUILDING'
+  strategy: 'BALANCED' | 'FASTEST' | 'SAFEST'
+  strategyLabel: string
+  fire: { buildingId: string; floorId: string; zone: string } | null
+  summary: {
+    zoneCount: number
+    routeCount: number
+    validRouteCount: number
+    personCount: number
+    floors: string[]
+    exits: Record<string, number>
+    exitLabels: string[]
+    totalDistance: number
+    maxEstimatedTime: number
+    avgEstimatedTime: number
+    riskLevel: 'LOW' | 'MEDIUM' | 'HIGH'
+    stairRouteCount: number
+  }
+  routes: EvacuationRoute[]
+  routesByZone: Record<string, EvacuationRoute>
+  status: string
+  valid: boolean
+  reasons: string[]
+  recommended: boolean
+}
+
 export interface PersonRuntime {
   id: string
   buildingId: string
@@ -22,6 +74,8 @@ export interface PersonRuntime {
   /** 撤离目标点（出口节点） */
   targetX: number
   targetY: number
+  /** 整栋楼方案中该人员所属 floorId+zone 的路线 id（2D/3D/后端同一个） */
+  routeId?: string
   /** 沿用的疏散路线（节点 id 序列，来自 shared/evacuation 规划器） */
   route: string[]
   /** 路线折线点（SVG 平面图坐标），逐段推进用 */
@@ -126,8 +180,13 @@ export interface DemoWorld {
     detectedAt: string
   } | null
   alarmId: string | null
+  /** 旧结构：火源区域的 A/B/C 候选路线（兼容保留，落库与旧接口仍读它） */
   plans: DemoPlan[]
   activePlanId: string | null
+  /** 新结构：整栋楼疏散方案（scope=BUILDING），PLAN-A/B/C = 三种整栋楼策略 */
+  buildingPlans: BuildingEvacuationPlan[]
+  activeBuildingPlanId: string | null
+  evacuationScope: 'BUILDING'
   persons: Record<string, PersonRuntime>
   devices: Record<string, DeviceRuntime>
   lighting: DemoLighting

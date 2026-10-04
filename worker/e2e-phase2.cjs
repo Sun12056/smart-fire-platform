@@ -182,6 +182,51 @@ async function waitFor(fn, timeoutMs = 6000, interval = 200) {
   check('路线跨层下降经过楼梯', plans.every((p) => (p.nodes || []).some((n) => /STAIR_/.test(n))))
   check('人员已绑定路线（沿路线撤离而非直线）', (r4.body?.persons || []).some((p) => Array.isArray(p.routePoints) && p.routePoints.length > 1))
 
+  // ── 5.6 整栋楼疏散校验（scope = BUILDING） ──
+  console.log('\n[5.6] 整栋楼疏散方案（scope=BUILDING）')
+  const bps = r4.body?.buildingPlans || []
+  const activeBpId = r4.body?.activeBuildingPlanId
+  check('下发 3 套整栋楼方案', bps.length === 3, bps.map((p) => p.id))
+  check('PLAN-A/B/C 策略为 均衡/快速/安全',
+    bps.map((p) => p.strategy).join(',') === 'BALANCED,FASTEST,SAFEST', bps.map((p) => p.strategy))
+  check('疏散范围 = BUILDING（与火灾位置分离）',
+    bps.every((p) => p.scope === 'BUILDING') && r4.body?.evacuationScope === 'BUILDING', r4.body?.evacuationScope)
+  check('火灾只描述位置（楼/层/区）',
+    Boolean(r4.body?.fire?.buildingId && r4.body?.fire?.floorId && r4.body?.fire?.zone), r4.body?.fire)
+  check('buildingId 与火情楼栋一致', bps.every((p) => p.buildingId === r4.body?.fire?.buildingId), bps.map((p) => p.buildingId))
+  check('每套方案都通过整栋楼校验', bps.every((p) => p.valid), bps.map((p) => p.reasons))
+  // 所有有人员的 floorId+zone 都必须有合法路线
+  // 走廊不是房间节点：这类人员按最近房间区域归属（规划器统一处理），房间区域必须全覆盖
+  const occupied = new Set(
+    (r4.body?.persons || []).filter((p) => p.zone !== '走廊').map((p) => `${p.floorId}:${p.zone}`),
+  )
+  const activeBp = bps.find((p) => p.id === activeBpId) || bps[0]
+  const routeKeys = Object.keys(activeBp?.routesByZone || {})
+  const missingZones = [...occupied].filter((k) => !activeBp?.routesByZone?.[k])
+  check('整栋楼有人员的区域全部纳入疏散（无遗漏）', missingZones.length === 0, { occupied: occupied.size, routeKeys: routeKeys.length, missingZones: missingZones.slice(0, 5) })
+  check('每条路线都合法（valid）', (activeBp?.routes || []).every((r) => r.valid), (activeBp?.routes || []).filter((r) => !r.valid).map((r) => r.routeId))
+  check('所有路线终点为 1F 安全出口',
+    (activeBp?.routes || []).every((r) => /^1F:EXIT_/.test(r.exitId) && r.nodes[r.nodes.length - 1] === r.exitId),
+    (activeBp?.routes || []).slice(0, 3).map((r) => [r.routeId, r.exitId]))
+  check('非 1F 路线跨层必经楼梯',
+    (activeBp?.routes || []).filter((r) => r.floorId !== '1F').every((r) => r.nodes.some((n) => /STAIR_/.test(n))))
+  check('路线不经过火源房间（除该区起点）',
+    (activeBp?.routes || []).every((r) => r.nodes.slice(1).every((n) => n !== '5F:A_CENTER')))
+  check('方案覆盖多个楼层（不是只疏散火警楼层）',
+    new Set((activeBp?.routes || []).map((r) => r.floorId)).size > 1, [...new Set((activeBp?.routes || []).map((r) => r.floorId))])
+  check('汇总指标完整（区域/人数/耗时）',
+    Boolean(activeBp?.summary?.zoneCount > 0 && activeBp?.summary?.personCount > 0 && activeBp?.summary?.maxEstimatedTime > 0), activeBp?.summary)
+  // 人员按各自 floor+zone 拿到路线（后端权威）
+  const persons4 = r4.body?.persons || []
+  check('整栋楼所有人员都拿到 routePoints',
+    persons4.length > 0 && persons4.every((p) => Array.isArray(p.routePoints) && p.routePoints.length > 1),
+    persons4.filter((p) => !Array.isArray(p.routePoints) || p.routePoints.length <= 1).slice(0, 3).map((p) => p.id))
+  check('人员 routeId 属于当前整栋楼方案',
+    persons4.every((p) => !p.routeId || String(p.routeId).startsWith(`${activeBpId}:`)),
+    [...new Set(persons4.map((p) => p.routeId))].slice(0, 3))
+  check('不同楼层人员路线不同（各自 floorId+zone）',
+    new Set(persons4.map((p) => p.routeId)).size > 1, [...new Set(persons4.map((p) => p.routeId))].length)
+
   // ── 6. D1 业务落库校验（Alarm / EvacuationPlan / OperationLog） ──
   console.log('\n[6] D1 业务数据落库')
   const alarmId = r7.body?.alarmId
