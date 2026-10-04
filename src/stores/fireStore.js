@@ -40,6 +40,11 @@ import {
   buildBuildingGraph, kShortestPaths, dijkstra, edgeKey, nodeId as sharedNodeId,
   exitIdsOf, ZONE_NODE_KEY,
 } from '../../shared/evacuation/routeGraph.js'
+// 整栋楼疏散（scope = BUILDING）：一次火灾 = 一栋楼的一次整体疏散任务
+import {
+  planBuildingStrategies, routeOfPerson as buildingRouteOfPerson, validateBuildingEvacuationPlan,
+} from '../../shared/evacuation/buildingEvacuationPlanner.js'
+import { EVACUATION_SCOPE, STRATEGY, zoneKeyOf } from '../../shared/evacuation/buildingEvacuationTypes.js'
 import {
   ROOM_AREAS,
   ZONE_COLORS,
@@ -169,6 +174,11 @@ export const useFireStore = defineStore('fire', () => {
 
   /** 用后端方案刷新前端路线矩阵（平面图 2D / 3D 都读这里） */
   function applyDemoPlans(snap) {
+    // 新模型优先：后端下发的是「整栋楼」方案（scope=BUILDING），包含每个有人区域的路线
+    if (Array.isArray(snap.buildingPlans) && snap.buildingPlans.length) {
+      applyBuildingPlans(snap)
+      return
+    }
     const zone = snap.fire?.zone || 'A区'
     const floorId = snap.fire?.floorId || routeFloorId.value || '5F'
     const ctx = {
@@ -467,6 +477,12 @@ export const useFireStore = defineStore('fire', () => {
   const routeDeviceBindings = ref([]) // 路线-设备方向绑定
   const routeFireAutoSwitch = ref(false) // 火灾是否触发过自动重规划
   const routeMatrix = ref(null) // { buildingId, buildingName, floorId, areas, exits, perZone:{ zone:{plans,recommendedId,backupId} } }
+  // ── 整栋楼疏散方案（新模型） ──
+  // fireEvent 只描述火灾位置；evacuationScope 永远 = BUILDING
+  // PLAN-A/B/C = 三种「整栋楼」策略：均衡 / 快速 / 安全（不再是某区域的三条路线）
+  const buildingEvacuationPlans = ref([]) // BuildingEvacuationPlan[]（scope=BUILDING）
+  const activeBuildingPlanId = ref(null) // 当前确认/预览的整栋楼方案 id
+  const evacuationScope = ref(EVACUATION_SCOPE.BUILDING)
   const selectedZone = ref('A区') // 当前查看/操作的区域
   const routeDebug = ref(false) // 调试模式：显示路网节点/边/墙
   const blockedNodeIds = ref([]) // 火灾封堵节点 id
@@ -773,10 +789,13 @@ export const useFireStore = defineStore('fire', () => {
   function generateEvacuationOptions() {
     const fe = fireEvent.value
     if (!fe) return []
-    addOperationLog('生成疏散路线', '疏散规划', 'A/B/C/D区各生成多条候选路线')
+    addOperationLog('生成疏散路线', '疏散规划', '整栋楼各楼层/区域生成整体疏散方案')
+    // ① 整栋楼方案（scope=BUILDING）：A/B/C = 均衡 / 快速 / 安全三种整栋楼策略
+    const built = generateBuildingEvacuationPlans({ buildingId: fireBuildingId(fe.building) })
     const m = routeMatrix.value
     const needFresh = !m || m.buildingName !== fe.building || m.floorId !== fe.floor
-    if (needFresh) {
+    if (!built.plans.length && needFresh) {
+      // 整栋楼规划失败时回退旧的单楼层矩阵（保证页面仍有内容可展示）
       generateRoutePlans({ buildingId: fireBuildingId(fe.building), floorId: fe.floor })
     }
     // 幂等：仅封堵火源房间门口后的走廊段（不困死房间），未受影响区域保持原路线
@@ -790,17 +809,21 @@ export const useFireStore = defineStore('fire', () => {
     activeRoutePlanId.value = activeId
     const act = activeId ? getRoutePlanById(activeId) : null
     if (act) applyRouteToDevices(act)
+    const bp = activeBuildingPlan.value
+    const scopeText = bp
+      ? `整栋楼 ${bp.summary.zoneCount} 个有人区域 / ${bp.summary.personCount} 人`
+      : `${fe.floor}-${fe.area}`
     evacuationLogs.value.unshift({
       id: `LOG-${Date.now()}`
       , time: new Date().toLocaleTimeString('zh-CN')
       , action: '生成疏散方案'
-      , detail: `系统为 ${fe.building} ${fe.floor}-${fe.area} 自动生成 ${plans.length} 套合法疏散方案${act ? `，推荐方案「${act.name}」已高亮` : ''}`
+      , detail: `系统为 ${fe.building}（火灾 ${fe.floor}-${fe.area}）生成 ${plans.length} 套整栋楼疏散方案，覆盖 ${scopeText}${act ? `，推荐方案「${act.name}」已高亮` : ''}`
       , operator: '系统'
       , level: 'warning'
     })
     addNotification({
-      title: '疏散方案已生成'
-      , message: `已为 ${fe.building} ${fe.floor}-${fe.area} 生成 ${plans.length} 套合法疏散方案，推荐方案已自动高亮`
+      title: '整栋楼疏散方案已生成'
+      , message: `已为 ${fe.building} 生成 ${plans.length} 套整栋楼方案（${scopeText}），推荐方案已自动高亮`
       , level: 'success'
       , time: new Date().toLocaleTimeString('zh-CN')
     })
@@ -812,7 +835,12 @@ export const useFireStore = defineStore('fire', () => {
   // ── 阶段 4：管理员预览/切换方案（疏散灯实时联动该方案方向） ──
   function selectEvacuationPlan(planId) {
     const plan = getRoutePlanById(planId)
-    if (!plan || plan.status === 'BLOCKED') return false
+    if (!plan) return false
+    // 整栋楼方案：点选 A/B/C 任一条区域路线 = 切换整栋楼策略（全楼人员路线同步切换）
+    if (plan.buildingPlanId && buildingEvacuationPlans.value.some((p) => p.id === plan.buildingPlanId)) {
+      if (activeBuildingPlanId.value !== plan.buildingPlanId) return setActiveBuildingPlan(plan.buildingPlanId)
+    }
+    if (plan.status === 'BLOCKED') return false
     activeRoutePlanId.value = planId
     applyRouteToDevices(plan)
     return true
@@ -884,26 +912,31 @@ export const useFireStore = defineStore('fire', () => {
     const fe = fireEvent.value
     if (!fe || !activePlan) return
     stopEvacuationSim()
-    addOperationLog('启动智能疏散', '演示流程', 'A/B/C/D四区域同步疏散', 'warning')
-    // 各区域执行方案：火源区用管理员确认的方案，其余区域用各自推荐方案（整层联动疏散）
-    const zonePlan = {}
-    const m = routeMatrix.value
-    if (m && m.perZone) {
-      Object.keys(m.perZone).forEach((z) => {
-        const info = m.perZone[z]
-        const pid = z === fe.area && activePlan ? activePlan.id : info ? info.recommendedId : null
-        const p = pid ? getRoutePlanById(pid) : null
-        if (p && p.status !== 'BLOCKED') zonePlan[z] = p
-      })
-    }
-    // 为火警楼层人员建立本层移动路径
+    addOperationLog('启动智能疏散', '演示流程', '整栋楼多楼层同步疏散', 'warning')
+
+    // ── 整栋楼疏散（scope=BUILDING）：每个人员按自己 floorId+zone 的路线撤离 ──
+    // 火灾只决定路线怎么绕开火区，不决定「谁参与疏散」—— 整栋楼有人区域全部纳入。
+    const bp = activeBuildingPlan.value
     let total = 0
     asArray(persons.value).forEach((p) => {
-      if (!p || p.building !== fe.building || p.floor !== fe.floor) return
+      if (!p || p.building !== fe.building) return
       delete p._evacDone
       delete p._evac
-      const plan = p.zone === '走廊' ? zonePlan[fe.area] : zonePlan[p.zone] || zonePlan[fe.area]
-      if (!plan) return
+      let plan = null
+      let ownFloor = p.floor
+      if (bp) {
+        const route = buildingRouteOfPerson(bp, { floorId: p.floor, zone: p.zone })
+        if (route) plan = routeToRenderable(bp, route)
+      } else {
+        // 兼容旧结构（无整栋楼方案时）：仅火警楼层参与
+        const m = routeMatrix.value
+        const info = m && m.perZone ? m.perZone[p.zone] : null
+        const pid = p.zone === fe.area && activePlan ? activePlan.id : info ? info.recommendedId : null
+        plan = pid ? getRoutePlanById(pid) : null
+        ownFloor = fe.floor
+        if (p.floor !== fe.floor) return
+      }
+      if (!plan || plan.status === 'BLOCKED') return
       const pts = []
       // 房间人员：先到本区门口走廊中心点，再沿走廊/楼梯节点（走廊人员直接从走廊节点出发）
       if (p.zone && p.zone !== '走廊') {
@@ -912,7 +945,7 @@ export const useFireStore = defineStore('fire', () => {
       }
       let last = null
       plan.path.forEach((n) => {
-        if (n.floorId !== fe.floor || (n.type !== 'corridor' && n.type !== 'stair')) return
+        if (n.floorId !== ownFloor || (n.type !== 'corridor' && n.type !== 'stair')) return
         if (!last || Math.abs(n.x - last.x) + Math.abs(n.y - last.y) > 4) {
           pts.push({ x: n.x, y: n.y })
           last = n
@@ -2148,6 +2181,200 @@ export const useFireStore = defineStore('fire', () => {
     return routeMatrix.value
   }
 
+  // ══════════════════════════════════════════════════════
+  // 整栋楼疏散方案（scope = BUILDING）
+  //   火灾只描述位置（buildingId + floorId + zone），疏散范围永远是整栋楼；
+  //   PLAN-A/B/C 是三种整栋楼策略，每套内部为每个「有人员的 floorId+zone」生成一条路线。
+  //   路线仍然来自 shared/evacuation（findPaths + validateRoute），前端不另算一套。
+  // ══════════════════════════════════════════════════════
+
+  /** 节点 id → 类型（与 toRenderablePlan 口径一致） */
+  function nodeTypeOfKey(key) {
+    return /^EXIT_/.test(key) ? 'exit'
+      : /^STAIR_/.test(key) ? 'stair'
+        : /^CORRIDOR/.test(key) ? 'corridor' : 'room'
+  }
+
+  /** 整栋楼方案中的一条路线 → 2D/3D 现有渲染结构（字段与 toRenderablePlan 对齐） */
+  function routeToRenderable(bp, route) {
+    const path = (route.points || []).map((pt, i) => {
+      const id = (route.nodes || [])[i] || ''
+      const [floorId, key] = String(id).split(':')
+      return {
+        id, floorId: floorId || route.floorId, key: key || '',
+        x: pt.x, y: pt.y, type: nodeTypeOfKey(key || ''),
+      }
+    })
+    return {
+      id: route.routeId, // `${planId}:${floorId}:${zone}` —— 2D/3D/后端同一个 routeId
+      name: `${route.floorId}-${route.zone} · ${bp.name}`,
+      buildingId: bp.buildingId,
+      buildingName: bp.buildingName,
+      startFloor: route.floorId,
+      startArea: route.zone,
+      exit: route.exitId,
+      exitLabel: route.exitLabel,
+      exitSide: /EXIT_E/.test(route.exitId) ? 'right' : 'left',
+      corridor: '走廊',
+      stair: (route.nodes || []).find((n) => /STAIR_/.test(n)) || '楼梯',
+      floorsPassed: route.floorsPassed || [route.floorId],
+      riskLevel: RISK_CN[route.riskLevel] || '低',
+      type: 'auto',
+      status: 'NORMAL',
+      recommended: Boolean(bp.recommended),
+      score: 0,
+      distance: route.distance,
+      estimatedTime: route.estimatedTime,
+      congestion: route.personCount || 0,
+      zoneColor: ZONE_COLORS[route.zone] || '#4361EE',
+      deviceCount: 0,
+      path,
+      // 整栋楼方案反向引用（UI 展示策略语义用）
+      buildingPlanId: bp.id,
+      strategy: bp.strategy,
+      scope: bp.scope,
+    }
+  }
+
+  /** 火灾上下文：只描述位置，不含疏散范围 */
+  function buildingFireContext() {
+    const fe = fireEvent.value
+    if (!fe) return null
+    return { buildingId: fireBuildingId(fe.building), floorId: fe.floor, zone: fe.area }
+  }
+
+  /** store 人员 → 规划器入参（buildingId + floorId + zone） */
+  function buildingPlanningPersons(buildingId, buildingName) {
+    return asArray(persons.value)
+      .filter((p) => p && (!buildingName || p.building === buildingName))
+      .map((p) => ({
+        id: p.id, buildingId, floorId: p.floor, zone: p.zone || p.area, status: p.status,
+      }))
+      .filter((p) => p.floorId && p.zone)
+  }
+
+  /**
+   * 把整栋楼方案同步到旧结构（routePlans / routeMatrix / activeRoutePlanId），
+   * 保证 2D 平面图、3D 路线层、设备联动等既有消费方无需一次性重写。
+   */
+  function syncLegacyRouteState(plans, activeId) {
+    buildingEvacuationPlans.value = plans || []
+    const list = buildingEvacuationPlans.value
+    const active = list.find((p) => p.id === activeId)
+      || list.find((p) => p.recommended)
+      || list[0]
+      || null
+    activeBuildingPlanId.value = active ? active.id : null
+    if (!active) return null
+
+    // routePlans：整栋楼全部区域的路线（每个区域一条，routeId 唯一）
+    routePlans.value = (active.routes || []).map((r) => routeToRenderable(active, r))
+
+    // routeMatrix：保持旧结构，perZone 用「当前查看楼层」的纯区域名做键（2D 平面图按楼层展示）
+    const floorId = routeFloorId.value || (fireEvent.value && fireEvent.value.floor) || '5F'
+    const areas = [...new Set((active.routes || []).filter((r) => r.floorId === floorId).map((r) => r.zone))]
+    const perZone = {}
+    areas.forEach((zone) => {
+      const zk = zoneKeyOf(floorId, zone)
+      // 同一区域在 A/B/C 三套整栋楼策略下各有一条路线 → 旧 UI 的「候选方案列表」
+      const candidates = []
+      list.forEach((bp) => {
+        const r = bp.routesByZone && bp.routesByZone[zk]
+        if (r) candidates.push(routeToRenderable(bp, r))
+      })
+      const rec = candidates.find((p) => p.buildingPlanId === active.id) || candidates[0] || null
+      perZone[zone] = {
+        plans: candidates,
+        recommendedId: rec ? rec.id : null,
+        backupId: candidates[1] ? candidates[1].id : null,
+      }
+    })
+    routeMatrix.value = {
+      buildingId: active.buildingId,
+      buildingName: active.buildingName,
+      floorId,
+      scope: EVACUATION_SCOPE.BUILDING,
+      areas,
+      zones: (active.routes || []).map((r) => zoneKeyOf(r.floorId, r.zone)),
+      exits: [...new Set((active.routes || []).map((r) => r.exitId))],
+      perZone,
+      summary: active.summary,
+    }
+    // activeRoutePlanId 指向「火源区域」的那条路线（2D 高亮 / 3D 路线层用）
+    const fire = active.fire
+    const focus = fire && active.routesByZone[zoneKeyOf(fire.floorId, fire.zone)]
+      ? active.routesByZone[zoneKeyOf(fire.floorId, fire.zone)]
+      : (active.routes || [])[0]
+    activeRoutePlanId.value = focus ? focus.routeId : null
+    selectedZone.value = areas[0] || selectedZone.value
+    return active
+  }
+
+  /** 本地（mock / 无后端）生成整栋楼三套方案 */
+  function generateBuildingEvacuationPlans(opts = {}) {
+    const buildingId = opts.buildingId || routeBuildingId.value
+    const buildingName = getRouteBuildingName(buildingId)
+    const maxFloor = getBuildingFloors(buildingId)
+    const fire = opts.fire !== undefined ? opts.fire : buildingFireContext()
+    const res = planBuildingStrategies({
+      buildingId,
+      buildingName,
+      persons: buildingPlanningPersons(buildingId, buildingName),
+      fire,
+      maxFloor,
+      strategies: [STRATEGY.BALANCED, STRATEGY.FASTEST, STRATEGY.SAFEST],
+    })
+    const active = syncLegacyRouteState(res.plans, opts.activePlanId || null)
+    if (!res.plans.length) {
+      addNotification({
+        title: '整栋楼疏散方案生成失败',
+        message: '未找到覆盖全部有人区域的合法路线，请检查火情与人员分布',
+        level: 'danger',
+        time: new Date().toLocaleTimeString('zh-CN'),
+      })
+    }
+    return { plans: res.plans, groups: res.groups, active }
+  }
+
+  /** 后端快照 → 整栋楼方案（后端是权威，前端只镜像） */
+  function applyBuildingPlans(snap) {
+    if (!snap || !Array.isArray(snap.buildingPlans) || !snap.buildingPlans.length) return null
+    if (snap.evacuationScope) evacuationScope.value = snap.evacuationScope
+    const activeId = snap.activeBuildingPlanId
+      || (snap.buildingPlans.find((p) => p.recommended) || {}).id
+      || snap.buildingPlans[0].id
+    const active = syncLegacyRouteState(snap.buildingPlans, activeId)
+    if (active && !active.valid) {
+      console.warn('[fireStore] 后端整栋楼方案校验未通过：', active.reasons)
+    }
+    return active
+  }
+
+  /** 切换整栋楼方案（A/B/C）—— 全楼人员路线同步切换 */
+  function setActiveBuildingPlan(planId) {
+    if (!buildingEvacuationPlans.value.some((p) => p.id === planId)) return false
+    const active = syncLegacyRouteState(buildingEvacuationPlans.value, planId)
+    if (!active) return false
+    // 疏散灯沿每条路线方向联动（整栋楼：所有楼层参与）
+    const bindings = []
+    ;(active.routes || []).forEach((r) => applyRouteToDevices(routeToRenderable(active, r), bindings))
+    routeDeviceBindings.value = bindings
+    // 正在执行疏散时：让每个人员改按新方案的各自路线走
+    if (evacRun.value) startEvacuationRun(active)
+    addNotification({
+      title: '整栋楼疏散方案已切换',
+      message: `${active.name}（${active.summary.zoneCount}个区域 / ${active.summary.personCount}人）`,
+      level: 'success',
+      time: new Date().toLocaleTimeString('zh-CN'),
+    })
+    return true
+  }
+
+  /** 当前整栋楼方案（2D/3D/后端共用一个源） */
+  const activeBuildingPlan = computed(() => (
+    buildingEvacuationPlans.value.find((p) => p.id === activeBuildingPlanId.value) || null
+  ))
+
   // 火灾：封堵火源房间通往其推荐出口方向的那条走廊边（受影响通道），
   // 房间其余侧通路保留作为备用，从而实现「原推荐方案 BLOCKED → 自动切换备用方案」的局部重规划。
   // 火灾封堵：仅封「火源房间门口后的第一条走廊段」（危险缓冲区膨胀），
@@ -2281,6 +2508,23 @@ export const useFireStore = defineStore('fire', () => {
 
   // 取当前规划楼层所有区域的推荐路线（用于首页平面图同时显示多区域）
   function getAllZoneRoutes() {
+    // 整栋楼方案优先：直接取当前方案中「本楼层各区域」的路线（2D 与 3D 同源）
+    const bp = activeBuildingPlan.value
+    if (bp && bp.routes && bp.routes.length) {
+      const floorId = routeFloorId.value
+      return bp.routes
+        .filter((r) => r.floorId === floorId)
+        .map((r) => {
+          const plan = routeToRenderable(bp, r)
+          return {
+            zone: r.zone,
+            color: ZONE_COLORS[r.zone] || '#4361EE',
+            plan,
+            routeId: r.routeId,
+            segment: getRouteSegmentForFloor(plan, floorId),
+          }
+        })
+    }
     const m = routeMatrix.value
     if (!m) return []
     return m.areas.map((zone) => {
@@ -2359,6 +2603,8 @@ export const useFireStore = defineStore('fire', () => {
     emergencyResponseConfirmed.value = false
     routeDecisionConfirmed.value = false
     activeRoutePlanId.value = null
+    buildingEvacuationPlans.value = []
+    activeBuildingPlanId.value = null
     evacRun.value = false
     evacStats.value = { total: 0, evacuated: 0, remaining: 0, pct: 0 }
     strandedPersons.value = []
@@ -2629,6 +2875,15 @@ export const useFireStore = defineStore('fire', () => {
     routeDeviceBindings,
     routeFireAutoSwitch,
     generateRoutePlans,
+    // ── 整栋楼疏散（scope = BUILDING） ──
+    buildingEvacuationPlans,
+    activeBuildingPlanId,
+    activeBuildingPlan,
+    evacuationScope,
+    generateBuildingEvacuationPlans,
+    setActiveBuildingPlan,
+    applyBuildingPlans,
+    buildingRouteOfPerson,
     toggleRouteDebug,
     setCurrentRoutePlan,
     setSelectedZone,
