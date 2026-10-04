@@ -133,6 +133,7 @@ npm run test:route          # 路线算法单测（拓扑/三方案/不穿墙/�
 cd worker
 npm run test:e2e            # 后端 E2E：状态机全链路 / WS 广播 / 非法转换 / 重复操作 / 断线重连 / 关键 REST
 npm run test:e2e:browser    # 浏览器 E2E：真实 UI 驱动后端状态机（依赖系统 Edge，需先启动前端）
+npm run test:e2e:consistency  # 2D/3D 一致性验收：数量/ID/routeId/routePoints/status/路线数/activeBuildingPlanId 三方对齐
 EXPECT_OFFLINE=1 npm run test:e2e:browser   # 校验后端不可用时"不静默回退 mock"
 EXPECT_MOCK=1 npm run test:e2e:browser      # mock 模式路线规划页回归
 ```

@@ -420,6 +420,17 @@ const cmd = (command, payload = {}) =>
     console.log('\n[⑤ 3D 人员沿路线]')
     const dtReady = await waitFor(() => page.evaluate(() => Boolean(window.__dtwin && window.__dtwin.persons)), 30000)
     check('3D 数字孪生已挂载（__dtwin）', dtReady)
+    // 3D 按需挂载（DashboardView「3D 模型」浮层）：未挂载时 __dtwin 是一份不再更新的旧快照，
+    // 2D / 3D 比对必须在挂载态下进行，否则会把「脱离同步的旧数据」误判为一致
+    const ensureTwinMounted = async () => {
+      const mounted = () => page.evaluate(
+        () => Boolean(window.__dtwin && window.__dtwin.scene.renderer.domElement.isConnected),
+      )
+      if (await mounted()) return true
+      await page.evaluate(() => { const b = document.querySelector('.open-3d-btn'); if (b) b.click() })
+      return waitFor(mounted, 40000)
+    }
+    check('3D 处于挂载态（2D / 3D 比对前提）', await ensureTwinMounted())
     if (dtReady) {
       const d0 = await page.evaluate(() => {
         const ds = window.__dtwin.persons.data.filter(Boolean)
