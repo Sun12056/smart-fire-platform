@@ -3,6 +3,8 @@
     <div class="log-header">
       <h2>📋 后台日志</h2>
       <span class="log-count">共 {{ store.operationLogs.length }} 条记录</span>
+      <span v-if="refreshing" class="log-loading">读取后端权威日志…</span>
+      <button class="log-clear-btn ghost" :disabled="refreshing" @click="refresh">刷新日志</button>
       <button class="log-clear-btn" @click="store.operationLogs = []">清空日志</button>
     </div>
     
@@ -28,8 +30,24 @@
 </template>
 
 <script setup>
+import { ref, watch, onMounted } from 'vue'
 import { useFireStore } from '../stores/fireStore'
 const store = useFireStore()
+
+// P2-03：后台日志页必须能看到后端（含 demo 六阶段）落库的权威记录。
+// operationLogs 此前只在数据源初始化时读过一次，演示过程中写入的演示流程记录不会出现在页面上。
+const refreshing = ref(false)
+async function refresh() {
+  refreshing.value = true
+  try {
+    await store.refreshOperationLogs()
+  } finally {
+    refreshing.value = false
+  }
+}
+onMounted(refresh)
+// 阶段推进时自动回读，保证演示进行中也能看到最新的阶段记录
+watch(() => store.emergencyStage, refresh)
 
 function isLast(id) {
   const idx = store.operationLogs.findIndex(l => l.id === id)
@@ -62,6 +80,20 @@ function isLast(id) {
 .log-count {
   font-size: 12px;
   color: rgba(76,201,240,0.6);
+}
+.log-loading {
+  font-size: 12px;
+  color: rgba(76,201,240,0.85);
+}
+.log-clear-btn.ghost {
+  margin-left: 0;
+  background: rgba(76,201,240,0.1);
+  border-color: rgba(76,201,240,0.35);
+  color: #4CC9F0;
+}
+.log-clear-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .log-clear-btn {
   margin-left: auto;

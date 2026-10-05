@@ -643,6 +643,22 @@ export const useFireStore = defineStore('fire', () => {
     }
   }
 
+  /**
+   * P2-03：后端 operation_logs 是操作日志的唯一权威。
+   * 此前只在 initFromRemote 就读过一次，之后后端（含 demo 六阶段）写入的记录前端永不回读，
+   * 于是「后台日志」页看不到演示流程的阶段记录。这里提供主动回读入口。
+   */
+  async function refreshOperationLogs() {
+    if (!dataSource.isRemote) return false
+    try {
+      const remote = await operationLogService.list({ limit: 200 })
+      if (Array.isArray(remote) && remote.length) operationLogs.value = remote
+      return true
+    } catch {
+      return false
+    }
+  }
+
   // ================== 疏散路线规划 ==================
   const routePlans = ref([]) // 全部生成的候选方案（所有区域 × 所有出口）
   const currentRoutePlanId = ref(null)
@@ -3175,6 +3191,8 @@ export const useFireStore = defineStore('fire', () => {
     // P1.7.2：用户确认语义（查看火情 / 确认火情），WS 快照无权覆盖
     dismissFireAlert,
     confirmFireAcknowledged,
+    // P2-03：从后端 operation_logs 回读权威日志（含 demo 六阶段记录）
+    refreshOperationLogs,
     generateEvacuationOptions,
     selectEvacuationPlan,
     backToPlanList,

@@ -352,10 +352,12 @@ async function runRound(n) {
   await S('14 [A链] 推进 → 滞留人员识别', () => clickFlowButton(page), { expect: 'RETAINED_PERSONS' })
   await sample('15 查看滞留人员位置', 1200)
   await S('16 [B链] 确认人员位置（楼层火处置面板）', () => clickByText(page, '确认人员位置', null, 'button'), { timeout: 3000 })
-  await S('17 [B链] 启动应急协同救援（业务弹窗③）', () => clickInDialog(page, '启动应急协同救援', '启动应急协同救援'), { timeout: 3000 })
-  await S('18 [A链] 推进 → 协同救援', () => clickFlowButton(page), { expect: 'RESCUE_COORDINATION' })
-  await S('19 [A链] 推进 → 处置完成', () => clickFlowButton(page), { expect: 'COMPLETED' })
-  await sample('20 救援完成后状态', 1200)
+  await S('17 [B链] 启动应急协同救援（业务弹窗③）', () => clickInDialog(page, '启动应急协同救援', '启动应急协同救援'), { timeout: 3000, expect: 'RESCUE_COORDINATION' })
+  // P1-03 修复后：业务弹窗③本身已把后端推到 RESCUE_COORDINATION，
+  // 收尾的 COMPLETE_RESCUE 同样走业务按钮（楼层火处置面板），控制台只作为备用链条保留。
+  await S('18 [B链] 启动消防救援协同（楼层火处置面板）', () => clickByText(page, '启动消防救援协同', null, 'button'), { expect: 'COMPLETED' })
+  await sample('19 救援完成后状态', 1200)
+  await S('20 [A链] 兜底：已完成阶段再点推进（不得报错/不得改变阶段）', () => clickFlowButton(page), { expect: 'COMPLETED' })
   // RESET：真实用户会先试「正常状态」，无效再试「停止重置」——两种都记录下来
   // P1-05：「正常状态」必须走后端 RESET，且不得关闭演示控制台
   const r21 = await S('21 RESET 尝试①「正常状态」', () => clickByText(page, '正常状态'), { expect: 'IDLE' })

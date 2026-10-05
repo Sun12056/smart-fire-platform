@@ -1254,13 +1254,22 @@ watch(
         if (fb) selectedBuildingId.value = fb.id
       }
       zoomToFloorId(fe.floor)
-    } else if (s === 4 || s === 5) {
+    } else if (s === 4) {
       if (store.fireEvent && store.fireEvent.building === (currentBuilding.value ? currentBuilding.value.name : '')) {
         zoomToFloorId(store.fireEvent.floor)
       }
-      // 阶段 4/5：回到 3D 数字孪生总览 —— 人员沿绿色疏散路线移动是这一阶段的主视觉
-      // （此前 viewMode 停在 floors，3D 组件被卸载，人员动画根本看不到）
+      // 阶段 4：智能疏散的主视觉是 3D 数字孪生里的人流 —— 回到 3D 总览（3D 组件必须挂载才能看到人员移动）
       viewMode.value = 'buildings'
+    } else if (s === 5) {
+      // 阶段 5（滞留人员识别）：本阶段的业务动作是「确认滞留人员位置」，入口在
+      // 楼层火处置面板（FIP，仅随内联楼层平面图挂载）。若沿用阶段 4 的 3D 总览，
+      // 该入口会被卸载 —— 用户在界面上找不到也点不到（P1-03）。
+      const fe = store.fireEvent
+      if (fe) {
+        const fb = store.buildings.find((b) => b && b.name === fe.building)
+        if (fb) selectedBuildingId.value = fb.id
+        zoomToFloorId(fe.floor)
+      }
     }
   }
 )
