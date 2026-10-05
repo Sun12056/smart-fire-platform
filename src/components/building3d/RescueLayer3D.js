@@ -43,11 +43,11 @@ export class RescueLayer3D {
     }
     if (pts.length < 2) {
       // 兜底：出口中心 → 火区中心 直连（极少发生；正常时都有方案路线）
-      const zk = this.model.getZoneBox(fe.floor, fe.area)
+      const zk = this.model.getZoneBox(fe.floorId, fe.zone)
       if (!zk) { this.active = false; return }
       const exits = this.model.getExits(1)
       const from = exits.length ? exits[0].center : new THREE.Vector3(0, 2, 0)
-      const topY = this.model.getFloorTopY(parseInt(fe.floor)) || 0
+      const topY = this.model.getFloorTopY(parseInt(fe.floorId)) || 0
       pts = [from.clone(), new THREE.Vector3(zk.center.x, topY + 0.3, zk.center.z)]
     }
 

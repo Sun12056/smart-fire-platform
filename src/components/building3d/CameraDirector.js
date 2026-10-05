@@ -103,9 +103,9 @@ export class CameraDirector {
   // ── 聚焦火灾 ──
   focusFire(fe, immediate = false) {
     if (!fe || !this.model) return
-    const z = this.model.getZoneBox(fe.floor, fe.area)
-    if (!z) return this.focusFloor(fe.floor, immediate)
-    const cy = this.model.getFloorCenterY(parseInt(fe.floor)) ?? 0
+    const z = this.model.getZoneBox(fe.floorId, fe.zone)
+    if (!z) return this.focusFloor(fe.floorId, immediate)
+    const cy = this.model.getFloorCenterY(parseInt(fe.floorId)) ?? 0
     const s = z.box.getSize(new THREE.Vector3())
     const radius = Math.max(Math.hypot(s.x, s.z) / 2, 2.5)
     const target = new THREE.Vector3(z.center.x, cy, z.center.z)

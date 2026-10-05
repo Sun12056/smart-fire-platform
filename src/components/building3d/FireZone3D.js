@@ -69,29 +69,34 @@ export class FireZone3D {
     this.light.position.y = 1.5
     this.group.add(this.light)
 
-    this.activeFloor = null
-    this.activeArea = null
+    this.activeFloorId = null
+    this.activeZone = null
   }
 
   update(store) {
     const fe = store.fireEvent
+    // canonical 优先：buildingId 与当前查看楼栋比；别名（中文楼栋名）仅在 buildingId 缺失时兜底
+    const bldId = String((store.dashboardView || {}).selectedBuildingId || '')
     const bldName = currentBuildingName(store)
-    const match = fe && fe.building === bldName
+    const match = fe && (
+      (fe.buildingId && bldId && String(fe.buildingId) === bldId)
+      || (!fe.buildingId && bldName && fe.building === bldName)
+    )
     if (!match) {
       this.group.visible = false
-      this.activeFloor = null
-      this.activeArea = null
+      this.activeFloorId = null
+      this.activeZone = null
       return
     }
-    const zk = this.model.getZoneBox(fe.floor, fe.area)
+    const zk = this.model.getZoneBox(fe.floorId, fe.zone)
     if (!zk) {
       this.group.visible = false
       return
     }
-    this.activeFloor = fe.floor
-    this.activeArea = fe.area
+    this.activeFloorId = fe.floorId
+    this.activeZone = fe.zone
     this.group.visible = true
-    const top = this.model.getFloorTopY(parseInt(fe.floor)) || 0
+    const top = this.model.getFloorTopY(parseInt(fe.floorId)) || 0
     this.group.position.set(zk.center.x, top + 0.1, zk.center.z)
 
     // 区域贴片尺寸

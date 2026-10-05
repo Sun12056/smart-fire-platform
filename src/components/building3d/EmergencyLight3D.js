@@ -55,23 +55,25 @@ export class EmergencyLight3D {
   }
 
   // ── 设备定位：A区~D区 → 区域盒；走廊 → 走廊中心；楼梯N → 楼梯中心（均确定性散开） ──
+  // canonical 楼层归属三元组：buildingId / floorId / zone（floor / area 只是派生别名）
   _resolveDevicePos(dev, jitterScale = 1) {
-    const floorId = dev.floor
+    const floorId = dev.floorId
+    const zone = dev.zone
     const top = this.model.getFloorTopY(parseInt(floorId)) || 0
     let minX, maxX, minZ, maxZ
-    const zk = this.model.getZoneBox(floorId, dev.area)
+    const zk = this.model.getZoneBox(floorId, zone)
     if (zk) {
       minX = zk.box.min.x; maxX = zk.box.max.x
       minZ = zk.box.min.z; maxZ = zk.box.max.z
-    } else if (dev.area === '走廊' && this.model.corridorCenter[floorId]) {
+    } else if (zone === '走廊' && this.model.corridorCenter[floorId]) {
       const c = this.model.corridorCenter[floorId]
       const s = this.model.getSize()
       minX = c.x - s.x * 0.28; maxX = c.x + s.x * 0.28
       minZ = c.z - 0.8; maxZ = c.z + 0.8
-    } else if (/楼梯/.test(dev.area || '') && this.model.stairCenters[floorId]) {
+    } else if (/楼梯/.test(zone || '') && this.model.stairCenters[floorId]) {
       const arr = this.model.stairCenters[floorId]
       // 楼梯1~4 按名称序号取，否则取第一档
-      const m = (dev.area || '').match(/(\d+)/)
+      const m = (zone || '').match(/(\d+)/)
       const idx = m ? (parseInt(m[1]) - 1) % arr.length : 0
       const c = arr[idx] || arr[0]
       minX = c.x - 0.5; maxX = c.x + 0.5

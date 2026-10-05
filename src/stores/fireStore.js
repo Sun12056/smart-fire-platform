@@ -304,11 +304,19 @@ export const useFireStore = defineStore('fire', () => {
     }
     // ② 火情
     if (snap.fire) {
+      // canonical 三元组是唯一权威：buildingId / floorId / zone
+      // building / floor / area 只是由 canonical 派生的只读别名（供旧 UI 读，禁止反向写回）
+      const fireBuildingId = snap.fire.buildingId || buildingIdFromName(snap.fire.buildingName)
+      const fireFloorId = snap.fire.floorId
+      const fireZone = snap.fire.zone
       fireEvent.value = {
         id: snap.fire.id,
+        buildingId: fireBuildingId,
+        floorId: fireFloorId,
+        zone: fireZone,
         building: snap.fire.buildingName || snap.fire.buildingId,
-        floor: snap.fire.floorId,
-        area: snap.fire.zone,
+        floor: fireFloorId,
+        area: fireZone,
         level: snap.fire.level || 'danger',
         time: snap.fire.detectedAt,
         status: (STAGE_TO_LEGACY[snap.stage] ?? 0) >= 2 ? 'active' : 'pending',
@@ -763,6 +771,10 @@ export const useFireStore = defineStore('fire', () => {
     const now = new Date()
     fireEvent.value = {
       id: `FE-${Date.now()}`
+      // canonical 三元组（权威）→ 别名只做只读派生
+      , buildingId: buildingIdFromName(building)
+      , floorId: floor
+      , zone: area
       , building
       , floor
       , area
@@ -1441,6 +1453,10 @@ export const useFireStore = defineStore('fire', () => {
     }
     fireEvent.value = {
       id: `FE-${Date.now()}`,
+      // canonical 三元组（权威）→ 别名只做只读派生
+      buildingId: buildingIdFromName(building),
+      floorId: floor,
+      zone: area,
       building,
       floor,
       area,
@@ -2175,6 +2191,12 @@ export const useFireStore = defineStore('fire', () => {
   function getRouteBuildingName(id) {
     const b = asArray(buildings.value).find((x) => x.id === id)
     return b ? b.name : '3号楼'
+  }
+  /** 中文楼栋名 → canonical buildingId（fireEvent 必须携带 canonical 三元组） */
+  function buildingIdFromName(name) {
+    if (!name) return ''
+    const b = asArray(buildings.value).find((x) => x && x.name === name)
+    return b ? String(b.id) : ''
   }
   function getBuildingFloors(buildingId) {
     const b = asArray(buildings.value).find((x) => x.id === buildingId)

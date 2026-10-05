@@ -31,6 +31,15 @@ export class RouteLayer3D {
   update(store) {
     // 整栋楼方案：一次绘制该方案下「全部区域」的路线（每个 floorId+zone 一条）
     const bp = store.activeBuildingPlan
+    // 楼栋归属校验（3D 渲染层的最后一道边界保护）：
+    // 方案所属楼栋 ≠ 当前查看楼栋 → 不渲染，并清空上一栋楼残留的路线。
+    // 只做校验，不在这里管理楼栋方案状态（状态归 fireStore）。
+    const curBuildingId = String((store.dashboardView || {}).selectedBuildingId || '')
+    const planBuildingId = String(bp && bp.buildingId ? bp.buildingId : '')
+    if (planBuildingId && curBuildingId && bp.buildingId !== curBuildingId) {
+      this._clearRoutes()
+      return
+    }
     if (bp && Array.isArray(bp.routes) && bp.routes.length) {
       const activeId = `${bp.id}:${bp.routes.length}`
       if (activeId === this.currentPlanId && this.group.visible) return
@@ -117,6 +126,14 @@ export class RouteLayer3D {
       if (w) pts.push(w)
     })
     return pts
+  }
+
+  /** 清空已渲染的路线（跨楼栋 / 无方案时，避免残留上一栋楼的路线） */
+  _clearRoutes() {
+    this._disposeTubes()
+    this.group.visible = false
+    this.activeCurves = []
+    this.currentPlanId = null
   }
 
   _disposeTubes() {
