@@ -219,11 +219,44 @@ export const useFireStore = defineStore('fire', () => {
     }
   }
 
+  /**
+   * 清空疏散方案与疏散运行时（后端 RESET → IDLE 时调用）。
+   * 下一轮演练不允许继承上一轮的疏散方案：方案集合 / activeBuildingPlanId /
+   * 楼栋方案缓存 / 疏散执行态 / 滞留与救援状态 / 路线-设备联动 全部回到初始值。
+   */
+  function clearEvacuationRuntime() {
+    stopEvacuationSim()
+    if (rescueTimer) { clearTimeout(rescueTimer); rescueTimer = null }
+    buildingEvacuationPlans.value = []
+    activeBuildingPlanId.value = null
+    buildingPlanCache.value = {}
+    buildingPlanActiveCache.value = {}
+    activeRoutePlanId.value = null
+    routePlans.value = []
+    routeMatrix.value = null
+    routeDeviceBindings.value = []
+    routeFireAutoSwitch.value = false
+    routeDecisionConfirmed.value = false
+    evacRun.value = false
+    evacStats.value = { total: 0, evacuated: 0, remaining: 0, pct: 0 }
+    strandedPersons.value = []
+    rescueState.value = false
+    rescueTask.value = null
+    strandedLocated.value = false
+    rescueCompleted.value = false
+    setEmergencyMode(false)
+  }
+
   /** 用后端方案刷新前端路线矩阵（平面图 2D / 3D 都读这里） */
   function applyDemoPlans(snap) {
     // 权威：后端下发的是「整栋楼」方案（scope=BUILDING），包含每个有人区域的路线
     if (Array.isArray(snap.buildingPlans) && snap.buildingPlans.length) {
       applyBuildingPlans(snap)
+      return
+    }
+    // 后端明确「没有整栋楼方案」（RESET → IDLE）：清空上一轮方案，禁止继承
+    if (Array.isArray(snap.buildingPlans) && snap.buildingPlans.length === 0) {
+      clearEvacuationRuntime()
       return
     }
     // ⚠️ LEGACY 兜底：仅当后端未下发整栋楼方案（旧版本后端）时才走旧的火源区投影，
@@ -307,7 +340,8 @@ export const useFireStore = defineStore('fire', () => {
       })
     }
     // ②·补充：疏散方案 —— 前端/3D 直接复用后端规划器的结果（同一套路线，不再各算一套）
-    if (Array.isArray(snap.plans)) applyDemoPlans(snap)
+    // 后端「没有方案」同样是权威信息（RESET → IDLE），必须触发前端方案复位
+    if (Array.isArray(snap.plans) || Array.isArray(snap.buildingPlans)) applyDemoPlans(snap)
     // ③ 人员（按 id 合并后端运行时）
     if (Array.isArray(snap.persons)) applyDemoPersons(snap.persons)
     // ④ 设备（按 id 合并后端运行时：状态 / 模式 / 方向 / 亮度 + 楼层归属 buildingId/floorId/zone）
@@ -566,6 +600,10 @@ export const useFireStore = defineStore('fire', () => {
   // PLAN-A/B/C = 三种「整栋楼」策略：均衡 / 快速 / 安全（不再是某区域的三条路线）
   const buildingEvacuationPlans = ref([]) // BuildingEvacuationPlan[]（scope=BUILDING）
   const activeBuildingPlanId = ref(null) // 当前确认/预览的整栋楼方案 id
+  // 楼栋方案隔离：每栋楼各自持有一套方案（PLAN-A/B/C）与自己的「当前方案」，
+  // 切换楼栋时只在该楼栋自己的方案集合内切换，绝不继承别的楼栋的方案（P1.6.3 E1）
+  const buildingPlanCache = ref({}) // { [buildingId]: BuildingEvacuationPlan[] }
+  const buildingPlanActiveCache = ref({}) // { [buildingId]: planId }
   const evacuationScope = ref(EVACUATION_SCOPE.BUILDING)
   const selectedZone = ref('A区') // 当前查看/操作的区域
   const routeDebug = ref(false) // 调试模式：显示路网节点/边/墙
@@ -2443,10 +2481,20 @@ export const useFireStore = defineStore('fire', () => {
   function applyBuildingPlans(snap) {
     if (!snap || !Array.isArray(snap.buildingPlans) || !snap.buildingPlans.length) return null
     if (snap.evacuationScope) evacuationScope.value = snap.evacuationScope
+    const plans = snap.buildingPlans
+    const bid = String(plans[0].buildingId || currentPlanBuildingId.value || routeBuildingId.value)
+    // 后端方案是权威：先按所属楼栋归档，之后切回该楼栋时直接恢复，不再重新生成
+    buildingPlanCache.value[bid] = plans.slice()
     const activeId = snap.activeBuildingPlanId
-      || (snap.buildingPlans.find((p) => p.recommended) || {}).id
-      || snap.buildingPlans[0].id
-    const active = syncLegacyRouteState(snap.buildingPlans, activeId)
+      || (plans.find((p) => p.recommended) || {}).id
+      || plans[0].id
+    buildingPlanActiveCache.value[bid] = activeId
+    // 后端 DO 只演练一栋楼：方案到达时把「当前查看楼栋」对齐到方案所属楼栋，
+    // 否则 2D/3D 会拿别的楼栋的方案去渲染（跨楼栋串方案）
+    if (dashboardView.value && String(dashboardView.value.selectedBuildingId || '') !== bid) {
+      dashboardView.value.selectedBuildingId = bid
+    }
+    const active = syncLegacyRouteState(plans, activeId)
     if (active && !active.valid) {
       console.warn('[fireStore] 后端整栋楼方案校验未通过：', active.reasons)
     }
@@ -2477,6 +2525,52 @@ export const useFireStore = defineStore('fire', () => {
   const activeBuildingPlan = computed(() => (
     buildingEvacuationPlans.value.find((p) => p.id === activeBuildingPlanId.value) || null
   ))
+
+  // ── 楼栋方案隔离（P1.6.3 E1）：方案永远属于某一栋楼，切换楼栋不得串用 ──
+  /** 当前方案集合所属楼栋（空集合时为空串） */
+  const currentPlanBuildingId = computed(() => {
+    const first = buildingEvacuationPlans.value[0]
+    return first ? String(first.buildingId || '') : ''
+  })
+  const preferredPlanIdOf = (list) => (list.find((p) => p.recommended) || {}).id || (list[0] || {}).id || null
+
+  /** 归档：把当前方案集合存回所属楼栋（切换楼栋前调用） */
+  function archiveBuildingPlans() {
+    const bid = currentPlanBuildingId.value
+    if (!bid || !buildingEvacuationPlans.value.length) return
+    buildingPlanCache.value[bid] = buildingEvacuationPlans.value.slice()
+    if (activeBuildingPlanId.value) buildingPlanActiveCache.value[bid] = activeBuildingPlanId.value
+  }
+
+  /**
+   * 切换到某栋楼自己的方案：
+   *   ① 该楼栋已有方案（后端下发 / 本地已生成）→ 恢复它上次选中的方案；
+   *   ② 该楼栋还没有方案 → 用同一套策略本地生成三套，并选中默认方案；
+   *   ③ 任何情况下都不把别的楼栋的方案当作当前方案。
+   */
+  function activateBuildingPlansFor(buildingId) {
+    const bid = String(buildingId || '')
+    if (!bid || currentPlanBuildingId.value === bid) return false
+    archiveBuildingPlans()
+    const cached = buildingPlanCache.value[bid]
+    if (cached && cached.length) {
+      syncLegacyRouteState(cached, buildingPlanActiveCache.value[bid] || preferredPlanIdOf(cached))
+      routeBuildingId.value = bid
+      return true
+    }
+    const res = generateBuildingEvacuationPlans({ buildingId: bid })
+    const plans = (res && res.plans) || []
+    buildingPlanCache.value[bid] = plans.slice()
+    buildingPlanActiveCache.value[bid] = activeBuildingPlanId.value
+    routeBuildingId.value = bid
+    return plans.length > 0
+  }
+
+  // 切换「当前查看楼栋」即切换到该楼栋自己的方案（UI 选择 / 直接改 dashboardView 都走这里）
+  watch(
+    () => (dashboardView.value ? dashboardView.value.selectedBuildingId : null),
+    (bid) => { if (bid) activateBuildingPlansFor(String(bid)) },
+  )
 
   // 火灾：封堵火源房间通往其推荐出口方向的那条走廊边（受影响通道），
   // 房间其余侧通路保留作为备用，从而实现「原推荐方案 BLOCKED → 自动切换备用方案」的局部重规划。
