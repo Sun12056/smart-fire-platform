@@ -168,6 +168,12 @@ function stepStatus(idx) {
 }
 
 function handleReset() {
+  // demo 模式（P1.7.2 / P1-05）：「正常状态」就是后端 RESET，
+  // 控制台必须保留可用，由 WS 快照统一把前端清回干净 IDLE。
+  if (dataSource.isDemo) {
+    platformStore.resetDemoFlow()
+    return
+  }
   store.resetDemoState()
 }
 

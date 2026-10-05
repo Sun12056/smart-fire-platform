@@ -73,6 +73,9 @@ import { alarmService } from '../services/alarmService'
 import { inspectionService } from '../services/inspectionService'
 import { personPresenceService } from '../services/personPresenceService'
 import { operationLogService } from '../services/operationLogService'
+// P1.7.2 / P1-04：demo 模式下业务按钮只派发命令给后端状态机（demoStore），不在前端自行推进阶段。
+// 反向依赖仅在函数体内使用（demoStore → fireStore 的存在性依赖在主 Store 建立时已解析）。
+import { useDemoStore } from './demoStore'
 
 export const useFireStore = defineStore('fire', () => {
   // ================== State ==================
@@ -291,14 +294,74 @@ export const useFireStore = defineStore('fire', () => {
     }
   }
 
+  // ══════════ 用户确认语义（P1.7.2 / P0-01）══════════
+  // 「已查看火情」「已确认火情」是管理员的业务动作，不是阶段，也不是 WS 的镜像字段。
+  // 一次火情实例 = 后端 fire.id（每次 START_FIRE 由状态机生成新的 FE-<ts>）：
+  //   · 同一实例内 —— 用户关掉/确认过的弹窗，后续 WS 快照不得重新打开；
+  //   · 换一次实例（新一轮演示）或 RESET 回 IDLE —— 记账自动失效，第二轮弹窗正常出现。
+  const alertAckFireId = ref(null)
+  const alertViewed = ref(false)
+  const fireAcknowledged = ref(false)
+
+  /** ① 用户点「查看火情」：弹窗①关闭，本次火情实例内不再由快照重新弹出 */
+  function dismissFireAlert() {
+    const fe = fireEvent.value
+    if (!fe) return false
+    alertAckFireId.value = String(fe.id || '')
+    alertViewed.value = true
+    fireAlertVisible.value = false
+    addOperationLog('查看火情', '演示流程', `${fe.building} ${fe.floor} ${fe.area}`, 'info')
+    return true
+  }
+
+  /**
+   * ② 用户点「确认火情」：显式业务确认（非 Toast），写后台日志，不改变任何阶段。
+   * demo 模式下没有「确认火情」这个后端命令（六阶段状态迁移由 ACTIVATE_RESPONSE 承担），
+   * 因此这里只记录确认语义，阶段仍以后端 snapshot 为准。
+   */
+  function confirmFireAcknowledged() {
+    const fe = fireEvent.value
+    if (!fe) return false
+    alertAckFireId.value = String(fe.id || '')
+    alertViewed.value = true
+    fireAlertVisible.value = false
+    fireAcknowledged.value = true
+    fireConfirmed.value = true
+    addOperationLog('确认火情', '演示流程', `管理员已确认 ${fe.building} ${fe.floor} ${fe.area} 发生真实火情`, 'danger')
+    return true
+  }
+
+  /**
+   * demo 模式统一派发入口（P1.7.2 / P1-04）：
+   * 业务按钮 → demoStore command → WebSocket → Durable Object → snapshot。
+   * ① 后端当前阶段不允许该命令时直接忽略（禁止前端撬动阶段，也避免重复点击造成非法转换）；
+   * ② 非 demo 模式返回 null，交给原有本地业务实现处理。
+   */
+  function dispatchDemoCommand(command, runner) {
+    if (!dataSource.isDemo) return null
+    const demo = useDemoStore()
+    if (!(demo.allowedCommands || []).includes(command)) {
+      console.warn(`[fireStore] demo 模式忽略指令 ${command}：当前阶段 ${demo.stage} 不允许该命令`)
+      return Promise.resolve(null)
+    }
+    return typeof runner === 'function' ? runner(demo) : Promise.resolve(null)
+  }
+
   function applyDemoSnapshot(snap) {
     if (!snap) return
     // ① 阶段：唯一来源是后端状态机
     if (snap.stage) {
       const legacy = STAGE_TO_LEGACY[snap.stage] ?? 0
+      // 用户确认语义按「火情实例」记账：新实例 → 重新弹一次；老实例 → 以用户动作为准
+      const fid = snap.fire ? String(snap.fire.id || '') : null
+      if (fid !== alertAckFireId.value) {
+        alertAckFireId.value = fid
+        alertViewed.value = false
+        fireAcknowledged.value = false
+      }
       emergencyStage.value = legacy
-      fireAlertVisible.value = legacy >= 1
-      fireConfirmed.value = legacy >= 2
+      fireAlertVisible.value = legacy >= 1 && !alertViewed.value
+      fireConfirmed.value = fireAcknowledged.value || legacy >= 2
       emergencyResponseConfirmed.value = legacy >= 2
       routeDecisionConfirmed.value = legacy >= 4
     }
@@ -833,6 +896,9 @@ export const useFireStore = defineStore('fire', () => {
   // ── 阶段 1 → 2：管理员启动应急响应（区域级联动 + 路线系统自动计算） ──
   // 发现火灾后由管理员一键启动：确认火情、锁定位置、标记危险区/风险人员、联动应急灯、自动生成疏散方案
   function activateEmergencyResponse() {
+    // demo 模式：只派发 ACTIVATE_RESPONSE，阶段迁移由后端 snapshot 回来（禁止前端自行改 stage）
+    const cmd = dispatchDemoCommand('ACTIVATE_RESPONSE', (d) => d.activateResponse())
+    if (cmd) return cmd
     const fe = fireEvent.value
     if (!fe || emergencyStage.value !== 1) return false
     addOperationLog('启动应急响应', '演示流程', '联动应急灯+生成路线')
@@ -985,6 +1051,9 @@ export const useFireStore = defineStore('fire', () => {
 
   // ── 阶段 4 → 5：确认执行整栋楼疏散方案（开始逃生） ──
   function confirmEvacuationPlan() {
+    // demo 模式：只派发 CONFIRM_ROUTE（整栋楼方案，后端校验 buildingPlanId），路线/阶段均由后端下发
+    const cmd = dispatchDemoCommand('CONFIRM_ROUTE', (d) => d.confirmRoute(d.selectedPlanId || d.activeBuildingPlanId))
+    if (cmd) return cmd
     const fe = fireEvent.value
     if (!fe || emergencyStage.value !== 3) return false
     addOperationLog('确认疏散方案', '演示流程', '启动整栋楼智能疏散')
@@ -1706,6 +1775,11 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   function resetDemoState() {
+    // demo 模式（P1.7.2 / P1-05）：「正常状态」就是 RESET —— 只派发 RESET 命令，
+    // 后端回到 IDLE 后由 snapshot 统一清理前端（火情/方案/路线/救援/设备/人员）。
+    // 严禁在这里把 demoMode 置 false：演示控制台必须能继续用于下一轮演示。
+    const cmd = dispatchDemoCommand('RESET', (d) => d.reset())
+    if (cmd) return cmd
     // 重置设备为初始状态（平面空间数据源重新生成，保证与首页平面图同源；统一字段规范化）
     devices.value = normalizeDevices(buildSeedDevices())
     // 重置建筑聚合
@@ -2105,6 +2179,9 @@ export const useFireStore = defineStore('fire', () => {
 
   // 阶段6：管理员确认滞留人员位置 → 建立协同救援任务
   function confirmStrandedLocation() {
+    // demo 模式：只派发 CONFIRM_RETAINED（后端负责生成救援任务并建立协同救援）
+    const cmd = dispatchDemoCommand('CONFIRM_RETAINED', (d) => d.confirmRetained())
+    if (cmd) return cmd
     const fe = fireEvent.value
     if (!fe || strandedPersons.value.length === 0) return false
     strandedLocated.value = true
@@ -2137,6 +2214,9 @@ export const useFireStore = defineStore('fire', () => {
   // 阶段 6：派出救援队伍 → 滞留人员 warning→rescued，救援完成
   let rescueTimer = null
   function dispatchRescueTeam() {
+    // demo 模式：救援完成同样由后端状态机推进 COMPLETE_RESCUE
+    const cmd = dispatchDemoCommand('COMPLETE_RESCUE', (d) => d.completeRescue())
+    if (cmd) return cmd
     const fe = fireEvent.value
     if (!fe || rescueState.value !== true || rescueCompleted.value) return false
     addOperationLog('启动消防救援', '演示流程', `消防救援力量已出动，前往 ${fe.building} ${fe.floor} 救援 ${strandedPersons.value.length} 名滞留人员`, 'danger')
@@ -3092,6 +3172,9 @@ export const useFireStore = defineStore('fire', () => {
     evacStats,
     detectFireScenario,
     activateEmergencyResponse,
+    // P1.7.2：用户确认语义（查看火情 / 确认火情），WS 快照无权覆盖
+    dismissFireAlert,
+    confirmFireAcknowledged,
     generateEvacuationOptions,
     selectEvacuationPlan,
     backToPlanList,

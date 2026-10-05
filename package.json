@@ -14,6 +14,7 @@
     "test:e2e": "node worker/e2e-phase2.cjs",
     "test:e2e:browser": "node worker/e2e-phase2-browser.cjs",
     "test:e2e:consistency": "node worker/e2e-phase2-consistency.cjs",
+    "test:e2e:journey": "node worker/e2e-phase3-journey.cjs",
     "test:demo:building": "node worker/walkthrough-building.cjs",
     "preview": "vite preview"
   },

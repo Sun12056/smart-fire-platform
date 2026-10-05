@@ -25,6 +25,8 @@ task_*.md
 
 # Cloudflare wrangler 本地状态
 .wrangler/
+worker/.wrangler-p163/
+worker/.journey-report.json
 
 # 系统与编辑器文件
 .DS_Store

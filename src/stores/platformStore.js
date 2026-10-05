@@ -11,7 +11,16 @@ export const usePlatformStore = defineStore('platform', () => {
   const fireStore = useFireStore()
   const demoStore = useDemoStore()
 
-  const demoFlowActive = ref(false)
+  // mock 模式保留本地手的标志；demo 模式一律以外端状态机为准（见下方 computed）
+  const localDemoFlowActive = ref(false)
+
+  /**
+   * P1.7.2 / P1-02：demo 模式下「演示是否已启动」不再存第三份状态，
+   * 直接由后端阶段派生 —— Demo 启动后（FIRE_DETECTED）就是已启动，
+   * 只有 RESET 回到 IDLE 才回到未启动，避免控制台再发一次 START_FIRE（409）。
+   */
+  const demoFlowActive = computed(() =>
+    (dataSource.isDemo ? demoStore.stage !== 'IDLE' : localDemoFlowActive.value))
 
   // 展示用步骤：demo 模式取后端状态机的六阶段，mock 模式沿用本地定义
   const demoFlowSteps = computed(() => {
@@ -48,10 +57,13 @@ export const usePlatformStore = defineStore('platform', () => {
     return { FIRE_DETECTED: 'fire', EMERGENCY_RESPONSE: 'alert', ROUTE_PLANNING: 'route', SMART_EVACUATION: 'evac', RETAINED_PERSONS: 'check', RESCUE_COORDINATION: 'rescue' }[id] || 'fire'
   }
 
-  // ① 发现火灾
+  // ① 发现火灾：demo 模式禁止在已启动的 Demo 上重复派发 START_FIRE
   function startDemoFlow() {
-    demoFlowActive.value = true
-    if (dataSource.isDemo) return demoStore.startFire()
+    if (dataSource.isDemo) {
+      if (demoStore.stage !== 'IDLE') return null
+      return demoStore.startFire()
+    }
+    localDemoFlowActive.value = true
     fireStore.startDemoFlow()
     return currentStep.value
   }
@@ -65,8 +77,8 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   function resetDemoFlow() {
-    demoFlowActive.value = false
     if (dataSource.isDemo) return demoStore.reset()
+    localDemoFlowActive.value = false
     fireStore.resetDemoFlow()
   }
 

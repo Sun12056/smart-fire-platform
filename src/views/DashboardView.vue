@@ -1059,8 +1059,8 @@
     </transition>
 
     <!-- ══════════════════════════════════════
-         关键业务确认弹窗（全流程仅 3 个，禁止 ElMessage/Notification/Toast）
-         ① 发现火灾（模拟火灾触发） ② 是否启动应急预案（查看火情后自动弹出） ③ 启动应急协同救援（确认人员位置后）
+         关键业务确认弹窗（全流程 4 个，禁止 ElMessage/Notification/Toast）
+         ① 发现火灾（模拟火灾触发） ①b 确认火情（查看火情后） ② 是否启动应急预案（确认火情后） ③ 启动应急协同救援
          ══════════════════════════════════════ -->
     <!-- ① 发现火灾 -->
     <transition name="biz-fade">
@@ -1078,6 +1078,26 @@
           </div>
           <div class="biz-dialog-actions">
             <button class="biz-btn danger" @click="handleViewFire">查看火情</button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- ①b 确认火情（黄金路径第 4 步：查看火情 → 确认火情 → 才允许弹出「是否启动应急预案」） -->
+    <transition name="biz-fade">
+      <div v-if="showFireConfirmDialog" class="biz-dialog-mask">
+        <div class="biz-dialog danger">
+          <div class="biz-dialog-icon fire">🔍</div>
+          <div class="biz-dialog-title">确认火情</div>
+          <div class="biz-dialog-sub num-font">{{ store.fireEvent ? store.fireEvent.building + ' · ' + store.fireEvent.floor + ' · ' + store.fireEvent.area : '' }}</div>
+          <div class="biz-dialog-body">
+            <div class="biz-row"><span>火源位置</span><b class="danger-text num-font">{{ store.fireEvent ? store.fireEvent.building + ' ' + store.fireEvent.floor + ' ' + store.fireEvent.area : '—' }}</b></div>
+            <div class="biz-row"><span>涉及人员</span><b class="danger-text num-font">{{ fireAlertZonePeople }} 人</b></div>
+            <div class="biz-row"><span>确认动作</span><b>确认发生真实火情后进入应急预案决策</b></div>
+          </div>
+          <div class="biz-dialog-actions">
+            <button class="biz-btn ghost" @click="showFireConfirmDialog = false">稍后确认</button>
+            <button class="biz-btn danger" @click="confirmFireIncident">确认火情</button>
           </div>
         </div>
       </div>
@@ -1130,6 +1150,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useFireStore } from '../stores/fireStore'
+import { dataSource } from '../api'
 import BuildingDigitalTwin from '../components/BuildingDigitalTwin.vue'
 import {
   SVG_W, SVG_H, WALLS, ROOMS, CORRIDOR, STAIRS, EXITS, DOORS,
@@ -1255,25 +1276,49 @@ function handleConfirmExec() {
 }
 // ①→② 启动应急响应：由「是否启动应急预案」业务弹窗的「启动应急预案」按钮触发（handleStartEmergencyResponse）
 
-// ============ 三个关键业务确认弹窗（发现火灾 / 是否启动应急预案 / 启动应急协同救援） ============
-const showResponseDialog = ref(false)   // ② 是否启动应急预案
-const showRescueDialog = ref(false)     // ③ 启动应急协同救援
+// ============ 四个关键业务确认弹窗（发现火灾 / 确认火情 / 是否启动应急预案 / 启动应急协同救援） ============
+const showFireConfirmDialog = ref(false) // ①b 确认火情
+const showResponseDialog = ref(false)    // ② 是否启动应急预案
+const showRescueDialog = ref(false)      // ③ 启动应急协同救援
 let responseDialogTimer = null
 
-// ① 查看火情：关闭「发现火灾」弹窗 → 高亮火源楼层平面图 → 自动弹出「是否启动应急预案」
+// ① 查看火情：关闭「发现火灾」弹窗（用户确认语义，WS 快照不得重开）→ 高亮火源楼层平面图 → 弹出「确认火情」
 function handleViewFire() {
   const fe = store.fireEvent
   if (!fe) return
-  store.fireAlertVisible = false
-  store.fireConfirmed = true
+  store.dismissFireAlert()
   // 自动切换至火警楼栋并内联展开火警楼层（平面图火灾危险区高亮）
   const fb = store.buildings.find((b) => b && b.name === fe.building)
   if (fb) selectedBuildingId.value = fb.id
   if (viewMode.value === 'buildings') viewMode.value = 'floors'
   zoomToFloorId(fe.floor)
   if (responseDialogTimer) clearTimeout(responseDialogTimer)
+  responseDialogTimer = setTimeout(() => { showFireConfirmDialog.value = true }, 800)
+}
+
+// ①b 确认火情：写后台日志（不是 Toast），不改变任何阶段；确认后才允许进入「是否启动应急预案」
+function confirmFireIncident() {
+  showFireConfirmDialog.value = false
+  const ok = store.confirmFireAcknowledged()
+  if (!ok) return
+  if (responseDialogTimer) clearTimeout(responseDialogTimer)
   responseDialogTimer = setTimeout(() => { showResponseDialog.value = true }, 800)
 }
+
+// 阶段推进后不再显示已经过期的弹窗（例如用户改用演示控制台推进：发现火灾 → 应急响应）
+watch(
+  () => store.emergencyStage,
+  (s) => {
+    if (s === 0) {
+      showFireConfirmDialog.value = false
+      showResponseDialog.value = false
+      showRescueDialog.value = false
+    } else if (s !== 1) {
+      showFireConfirmDialog.value = false
+      showResponseDialog.value = false
+    }
+  },
+)
 
 // ② 启动应急预案：进入应急响应并自动生成疏散方案（阶段 2 → 3 疏散路径）
 function handleStartEmergencyResponse() {
@@ -1286,11 +1331,12 @@ function confirmStranded() {
   if (!store.strandedPersons.length) return
   showRescueDialog.value = true
 }
-// 弹窗确认：确认人员位置（生成救援任务、进入协同救援阶段）并派出救援力量（模拟 5s 后救援完成）
-function handleStartRescue() {
+// 弹窗确认：确认人员位置 → demo 模式只派发 CONFIRM_RETAINED（协同救援阶段由后端迁移）
+async function handleStartRescue() {
   showRescueDialog.value = false
-  const ok = store.confirmStrandedLocation()
-  if (ok) store.dispatchRescueTeam()
+  const ok = await store.confirmStrandedLocation()
+  // demo 模式：救援完成是另一条命令（COMPLETE_RESCUE），禁止在这里顺带发出去
+  if (ok && !dataSource.isDemo) store.dispatchRescueTeam()
 }
 // 阶段6：启动消防救援协同（模拟救援完成后滞留人员 rescued）
 function dispatchRescue() {
