@@ -248,6 +248,63 @@ function identityFn() {
   }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * P1.6.3 第二阶段：全局一致性测试基线
+ * ─────────────────────────────────────────────────────────────────────────
+ * 原则：本阶段只改测试代码，不动业务代码。目标是「把真实存在的一致性问题可靠地测红」，
+ *       已知缺陷统一以 reds[] 记录并连同证据输出，不通过降低断言强度换取全绿。
+ *
+ * 测试矩阵：
+ *   PERSON  · REST baseline DTO / WS runtime DTO / canonical fields / spatial identity / 24 场景
+ *   DEVICE  · REST ↔ WS ↔ Mock / canonical fields / 同一字段同一语义 / 24 场景
+ *   DEMO    · snapshot ↔ tick 字段集合 / 六阶段状态链 / 单一运行时权威
+ *   PLAN    · PLAN-A/B/C / scope=BUILDING / 楼栋隔离
+ *   3D      · source-level assertion（3D 各模块是否仍用旧别名做业务判断）
+ *   MODE    · 当前数据源模式的合规 + 静默回退防御（source-level）
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+// ── 场景矩阵：4 栋 × 6 层 = 24 ──
+const BUILDINGS = ['B001', 'B002', 'B003', 'B004']
+const FLOORS = ['1F', '2F', '3F', '4F', '5F', '6F']
+
+// REST baseline DTO 契约（静态人员台账：不含运行时字段，不得反向要求 runtime 字段）
+const PERSON_BASELINE_FIELDS = ['id', 'buildingId', 'floorId', 'zone', 'x', 'y', 'status', 'movementType']
+// WS runtime DTO 契约（后端运行时：含路线 / 进度 / 疏散标志）
+const PERSON_RUNTIME_FIELDS = [
+  'id', 'buildingId', 'floorId', 'zone', 'x', 'y', 'status', 'movementType',
+  'progress', 'targetX', 'targetY', 'routeId', 'route', 'routePoints',
+  'waypoint', 'evacuating', 'retained', 'rescued',
+]
+// 设备 canonical DTO（10 项）
+const DEVICE_CANON_FIELDS = [
+  'id', 'type', 'buildingId', 'floorId', 'zone', 'status', 'currentMode', 'direction', 'brightness', 'emergencyFlash',
+]
+// shared/device/deviceRuntime.js 现行契约默认值（用于识别「默认值冒充真实值」）
+const DEVICE_CONTRACT_DEFAULT = { currentMode: 'daily', direction: 'right', brightness: 60, emergencyFlash: false }
+
+const BUILDING_ID_TO_NAME = { B001: '1号楼', B002: '2号楼', B003: '3号楼', B004: '4号楼' }
+
+// ── 红灯登记簿：{ code, scope, evidence, loc } ──
+const reds = []
+function recordRed(code, scope, evidence, loc) {
+  reds.push({ code, scope, evidence, loc })
+  console.log(`  ⚑ 缺陷登记 ${code} — ${scope}`)
+}
+
+const fetchJson = async (url, opt) => {
+  const r = await fetch(url, opt)
+  let body = null
+  try { body = await r.json() } catch { /* 非 JSON 体，保留 null */ }
+  return { status: r.status, body }
+}
+const sendCommand = (command, payload = {}) => fetchJson(`${API_BASE}/api/v1/demo/command?sessionId=${SESSION}`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ command, payload }),
+})
+const idSetBudget = (arr) => new Set(arr.map((x) => String(x.id)))
+const keysOf = (o) => (o && typeof o === 'object' ? Object.keys(o) : [])
+
 ;(async () => {
   console.log(`\n=== P1.6.3 2D/3D 一致性验收（${PAGE_URL} · ${API_BASE}）===\n`)
   const browser = await chromium.launch({ channel: 'msedge', headless: true })
@@ -481,7 +538,646 @@ function identityFn() {
     && new Set(idc.perFloor.flatMap((f) => f.zones)).size > 1,
     idc.perFloor.map((f) => [f.floor, f.zones]))
 
-  check('无 JS 运行时错误', consoleErrors.length === 0, consoleErrors.slice(0, 2))
+  /* ══════════════════════════════════════════════════════════════════════
+   * [P1.6.3 采样] REST(D1) / WS(DO) / Mock(前端种子) / Store(2D) / 3D 五层快照
+   * ══════════════════════════════════════════════════════════════════════ */
+  console.log('\n[P1.6.3] 五层数据源采样：REST(D1) / WS(DO) / Mock(种子) / Store(2D) / 3D')
+  const restPersons = ((await fetchJson(`${API_BASE}/api/v1/person-presence`)).body) || []
+  const restDevices = ((await fetchJson(`${API_BASE}/api/v1/devices`)).body) || []
+  const wsSnap = (await fetchJson(`${API_BASE}/api/v1/demo/state?sessionId=${SESSION}`)).body || {}
+  const wsPersons = wsSnap.persons || []
+  const wsDevices = wsSnap.devices || []
+
+  // 页面侧：Store(2D) / demoStore(WS 镜像) / 3D PersonLayer3D / Mock 种子（经 Vite 动态 import）
+  const pageData = await page.evaluate(() => {
+    const s = window.__demo.store
+    const d = window.__demo.demoStore
+    const pack = (list) => (Array.isArray(list) ? list : []).filter(Boolean).map((x) => ({
+      id: String(x.id),
+      buildingId: x.buildingId === undefined || x.buildingId === null ? '' : String(x.buildingId),
+      floorId: x.floorId === undefined || x.floorId === null ? '' : String(x.floorId),
+      zone: x.zone === undefined || x.zone === null ? '' : String(x.zone),
+      building: x.building === undefined || x.building === null ? '' : String(x.building),
+      floor: x.floor === undefined || x.floor === null ? '' : String(x.floor),
+      area: x.area === undefined || x.area === null ? '' : String(x.area),
+      type: x.type === undefined || x.type === null ? '' : String(x.type),
+      status: x.status === undefined || x.status === null ? '' : String(x.status),
+      currentMode: x.currentMode === undefined || x.currentMode === null ? null : String(x.currentMode),
+      direction: x.direction === undefined || x.direction === null ? null : String(x.direction),
+      brightness: typeof x.brightness === 'number' ? x.brightness : (x.brightness === undefined ? undefined : Number(x.brightness)),
+      emergencyFlash: typeof x.emergencyFlash === 'boolean' ? x.emergencyFlash : null,
+      routeId: x.routeId === undefined || x.routeId === null ? '' : String(x.routeId),
+      progress: typeof x.progress === 'number' ? x.progress : null,
+      hasOwnZone: Object.prototype.hasOwnProperty.call(x, 'zone'),
+      mockRuntime: Boolean(x._evac) || Boolean(x._evacDone),
+    }))
+    return {
+      mode: window.__demo.dataSource ? window.__demo.dataSource.mode : null,
+      storePersons: pack(s.persons),
+      storeDevices: pack(s.devices),
+      demoPersons: pack(d.persons),
+      demoDevices: pack(d.devices),
+      threePersons: (window.__dtwin && window.__dtwin.persons) ? pack(window.__dtwin.persons.data) : [],
+      threeDevices: (window.__dtwin && window.__dtwin.em && window.__dtwin.em.data) ? (window.__dtwin.em.data || []).length : null,
+      emergencyStage: s.emergencyStage,
+      storePlanId: s.activeBuildingPlanId,
+      storePlanBuildingId: s.activeBuildingPlan ? (s.activeBuildingPlan.buildingId || null) : null,
+      plans: (s.buildingEvacuationPlans || []).map((p) => ({
+        id: p.id, buildingId: p.buildingId || null, scope: p.scope || null, routes: (p.routes || []).length,
+      })),
+      backendPlanId: d.activeBuildingPlanId,
+      selectedBuildingId: (s.dashboardView || {}).selectedBuildingId || null,
+      remoteReady: Boolean(s.remoteReady),
+      remoteError: s.remoteError || null,
+      degraded: Boolean(s.dataSourceDegraded),
+      wsStatus: d.wsStatus,
+    }
+  })
+  // 3D 对象 key 名修正（避免上面对象字面量里的空格 key 造成歧义）
+  const pageStorePersons = pageData.storePersons
+  const pageStoreDevices = pageData.storeDevices
+  const pageDemoPersons = pageData.demoPersons
+  const pageDemoDevices = pageData.demoDevices
+  const pageThreePersons = pageData.threePersons
+
+  const mockLayer = await page.evaluate(async () => {
+    try {
+      const seed = await import('/src/mock/deviceSeed.js')
+      const person = await import('/src/mock/person.js')
+      const ds = seed.buildSeedDevices()
+      return {
+        error: null,
+        devices: ds.map((d) => ({
+          id: String(d.id),
+          type: d.type || '',
+          buildingId: d.buildingId || '',
+          floorId: d.floorId || '',
+          zone: Object.prototype.hasOwnProperty.call(d, 'zone') ? String(d.zone ?? '') : undefined,
+          hasOwnZone: Object.prototype.hasOwnProperty.call(d, 'zone'),
+          ownBuildingId: Object.prototype.hasOwnProperty.call(d, 'buildingId'),
+          ownFloorId: Object.prototype.hasOwnProperty.call(d, 'floorId'),
+          area: d.area === undefined ? undefined : String(d.area),
+          zoneName: d.zoneName === undefined ? undefined : String(d.zoneName),
+          status: d.status === undefined ? undefined : String(d.status),
+          currentMode: d.currentMode === undefined ? undefined : String(d.currentMode),
+          direction: d.direction === undefined ? undefined : String(d.direction),
+          brightness: typeof d.brightness === 'number' ? d.brightness : undefined,
+          emergencyFlash: typeof d.emergencyFlash === 'boolean' ? d.emergencyFlash : undefined,
+        })),
+        persons: (person.persons || []).map((p) => ({
+          id: String(p.id),
+          buildingId: p.buildingId === undefined ? undefined : String(p.buildingId),
+          floorId: p.floorId === undefined ? undefined : String(p.floorId),
+          zone: p.zone === undefined ? undefined : String(p.zone),
+          building: p.building === undefined ? undefined : String(p.building),
+          floor: p.floor === undefined ? undefined : String(p.floor),
+          area: p.area === undefined ? undefined : String(p.area),
+        })),
+      }
+    } catch (err) {
+      return { error: String(err), devices: [], persons: [] }
+    }
+  })
+  check('可在页面内采样 Mock 种子数据源（经 Vite 动态 import）', !mockLayer.error, mockLayer.error)
+
+  /* ══════════════════ [PERSON] 人员一致性 ══════════════════ */
+  console.log('\n[PERSON] REST baseline ↔ WS runtime ↔ Store ↔ 2D ↔ 3D')
+  check('REST /person-presence 返回人员台账', restPersons.length > 0, { count: restPersons.length })
+  check('WS 快照返回运行时人员', wsPersons.length > 0, { count: wsPersons.length })
+  check('Store(2D) 已持有人员', pageStorePersons.length > 0, { count: pageStorePersons.length })
+
+  // ① REST baseline DTO vs WS runtime DTO：契约分离（不强行要求两个 DTO 相同）
+  const baselineMissing = restPersons.filter((p) => PERSON_BASELINE_FIELDS.some((k) => p[k] === undefined))
+  check(`REST baseline DTO 字段完整（${PERSON_BASELINE_FIELDS.length} 项：id/buildingId/floorId/zone/x/y/status/movementType）`,
+    baselineMissing.length === 0, { bad: baselineMissing.length, sample: baselineMissing.slice(0, 2) })
+  const baselineRuntimeLeak = restPersons.filter((p) => ['routeId', 'routePoints', 'progress', 'evacuating'].some((k) => k in p))
+  check('REST baseline DTO 与 WS runtime DTO 契约分离（REST 不提供运行时字段）',
+    baselineRuntimeLeak.length === 0, { leak: baselineRuntimeLeak.length })
+  const runtimeMissing = wsPersons.filter((p) => PERSON_RUNTIME_FIELDS.some((k) => p[k] === undefined))
+  check(`WS runtime DTO 字段完整（${PERSON_RUNTIME_FIELDS.length} 项，含 routeId/routePoints/progress/waypoint/疏散标志）`,
+    runtimeMissing.length === 0, { bad: runtimeMissing.length, missingSample: runtimeMissing.length ? PERSON_RUNTIME_FIELDS.filter((k) => runtimeMissing[0][k] === undefined) : [] })
+  const runtimeTypeBad = wsPersons.filter((p) => !Array.isArray(p.route) || !Array.isArray(p.routePoints) || typeof p.progress !== 'number')
+  check('WS runtime DTO 类型正确（route / routePoints 数组，progress 数字）',
+    runtimeTypeBad.length === 0, { bad: runtimeTypeBad.length })
+  const progressOutOfRange = wsPersons.concat(pageStorePersons).filter((p) => typeof p.progress === 'number' && (p.progress < 0 || p.progress > 1))
+  check('progress 始终落在 0~1', progressOutOfRange.length === 0, progressOutOfRange.slice(0, 3))
+
+  // ② 空间身份：同 ID → 同 buildingId/floorId/zone（跨层漂移检测）
+  const spatialDrift = []
+  const layerPersonMaps = [
+    ['REST', new Map(restPersons.map((p) => [String(p.id), p]))],
+    ['WS', new Map(wsPersons.map((p) => [String(p.id), p]))],
+    ['Store', new Map(pageStorePersons.map((p) => [String(p.id), p]))],
+    ['demoStore', new Map(pageDemoPersons.map((p) => [String(p.id), p]))],
+    ['Mock', new Map((mockLayer.persons || []).map((p) => [String(p.id), p]))],
+  ]
+  const BUILDING_NAME_TO_ID = Object.fromEntries(Object.entries(BUILDING_ID_TO_NAME).map(([k, v]) => [v, k]))
+  // canonical 身份解析：buildingId 优先，中文楼栋名仅作为「旧别名兜底」（与生产代码同规则）
+  const canonicalOf = (p) => {
+    const bid = p.buildingId || (p.building ? (BUILDING_NAME_TO_ID[p.building] || '') : '')
+    return { buildingId: bid, floorId: p.floorId || p.floor || '', zone: p.zone || p.area || '' }
+  }
+  for (let i = 1; i < layerPersonMaps.length; i++) {
+    const [bName, bMap] = layerPersonMaps[i]
+    for (const [aName, aMap] of layerPersonMaps.slice(0, i)) {
+      let cmp = 0
+      aMap.forEach((ap, id) => {
+        const bp = bMap.get(id)
+        if (!bp) return
+        cmp++
+        const ca = canonicalOf(ap)
+        const cb = canonicalOf(bp)
+        if (ca.buildingId !== cb.buildingId || ca.floorId !== cb.floorId || ca.zone !== cb.zone) {
+          spatialDrift.push({ id, layers: `${aName}→${bName}`, a: ca, b: cb })
+        }
+      })
+    }
+  }
+  check('人员空间身份无漂移（REST/WS/Store/demoStore/Mock：同 ID → 同 buildingId/floorId/zone）',
+    spatialDrift.length === 0, spatialDrift.slice(0, 3))
+
+  // ③ 旧字段不得反向覆盖 canonical field
+  const aliasBad = []
+  ;[['WS', wsPersons], ['REST', restPersons], ['Store', pageStorePersons], ['demoStore', pageDemoPersons]].forEach(([layer, list]) => {
+    list.forEach((p) => {
+      const bid = String(p.buildingId || '')
+      if (p.building && bid && BUILDING_ID_TO_NAME[bid] && p.building !== BUILDING_ID_TO_NAME[bid]) {
+        aliasBad.push({ layer, id: p.id, kind: 'building', canonical: bid, alias: p.building })
+      }
+      const fid = String(p.floorId || '')
+      if (p.floor && fid && p.floor !== fid) aliasBad.push({ layer, id: p.id, kind: 'floor', canonical: fid, alias: p.floor })
+      const zn = String(p.zone || '')
+      if (p.area && zn && p.area !== zn) aliasBad.push({ layer, id: p.id, kind: 'area', canonical: zn, alias: p.area })
+    })
+  })
+  check('旧字段（building/floor/area）未反向覆盖 canonical field', aliasBad.length === 0, aliasBad.slice(0, 3))
+
+  // Mock 种子人员是否自带 canonical buildingId（不依赖中文名映射）
+  const mockNoOwnBuildingId = (mockLayer.persons || []).filter((p) => p.buildingId === undefined || p.buildingId === '')
+  check('Mock 种子人员自带 canonical buildingId（不依赖中文名映射）', mockNoOwnBuildingId.length === 0,
+    { total: (mockLayer.persons || []).length, missing: mockNoOwnBuildingId.length })
+  if (mockNoOwnBuildingId.length > 0) {
+    recordRed('C5', '人员种子没有 canonical buildingId，只有中文楼栋名',
+      `${mockNoOwnBuildingId.length}/${(mockLayer.persons || []).length} 个种子人员无 buildingId（示例 ${(mockNoOwnBuildingId[0] || {}).id} building=${(mockNoOwnBuildingId[0] || {}).building}），D1 写入时靠 worker/src/seed.ts 的名称映射补齐`,
+      'src/mock/person.js（人员结构：building/floor/zone）；worker/src/seed.ts:80-89（名称映射补 buildingId）')
+  }
+
+  // ④ DemoRoom 运行时覆盖范围（24 场景可行性）
+  const wsPersonBuildings = [...new Set(wsPersons.map((p) => String(p.buildingId)))].sort()
+  const wsPersonFloors = [...new Set(wsPersons.map((p) => String(p.floorId)))].sort()
+  const restPersonBuildings = [...new Set(restPersons.map((p) => String(p.buildingId)))].sort()
+  const coverageOk = wsPersonBuildings.length === BUILDINGS.length
+  check(`DemoRoom runtime 人员覆盖全部 4 栋楼（期望 ${BUILDINGS.join('/')}）`, coverageOk,
+    { covered: wsPersonBuildings, missing: BUILDINGS.filter((b) => !wsPersonBuildings.includes(b)) })
+  if (!coverageOk) {
+    recordRed('D1', 'DemoRoom runtime 人员仅覆盖 ' + wsPersonBuildings.join('/'),
+      `WS 运行时人员 ${wsPersons.length} 人，楼栋集合 ${JSON.stringify(wsPersonBuildings)}，楼层集合 ${JSON.stringify(wsPersonFloors)}；REST baseline 覆盖 ${JSON.stringify(restPersonBuildings)} 共 ${restPersons.length} 人`,
+      'worker/src/durable/DemoRoom.ts:25,40-43（DEFAULT_SCENARIO.buildingId 与 SQL WHERE building_id = ?）')
+  }
+  const wsExtra = wsPersons.filter((p) => !idSetBudget(restPersons).has(String(p.id)))
+  check('WS runtime 人员 ID 全部来自 REST baseline 集合（无凭空新增）', wsExtra.length === 0, wsExtra.slice(0, 3))
+  const demoExtraFromRest = pageStorePersons.filter((p) => !idSetBudget(wsPersons).has(String(p.id)))
+  check('demo 模式：Store 人员全部有 WS 运行时来源（不存在第二套运行时）', demoExtraFromRest.length === 0,
+    { storePersons: pageStorePersons.length, wsRuntime: wsPersons.length, restOnly: demoExtraFromRest.length })
+  if (demoExtraFromRest.length > 0) {
+    recordRed('D2', 'demo 模式 Store 人员多于 WS 运行时（REST 静态 + WS 运行时双来源）',
+      `Store ${pageStorePersons.length} 人 / WS runtime ${wsPersons.length} 人；仅 REST 来源 ${demoExtraFromRest.length} 人，示例 ${demoExtraFromRest.slice(0, 3).map((p) => p.id).join(',')}`,
+      'src/App.vue:36（initFromRemote 全量 REST） + src/stores/fireStore.js:140-160,261-321（与 WS 快照合并）')
+  }
+  const mockRuntimeLeft = pageStorePersons.filter((p) => p.mockRuntime)
+  check('demo 模式：Store 人员无 mock 本地运行态残留（_evac / _evacDone）', mockRuntimeLeft.length === 0,
+    { bad: mockRuntimeLeft.length, sample: mockRuntimeLeft.slice(0, 3).map((p) => p.id) })
+
+  /* ══════════════════ [DEVICE] 设备一致性 ══════════════════ */
+  console.log('\n[DEVICE] REST(D1) ↔ WS(DO) ↔ Mock(种子) ↔ Store(2D) / 3D')
+  check('REST /devices 返回设备台账', restDevices.length > 0, { count: restDevices.length })
+  check('WS 快照返回运行时设备', wsDevices.length > 0, { count: wsDevices.length })
+  const deviceCanonBad = [['REST', restDevices], ['WS', wsDevices], ['Store', pageStoreDevices], ['demoStore', pageDemoDevices]]
+    .flatMap(([layer, list]) => list.filter((d) => DEVICE_CANON_FIELDS.some((k) => d[k] === undefined)).map((d) => ({ layer, id: d.id })))
+  check(`设备 canonical 字段完整（${DEVICE_CANON_FIELDS.length} 项）`, deviceCanonBad.length === 0, deviceCanonBad.slice(0, 3))
+
+  // 设备字段分两类：身份字段（全链路必须一致） / 运行时字段（REST、Mock 是静态台账，WS、Store 是运行时）
+  const restDeviceMap = new Map(restDevices.map((d) => [String(d.id), d]))
+  const mockDeviceMap = new Map((mockLayer.devices || []).map((d) => [String(d.id), d]))
+  const storeDeviceMap = new Map(pageStoreDevices.map((d) => [String(d.id), d]))
+  const IDENTITY_FIELDS = ['type', 'buildingId', 'floorId', 'zone']
+  const RUNTIME_FIELDS = ['status', 'currentMode', 'direction', 'brightness', 'emergencyFlash']
+  const normVal = (v) => (typeof v === 'number' ? v : (typeof v === 'boolean' ? v : String(v)))
+  const compareAcross = (fieldList) => {
+    const bad = []
+    wsDevices.forEach((w) => {
+      const targets = [['REST', restDeviceMap.get(String(w.id))], ['Mock', mockDeviceMap.get(String(w.id))], ['Store', storeDeviceMap.get(String(w.id))]]
+      targets.forEach(([layer, o]) => {
+        if (!o) return
+        fieldList.forEach((k) => {
+          if (w[k] === undefined || o[k] === undefined) return
+          if (normVal(w[k]) !== normVal(o[k])) bad.push({ id: w.id, layer: `WS→${layer}`, field: k, ws: w[k], other: o[k] })
+        })
+      })
+    })
+    return bad
+  }
+  const identityBad = compareAcross(IDENTITY_FIELDS)
+  check('同一设备身份字段跨层一致（type / buildingId / floorId / zone：REST ↔ WS ↔ Mock ↔ Store）',
+    identityBad.length === 0, identityBad.slice(0, 4))
+  const runtimeBadSelf = (() => {
+    const bad = []
+    pageDemoDevices.forEach((d) => {
+      const s = storeDeviceMap.get(String(d.id))
+      if (!s) return
+      RUNTIME_FIELDS.forEach((k) => {
+        if (d[k] === undefined || s[k] === undefined) return
+        if (normVal(d[k]) !== normVal(s[k])) bad.push({ id: d.id, layer: 'demoStore→Store', field: k, ws: d[k], store: s[k] })
+      })
+    })
+    return bad
+  })()
+  check('同一设备运行时字段 WS ↔ Store 一致（status/currentMode/direction/brightness/emergencyFlash）',
+    runtimeBadSelf.length === 0, runtimeBadSelf.slice(0, 4))
+  const runtimeBadLedger = compareAcross(RUNTIME_FIELDS)
+  check('同一设备运行时字段 WS ↔ REST/Mock(静态台账) 无漂移',
+    runtimeBadLedger.length === 0, runtimeBadLedger.slice(0, 3))
+  if (runtimeBadLedger.length > 0) {
+    const byField = {}
+    runtimeBadLedger.forEach((b) => { byField[b.field] = (byField[b.field] || 0) + 1 })
+    recordRed('D4', '设备运行时字段与静态台账分裂（REST / Mock 永不随 tick 更新）',
+      `${runtimeBadLedger.length} 处不一致，按字段统计 ${JSON.stringify(byField)}；示例 ${JSON.stringify(runtimeBadLedger.slice(0, 2))}`,
+      'worker/src/routes/devices.ts:19-26 + worker/src/db.ts:71-108（REST 直读 D1 devices，不经过 normalizeDeviceRuntime 也不接收 tick）；engine.ts 只在 DO 内存改 DeviceRuntime')
+  }
+
+  // C1：种子是否自身携带 canonical zone（而非仅 area / zoneName）
+  const mockNoOwnZone = (mockLayer.devices || []).filter((d) => !d.hasOwnZone)
+  check('Mock 种子设备自带 canonical zone（不是仅靠 area / zoneName 回退）', mockNoOwnZone.length === 0,
+    { total: (mockLayer.devices || []).length, missingZone: mockNoOwnZone.length })
+  if (mockNoOwnZone.length > 0) {
+    recordRed('C1', '设备种子没有 canonical zone 字段',
+      `${mockNoOwnZone.length}/${(mockLayer.devices || []).length} 台种子设备无自有 zone；示例 ${JSON.stringify((mockNoOwnZone[0] || {}).id)} zone=${mockNoOwnZone[0] ? String(mockNoOwnZone[0].zone) : '-'} area=${mockNoOwnZone[0] ? String(mockNoOwnZone[0].area) : '-'} zoneName=${mockNoOwnZone[0] ? String(mockNoOwnZone[0].zoneName) : '-'}`,
+      'src/mock/deviceSeed.js:36-41（只有 building/floorId/area/zoneName）；worker/src/seed.ts:42（D1 zone 列取自 area）')
+  }
+  // C2：默认值是否冒充真实值 —— 只看「种子未定义」但下游给出契约默认值的字段
+  const defaultMasquerade = []
+  const contractDefaults = DEVICE_CONTRACT_DEFAULT
+  ;(mockLayer.devices || []).forEach((m) => {
+    const restTarget = restDeviceMap.get(String(m.id))
+    if (!restTarget) return
+    const targets = [['REST', restTarget], ['Store', storeDeviceMap.get(String(m.id))]].filter(([, o]) => o)
+    const undefFields = [...IDENTITY_FIELDS, ...RUNTIME_FIELDS].filter((k) => m[k] === undefined)
+    undefFields.forEach((k) => {
+      targets.forEach(([layer, o]) => {
+        if (o[k] !== undefined && contractDefaults[k] !== undefined && o[k] === contractDefaults[k]) {
+          defaultMasquerade.push({ id: m.id, layer, field: k, mock: undefined, downstream: o[k], note: '契约默认值冒充真实值' })
+        }
+      })
+    })
+  })
+  check('未被定义 fields 未被契约默认值冒充（Mock 未定义 → 下游出现 daily/right/60/false）',
+    defaultMasquerade.length === 0, defaultMasquerade.slice(0, 4))
+  const nullishRuntime = ([]).concat(
+    restDevices.filter((d) => d.brightness === undefined || d.brightness === null).length ? ['REST.brightness'] : [],
+    restDevices.filter((d) => d.currentMode === undefined || d.currentMode === null).length ? ['REST.currentMode'] : [],
+    wsDevices.filter((d) => d.brightness === undefined || d.brightness === null).length ? ['WS.brightness'] : [],
+  )
+  check('设备不存在「同一类型在 REST 为 null、在 WS 为数值」的口径分裂', nullishRuntime.length === 0,
+    { nullish: nullishRuntime, restNullBrightness: restDevices.filter((d) => d.brightness === undefined || d.brightness === null).length })
+
+  /* ══════════════════ [24 场景] 4 栋 × 6 层 ══════════════════ */
+  console.log('\n[24 场景] B001~B004 × 1F~6F：人员 / 设备集合与空间身份')
+  const scenarioSummary = []
+  let scenarioPersonBad = 0
+  let scenarioDeviceBad = 0
+  const mockPersons = mockLayer.persons || []
+  const personCountsByScenario = (list) => {
+    const m = new Map()
+    list.forEach((p) => {
+      const c = canonicalOf(p)
+      const k = `${c.buildingId}|${c.floorId}`
+      m.set(k, (m.get(k) || 0) + 1)
+    })
+    return m
+  }
+  const pmRest = personCountsByScenario(restPersons)
+  const pmWs = personCountsByScenario(wsPersons)
+  const pmStore = personCountsByScenario(pageStorePersons)
+  const pmMock = personCountsByScenario(mockPersons)
+  const dmRest = personCountsByScenario(restDevices)
+  const dmWs = personCountsByScenario(wsDevices)
+  const dmStore = personCountsByScenario(pageStoreDevices)
+  const dmMock = personCountsByScenario(mockLayer.devices || [])
+  BUILDINGS.forEach((bid) => {
+    FLOORS.forEach((floor) => {
+      const k = `${bid}|${floor}`
+      const pCounts = { rest: pmRest.get(k) || 0, ws: pmWs.get(k) || 0, store: pmStore.get(k) || 0, mock: pmMock.get(k) || 0 }
+      const dCounts = { rest: dmRest.get(k) || 0, ws: dmWs.get(k) || 0, store: dmStore.get(k) || 0, mock: dmMock.get(k) || 0 }
+      const peopleOk = pCounts.rest > 0 && pCounts.rest === pCounts.store && pCounts.rest === pCounts.mock
+      const deviceOk = dCounts.rest > 0 && dCounts.rest === dCounts.store && dCounts.rest === dCounts.mock
+      if (!peopleOk) scenarioPersonBad++
+      if (!deviceOk) scenarioDeviceBad++
+      scenarioSummary.push(`${bid}-${floor}:人(${pCounts.rest}/${pCounts.store}/${pCounts.mock}/ws${pCounts.ws}) 设备(${dCounts.rest}/${dCounts.store}/${dCounts.mock}/ws${dCounts.ws})`)
+      check(`${bid}-${floor} 人员集合一致（REST / Store / Mock 同源同量）`, peopleOk, pCounts)
+      check(`${bid}-${floor} 设备集合一致（REST / Store / Mock 同源同量）`, deviceOk, dCounts)
+    })
+  })
+  const runtimeCoveredScenarios = BUILDINGS.flatMap((bid) => FLOORS.filter((f) => (pmWs.get(`${bid}|${f}`) || 0) > 0).map((f) => `${bid}-${f}`))
+  check('24 个楼层场景全部有 WS 运行时人员参与数据链', runtimeCoveredScenarios.length === 24,
+    { covered: runtimeCoveredScenarios.length, missing: BUILDINGS.flatMap((bid) => FLOORS.filter((f) => (pmWs.get(`${bid}|${f}`) || 0) === 0).map((f) => `${bid}-${f}`)) })
+  if (runtimeCoveredScenarios.length !== 24) {
+    console.log('    └ 24 场景覆盖明细：' + scenarioSummary.join(' | '))
+  }
+
+  /* ══════════════════ [DEMO] snapshot ↔ tick 字段集合 ══════════════════ */
+  console.log('\n[DEMO] snapshot ↔ tick 字段集合（runtime-update 实体不得丢字段）')
+  const wsProbe = await new Promise((resolve) => {
+    const out = { snapshot: null, stage: null, tick: null, tickCount: 0, error: null }
+    let ws
+    try {
+      ws = new WebSocket(`ws://${new URL(API_BASE).host}/api/v1/demo/ws?sessionId=${SESSION}`)
+    } catch (err) { out.error = String(err); resolve(out); return }
+    ws.onmessage = (e) => {
+      let m = null
+      try { m = JSON.parse(e.data) } catch { return }
+      if (m.type === 'demo.snapshot' && !out.snapshot) out.snapshot = m
+      if (m.type === 'demo.stage' && !out.stage) out.stage = m
+      if (m.type === 'demo.tick') { out.tickCount++; if (!out.tick) out.tick = m }
+    }
+    ws.onerror = (e) => { out.error = out.error || String(e && e.message || 'ws error') }
+    setTimeout(() => { try { ws.close() } catch { /* 已关闭 */ } ; resolve(out) }, 6000)
+  })
+  check('WS 探针收到 snapshot / tick 报文', Boolean(wsProbe.snapshot) && wsProbe.tickCount > 0,
+    { snapshot: Boolean(wsProbe.snapshot), ticks: wsProbe.tickCount, error: wsProbe.error })
+  if (wsProbe.snapshot && wsProbe.tick) {
+    const snapPersonKeys = keysOf((wsProbe.snapshot.persons || [])[0]).sort().join(',')
+    const tickPersonKeys = keysOf((wsProbe.tick.persons || [])[0]).sort().join(',')
+    check('tick.persons 与 snapshot.persons 字段集合一致', snapPersonKeys === tickPersonKeys,
+      { snapshot: snapPersonKeys, tick: tickPersonKeys })
+    const runtimeEntities = ['devices', 'lighting', 'buildingPlans', 'plans', 'fire', 'rescue', 'metrics', 'stage']
+    const missingInTick = runtimeEntities.filter((k) => wsProbe.tick[k] === undefined)
+    check('tick 携带设备 runtime payload（devices）', !missingInTick.includes('devices'),
+      { tickTopKeys: keysOf(wsProbe.tick).join(','), missingInTick })
+    if (missingInTick.includes('devices')) {
+      recordRed('D3', 'demo.tick 缺少 devices runtime payload',
+        `snapshot 顶层字段 ${keysOf(wsProbe.snapshot).length} 项（含 devices），tick 仅 ${keysOf(wsProbe.tick).join(',')}；设备状态在 tick 期间无法增量更新，只能等 snapshot / demo.stage 全量重发`,
+        'worker/src/durable/DemoRoom.ts:230-239（tick 构造）vs :562-596（snapshot 构造）')
+    }
+    check('tick 与 snapshot 的 stage 语义一致（同为当前阶段）',
+      String(wsProbe.tick.stage) === String(wsProbe.snapshot.stage),
+      { tick: wsProbe.tick.stage, snapshot: wsProbe.snapshot.stage })
+  }
+
+  /* ══════════════════ [PLAN] 整栋楼疏散方案权威链 ══════════════════ */
+  console.log('\n[PLAN] PLAN-A/B/C · scope=BUILDING · 楼栋隔离')
+  const backendPlans = wsSnap.buildingPlans || []
+  const expectedIds = ['PLAN-A', 'PLAN-B', 'PLAN-C']
+  check('后端下发 3 套整栋楼方案（PLAN-A/B/C）',
+    backendPlans.length === 3 && expectedIds.every((id) => backendPlans.some((p) => p.id === id)),
+    backendPlans.map((p) => p.id))
+  const scopeBad = backendPlans.filter((p) => p.scope !== 'BUILDING')
+  check('全部方案 scope === BUILDING', scopeBad.length === 0, scopeBad.map((p) => [p.id, p.scope]))
+  const planBuildingBad = backendPlans.filter((p) => !p.buildingId || !/^B\d{3}$/.test(String(p.buildingId)))
+  check('全部方案携带合法 buildingId', planBuildingBad.length === 0, planBuildingBad.map((p) => [p.id, p.buildingId]))
+  check('2D / 3D 引用的 buildingPlanId 与后端一致',
+    Boolean(pageData.storePlanId) && pageData.storePlanId === pageData.backendPlanId,
+    { store: pageData.storePlanId, demoStore: pageData.backendPlanId, backend: wsSnap.activeBuildingPlanId })
+  const storePlansBad = pageData.plans.filter((p) => !backendPlans.some((b) => b.id === p.id))
+  check('Store 内方案集合 = 后端方案集合（无第四套方案）', storePlansBad.length === 0, storePlansBad)
+  check('不把 legacyPlans / legacyActivePlanId 当作权威（当前方案来自 buildingPlans）',
+    Boolean(pageData.storePlanId) && backendPlans.some((p) => p.id === pageData.storePlanId),
+    pageData.storePlanId)
+
+  // 楼栋隔离：B001 → B002 → B003 → B004 → B001
+  console.log('\n[PLAN] 楼栋切换隔离（切楼栋后不得残留旧楼栋方案）')
+  const isolation = await page.evaluate(async (sequence) => {
+    const s = window.__demo.store
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+    const out = []
+    for (const bid of sequence) {
+      // 直接改 store 里的持久态「当前楼栋」（等价于 UI 侧 selectBuilding）
+      if (s.dashboardView) s.dashboardView.selectedBuildingId = bid
+      await wait(500)
+      out.push({
+        selectedBuildingId: (s.dashboardView || {}).selectedBuildingId,
+        activeBuildingPlanId: s.activeBuildingPlanId,
+        planBuildingId: s.activeBuildingPlan ? (s.activeBuildingPlan.buildingId || null) : null,
+      })
+    }
+    return out
+  }, ['B001', 'B002', 'B003', 'B004', 'B001'])
+  isolation.forEach((r) => {
+    const ok = r.planBuildingId === r.selectedBuildingId
+    check(`切至 ${r.selectedBuildingId}：activeBuildingPlan.buildingId === 当前楼栋`, ok, r)
+    if (!ok) {
+      recordRed('E1', `切换到 ${r.selectedBuildingId} 后当前方案仍是 ${r.planBuildingId} 的方案`,
+        `selectedBuildingId=${r.selectedBuildingId}, activeBuildingPlanId=${r.activeBuildingPlanId}, activeBuildingPlan.buildingId=${r.planBuildingId}`,
+        'src/views/DashboardView.vue:1930-1934（plans 仅在为空时生成一次，切楼栋不清方案）；src/views/RoutePlanView.vue:523 同理')
+    }
+  })
+  const hasIsolationRed = isolation.some((r) => r.planBuildingId !== r.selectedBuildingId)
+  check('楼栋切换隔离：不存在跨楼栋方案渲染（24 场景不会被旧方案污染）', !hasIsolationRed, isolation)
+
+  /* ══════════════════ [3D] 旧别名依赖（source-level） ══════════════════ */
+  console.log('\n[3D] EmergencyLight3D / FireZone3D / CameraDirector / RescueLayer3D / RouteLayer3D：是否仍用旧别名做业务判断')
+  const fs = require('fs')
+  const path = require('path')
+  const readSrc = (rel) => {
+    try { return fs.readFileSync(path.resolve(process.cwd(), rel), 'utf8') } catch { return null }
+  }
+  const linesMatching = (filePath, re) => {
+    const src = readSrc(filePath)
+    if (!src) return []
+    return src.split('\n').map((l, i) => ({ line: i + 1, text: l.trim() }))
+      .filter((o) => re.test(o.text) && !o.text.startsWith('//') && !o.text.startsWith('*'))
+  }
+  const elOld = linesMatching('src/components/building3d/EmergencyLight3D.js', /\bdev\.(floor|area)\b/)
+  const elCanonical = linesMatching('src/components/building3d/EmergencyLight3D.js', /floorIdOf|zoneOf|d\.floorId/)
+  check('EmergencyLight3D 不以旧别名（dev.floor / dev.area）做楼层/区域业务判断',
+    elOld.length === 0, elOld.slice(0, 6))
+  if (elOld.length > 0) {
+    recordRed('F1', 'EmergencyLight3D 用设备旧别名做楼层/区域判定',
+      `${elOld.length} 处引用 dev.floor / dev.area（未优先使用 canonical floorId/zone，canonical 引用 ${elCanonical.length} 处）`,
+      'src/components/building3d/EmergencyLight3D.js:' + elOld.slice(0, 6).map((o) => o.line).join(','))
+  }
+  const fireZoneOld = linesMatching('src/components/building3d/FireZone3D.js', /\bfe\.(floor|area)\b/)
+  const camOld = linesMatching('src/components/building3d/CameraDirector.js', /\bfe\.(floor|area)\b/)
+  const rescueOld = linesMatching('src/components/building3d/RescueLayer3D.js', /\bfe\.(floor|area)\b/)
+  const fire3dOld = fireZoneOld.length + camOld.length + rescueOld.length
+  check('FireZone3D / CameraDirector / RescueLayer3D 不以 fireEvent 旧别名做业务判断', fire3dOld === 0,
+    { fireZone: fireZoneOld.slice(0, 3), camera: camOld.slice(0, 3), rescue: rescueOld.slice(0, 3) })
+  if (fire3dOld > 0) {
+    recordRed('F2', '火情相关 3D 层依赖 fireEvent 旧别名（fe.floor / fe.area）',
+      `FireZone3D ${fireZoneOld.length} 处、CameraDirector ${camOld.length} 处、RescueLayer3D ${rescueOld.length} 处；根因是 fireStore 重建 fireEvent 时只写 building/floor/area`,
+      'src/stores/fireStore.js:274-281 → FireZone3D:' + fireZoneOld.slice(0, 3).map((o) => o.line).join(',') + ' / CameraDirector:' + camOld.slice(0, 3).map((o) => o.line).join(',') + ' / RescueLayer3D:' + rescueOld.slice(0, 3).map((o) => o.line).join(','))
+  }
+  const routeLayerSrc = readSrc('src/components/building3d/RouteLayer3D.js') || ''
+  const routeUsesPlan = /activeBuildingPlan/.test(routeLayerSrc)
+  const routeChecksBuilding = /buildingId\s*===\s*|buildingId\s*!==\s*/.test(routeLayerSrc)
+  check('RouteLayer3D 渲染方案前校验方案所属楼栋（避免跨楼栋渲染）', routeUsesPlan && routeChecksBuilding,
+    { usesActiveBuildingPlan: routeUsesPlan, checksPlanBuildingId: routeChecksBuilding })
+  if (!(routeUsesPlan && routeChecksBuilding)) {
+    recordRed('F3', 'RouteLayer3D 渲染 activeBuildingPlan 时不校验方案所属楼栋',
+      '引用了 activeBuildingPlan 但未与当前 selectedBuildingId / plan.buildingId 比较，配合 E1 会把旧楼栋方案画到新楼栋上',
+      'src/components/building3d/RouteLayer3D.js:31-40')
+  }
+  // 允许「canonical 优先 + 别名兜底」（p.floorId || p.floor），但禁止「只有别名」的裸用
+  const personLayerSrc = readSrc('src/components/building3d/PersonLayer3D.js') || ''
+  const personLayerLines = personLayerSrc.split('\n').map((l, i) => ({ line: i + 1, text: l.trim() }))
+  const nearCanonical = (idx, re) => [idx - 1, idx, idx + 1].some((i) => personLayerLines[i] && re.test(personLayerLines[i].text))
+  const personLayerBad = personLayerLines
+    .map((o, i) => ({ o, i }))
+    .filter(({ o }) => !o.text.startsWith('//') && !o.text.startsWith('*'))
+    .filter(({ o, i }) => (
+      (/\bp\.floor\b/.test(o.text) && !nearCanonical(i, /\bp\.floorId\b/))
+      || (/\bp\.area\b/.test(o.text) && !nearCanonical(i, /\bp\.zone\b/))
+      || (/\bp\.building\b/.test(o.text) && !nearCanonical(i, /\bp\.buildingId\b/))
+    ))
+    .map(({ o }) => o)
+  check('PersonLayer3D 不含「只用旧别名」的人员身份判定（允许 canonical 优先 + 别名兜底）',
+    personLayerBad.length === 0, personLayerBad.slice(0, 4))
+
+  /* ══════════════════ [MODE] 数据源模式合规 ══════════════════ */
+  console.log('\n[MODE] 当前数据源模式合规 + 静默回退防御')
+  check('页面运行模式可识别', Boolean(pageData.mode), pageData.mode)
+  check('demo 模式：WS 连接正常', pageData.wsStatus === 'open', pageData.wsStatus)
+  check('远端数据源未降级（remoteError 为空 / dataSourceDegraded 为 false）',
+    !pageData.degraded && !pageData.remoteError, { degraded: pageData.degraded, remoteError: pageData.remoteError })
+  const fireStoreSrc = readSrc('src/stores/fireStore.js') || ''
+  // 精确取 initFromRemote 函数体（到该函数的收尾大括号为止），避免误判文件里其它 mock 引用
+  const remoteStart = fireStoreSrc.indexOf('async function initFromRemote')
+  let remoteBody = ''
+  if (remoteStart >= 0) {
+    const lines = fireStoreSrc.slice(remoteStart).split('\n')
+    const stop = lines.findIndex((l, i) => i > 0 && /^  \}$/.test(l))
+    remoteBody = lines.slice(0, stop < 0 ? 60 : stop + 1).join('\n')
+  }
+  const fallbackHits = remoteBody
+    ? (remoteBody.match(/mockRepository|buildSeedDevices|initialPersons|initialBuildings/g) || [])
+    : ['未定位到 initFromRemote']
+  // 降级必须显式：catch 里置位 degraded / remoteError，而不是加载 mock
+  const explicitDegrade = /dataSourceDegraded\.value\s*=\s*true/.test(remoteBody) && /remoteError\.value\s*=/.test(remoteBody)
+  check('fireStore.initFromRemote 失败时不静默回退 mock（函数体内无 mock 数据源加载）',
+    Boolean(remoteBody) && fallbackHits.length === 0, { fallbackHits })
+  check('fireStore.initFromRemote 失败时显式降级（dataSourceDegraded=true 且 remoteError 置位）', explicitDegrade,
+    { explicitDegrade })
+  const apiSrc = readSrc('src/api/index.js') || ''
+  check('数据源选择不把未知模式降级为 mock 之外的隐式行为（api / demo / mock 三态显式）',
+    /isMock|isApi|isDemo/.test(apiSrc), { hasExplicitStates: /isMock|isApi|isDemo/.test(apiSrc) })
+
+  /* ══════════════════ [DEMO] 六阶段状态链一致性 ══════════════════ */
+  console.log('\n[DEMO] 六阶段状态链：Backend == WS == demoStore == fireStore == UI')
+  const legacyMapRaw = (fireStoreSrc.match(/const STAGE_TO_LEGACY\s*=\s*\{([\s\S]*?)\}/) || [])[1] || ''
+  const legacyMap = {}
+  legacyMapRaw.split(',').forEach((pair) => {
+    const m = pair.match(/([A-Z_]+)\s*:\s*(-?\d+)/)
+    if (m) legacyMap[m[1]] = parseInt(m[2], 10)
+  })
+  check('可从 fireStore 解析 STAGE_TO_LEGACY（否则 emergencyStage 断言是空跑）',
+    Object.keys(legacyMap).length >= 6, Object.keys(legacyMap).length)
+  const chain = await page.evaluate(async (args) => {
+    const d = window.__demo.demoStore
+    const s = window.__demo.store
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+    const backendState = async () => {
+      const r = await fetch(args.apiBase + '/api/v1/demo/state?sessionId=' + args.session)
+      const j = await r.json()
+      return { stage: j.stage, planId: j.activeBuildingPlanId || null }
+    }
+    const snapshotRow = async (label, waited) => {
+      const backend = await backendState()
+      return {
+        label,
+        waited,
+        backendStage: backend.stage,
+        demoStage: d.stage,
+        emergencyStage: s.emergencyStage,
+        demoPlanId: d.activeBuildingPlanId || null,
+        storePlanId: s.activeBuildingPlanId || null,
+        backendPlanId: backend.planId,
+        uiActive: (d.flowSteps || []).filter((x) => x.active).map((x) => x.id)[0] || null,
+        nextCommand: d.nextCommand,
+      }
+    }
+    const rows = []
+    // 复位到 IDLE
+    await d.reset()
+    await wait(1500)
+    rows.push(await snapshotRow('RESET→IDLE', 0))
+
+    // 非法跃迁（IDLE 起）
+    const illegal = []
+    for (const cmd of ['CONFIRM_ROUTE', 'COMPLETE_EVACUATION', 'COMPLETE_RESCUE']) {
+      const before = d.stage
+      await d.sendCommand(cmd)
+      await wait(700)
+      illegal.push({ cmd, before, after: d.stage, backend: (await backendState()).stage, error: d.error })
+    }
+
+    // 逐级推进到 COMPLETED（完全由后端 nextCommand 驱动）
+    let guard = 0
+    while (guard++ < 40) {
+      const nx = d.nextCommand
+      if (!nx) break
+      const before = d.stage
+      const payload = nx === 'CONFIRM_ROUTE'
+        ? { buildingPlanId: ((d.buildingPlans || [])[1] || (d.buildingPlans || [])[0] || {}).id || null }
+        : {}
+      await d.sendCommand(nx, payload)
+      let waited = 0
+      while (waited < 30000 && d.stage === before) { await wait(700); waited += 700 }
+      rows.push(await snapshotRow(nx, waited))
+      if (d.stage === 'COMPLETED') break
+      if (d.stage === before) break
+    }
+    return { rows, illegal }
+  }, { apiBase: API_BASE, session: SESSION })
+
+  chain.rows.forEach((r) => {
+    check(`${r.label}：demoStore.stage === 后端 stage`, r.demoStage === r.backendStage, r)
+    check(`${r.label}：fireStore.emergencyStage 与 demoStore.stage 同步`,
+      legacyMap[r.demoStage] === undefined ? true : legacyMap[r.demoStage] === r.emergencyStage,
+      { stage: r.demoStage, emergencyStage: r.emergencyStage, expected: legacyMap[r.demoStage] })
+    check(`${r.label}：demoStore / fireStore / 后端 buildingPlanId 一致`,
+      r.demoPlanId === r.storePlanId && r.demoPlanId === r.backendPlanId,
+      { backend: r.backendPlanId, demoStore: r.demoPlanId, fireStore: r.storePlanId })
+    check(`${r.label}：UI 六阶段进度条定位到当前阶段`, r.uiActive === r.demoStage || r.demoStage === 'COMPLETED' || r.demoStage === 'IDLE',
+      { ui: r.uiActive, stage: r.demoStage })
+  })
+  const reachedStages = [...new Set(chain.rows.map((r) => r.backendStage))]
+  const expectedChain = ['IDLE', 'FIRE_DETECTED', 'EMERGENCY_RESPONSE', 'ROUTE_PLANNING', 'SMART_EVACUATION', 'RETAINED_PERSONS', 'RESCUE_COORDINATION', 'COMPLETED']
+  const missingStages = expectedChain.filter((st) => !reachedStages.includes(st))
+  check('六阶段全链路走通（IDLE → … → COMPLETED）', missingStages.length === 0, { reached: reachedStages, missing: missingStages })
+  chain.illegal.forEach((i) => {
+    check(`非法跃迁被拒绝：IDLE → ${i.cmd}`, i.after === i.before && i.backend === i.before, i)
+  })
+  const planResetBad = chain.rows.filter((r) => r.backendPlanId === null && (r.storePlanId !== null || r.demoPlanId !== null))
+  check('RESET 后 fireStore / demoStore 的 activeBuildingPlanId 同步复位为 null', planResetBad.length === 0, planResetBad)
+  if (planResetBad.length > 0) {
+    recordRed('E2', 'RESET 后 fireStore 仍保留旧 buildingPlanId（后端已清空，2D 仍视为当前方案）',
+      `${planResetBad.length} 个阶段快照出现「后端 null / fireStore ${planResetBad[0].storePlanId}」，涉及阶段：${planResetBad.map((r) => r.backendStage).join('、')}`,
+      'src/stores/fireStore.js:261-321（applyDemoSnapshot 只在 snapshot 带 buildingPlans 时覆盖，IDLE 快照不触发 plan 复位）')
+  }
+
+  /* ══════════════════ 测试收尾：复位 DO，避免污染后续测试套件 ══════════════════ */
+  const finalReset = await sendCommand('RESET')
+  await sleep(1200)
+  check('测试收尾把 DemoRoom 复位到 IDLE（避免污染其它测试套件）',
+    Boolean(finalReset.body) && finalReset.body.stage === 'IDLE',
+    { stage: finalReset.body ? finalReset.body.stage : null, status: finalReset.status })
+
+  /* ══════════════════ P1.6.3 缺陷登记汇总 ══════════════════ */
+  console.log('\n════════ P1.6.3 第二阶段：已登记缺陷 ════════')
+  if (!reds.length) {
+    console.log('  （无：本轮未触发已编目缺陷）')
+  } else {
+    reds.forEach((r) => {
+      console.log(`\n[${r.code}] ${r.scope}`)
+      console.log(`  现象：${r.evidence}`)
+      console.log(`  位置：${r.loc}`)
+    })
+  }
+
+  // 非法跃迁测试本身会产生预期内的 409（后端正确拒绝），不应算作运行时错误；其余错误不得被吞
+  const expected409 = consoleErrors.filter((e) => /409/.test(e))
+  const unexpectedErrors = consoleErrors.filter((e) => !/409/.test(e))
+  if (expected409.length) console.log(`  ℹ 非法跃迁被后端拒绝产生的 409 日志 ${expected409.length} 条（预期内，不计入错误）`)
+  check('无意料之外的 JS 运行时错误（非法跃迁 409 属预期）', unexpectedErrors.length === 0, unexpectedErrors.slice(0, 2))
 
   await browser.close()
   console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`)
