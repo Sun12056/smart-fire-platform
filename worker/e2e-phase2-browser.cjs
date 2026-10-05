@@ -11,6 +11,8 @@ const { chromium } = require('playwright-core')
 
 const PAGE_URL = process.env.PAGE_URL || 'http://localhost:5199/'
 const EXPECT_OFFLINE = process.env.EXPECT_OFFLINE === '1'
+const API_BASE = process.env.API_BASE || 'http://127.0.0.1:8787'
+const SESSION = process.env.DEMO_SESSION || 'default'
 
 let passed = 0, failed = 0
 const failures = []
@@ -24,6 +26,21 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
   while (Date.now() - t0 < timeout) { if (await fn()) return true; await sleep(interval) }
   return false
 }
+
+async function api(path, options = {}) {
+  const res = await fetch(`${API_BASE}${path}`, options)
+  const text = await res.text()
+  let body = null
+  try { body = JSON.parse(text) } catch { /* 非 JSON */ }
+  return { status: res.status, body }
+}
+
+const cmd = (command, payload = {}) =>
+  api(`/api/v1/demo/command?sessionId=${SESSION}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command, payload }),
+  })
 
 ;(async () => {
   console.log(`\n=== 阶段二 浏览器 E2E（${PAGE_URL}${EXPECT_OFFLINE ? ' · 后端不可用场景' : ''}）===\n`)
@@ -119,6 +136,7 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
     check('未打印远程初始化成功日志', !consoleLogs.some((l) => l.includes('远程数据源初始化完成')))
   } else {
     console.log('\n[实时通道]')
+    try {
     // 后端状态机会话是持久的（Durable Object），E2E 前先确保回到 IDLE
     const st = await fetch(`${process.env.API_BASE || 'http://127.0.0.1:8787'}/api/v1/demo/state?sessionId=default`).then((r) => r.json())
     if (st.stage !== 'IDLE') {
@@ -580,6 +598,19 @@ async function waitFor(fn, timeout = 8000, interval = 250) {
 
     const bodyText = await page.evaluate(() => document.body.innerText)
     check('页面呈现后端阶段信息', bodyText.includes('协同救援') || bodyText.includes('处置完成'), bodyText.slice(0, 120))
+    } finally {
+      // Durable Object 会话跨测试持久化；无论断言/异常发生在哪里，都把本次 E2E 留下的状态复位到 IDLE。
+      try {
+        const st = await api(`/api/v1/demo/state?sessionId=${SESSION}`)
+        if (st.body?.stage !== 'IDLE') {
+          const reset = await cmd('RESET')
+          if (reset.status !== 200) console.warn('E2E 清理复位失败：', reset.status, reset.body)
+          else await sleep(300)
+        }
+      } catch (resetErr) {
+        console.warn('E2E 清理复位异常：', resetErr?.message || resetErr)
+      }
+    }
   }
 
   await browser.close()
