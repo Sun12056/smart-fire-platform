@@ -302,6 +302,12 @@ const sendCommand = (command, payload = {}) => fetchJson(`${API_BASE}/api/v1/dem
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ command, payload }),
 })
+// 指定会话下发指令（DO 按 sessionId 隔离：探针使用独立会话，避免污染 default）
+const sendCommandTo = (session, command, payload = {}) => fetchJson(`${API_BASE}/api/v1/demo/command?sessionId=${session}`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ command, payload }),
+})
 const idSetBudget = (arr) => new Set(arr.map((x) => String(x.id)))
 const keysOf = (o) => (o && typeof o === 'object' ? Object.keys(o) : [])
 
@@ -722,28 +728,68 @@ const keysOf = (o) => (o && typeof o === 'object' ? Object.keys(o) : [])
       'src/mock/person.js（人员结构：building/floor/zone）；worker/src/seed.ts:80-89（名称映射补 buildingId）')
   }
 
-  // ④ DemoRoom 运行时覆盖范围（24 场景可行性）
+  // ④ DemoRoom 运行时覆盖范围（Q1：DO = 单楼栋演练房间）
+  // 快照未暴露 scenario 字段：演练楼栋只能从现有字段推导 —— persons / devices 的 buildingId 唯一集
   const wsPersonBuildings = [...new Set(wsPersons.map((p) => String(p.buildingId)))].sort()
+  const wsDeviceBuildings = [...new Set(wsDevices.map((d) => String(d.buildingId)))].sort()
   const wsPersonFloors = [...new Set(wsPersons.map((p) => String(p.floorId)))].sort()
   const restPersonBuildings = [...new Set(restPersons.map((p) => String(p.buildingId)))].sort()
-  const coverageOk = wsPersonBuildings.length === BUILDINGS.length
-  check(`DemoRoom runtime 人员覆盖全部 4 栋楼（期望 ${BUILDINGS.join('/')}）`, coverageOk,
-    { covered: wsPersonBuildings, missing: BUILDINGS.filter((b) => !wsPersonBuildings.includes(b)) })
-  if (!coverageOk) {
-    recordRed('D1', 'DemoRoom runtime 人员仅覆盖 ' + wsPersonBuildings.join('/'),
-      `WS 运行时人员 ${wsPersons.length} 人，楼栋集合 ${JSON.stringify(wsPersonBuildings)}，楼层集合 ${JSON.stringify(wsPersonFloors)}；REST baseline 覆盖 ${JSON.stringify(restPersonBuildings)} 共 ${restPersons.length} 人`,
+  const demoBuildingId = (() => {
+    const uniq = [...new Set([...wsPersonBuildings, ...wsDeviceBuildings])].filter(Boolean)
+    return uniq.length === 1 ? uniq[0] : (wsPersonBuildings[0] || '')
+  })()
+  const singleBuildingRuntime = wsPersonBuildings.length === 1
+    && (wsDeviceBuildings.length === 0 || wsDeviceBuildings[0] === demoBuildingId)
+  check('DemoRoom 是单楼栋演练房间（runtime 人员/设备同属一栋楼）', singleBuildingRuntime,
+    { demoBuildingId, personBuildings: wsPersonBuildings, deviceBuildings: wsDeviceBuildings })
+  const runtimeFloorSet = [...new Set(wsPersons
+    .filter((p) => String(p.buildingId) === demoBuildingId)
+    .map((p) => String(p.floorId)))].sort()
+  const demoFloorCovered = FLOORS.every((f) => runtimeFloorSet.includes(f))
+  check(`DemoRoom runtime 覆盖演练楼栋 ${demoBuildingId} 的 ${FLOORS[0]}~${FLOORS[FLOORS.length - 1]}`,
+    demoFloorCovered,
+    { demoBuildingId, covered: runtimeFloorSet, missing: FLOORS.filter((f) => !runtimeFloorSet.includes(f)) })
+  if (!demoFloorCovered) {
+    recordRed('D1', `DemoRoom runtime 未覆盖演练楼栋 ${demoBuildingId} 的全部楼层`,
+      `runtime 楼层集合 ${JSON.stringify(runtimeFloorSet)}（期望 ${FLOORS.join('/')}），运行时 ${wsPersons.length} 人；REST ledger 楼栋集合 ${JSON.stringify(restPersonBuildings)} 共 ${restPersons.length} 人`,
       'worker/src/durable/DemoRoom.ts:25,40-43（DEFAULT_SCENARIO.buildingId 与 SQL WHERE building_id = ?）')
   }
   const wsExtra = wsPersons.filter((p) => !idSetBudget(restPersons).has(String(p.id)))
   check('WS runtime 人员 ID 全部来自 REST baseline 集合（无凭空新增）', wsExtra.length === 0, wsExtra.slice(0, 3))
-  const demoExtraFromRest = pageStorePersons.filter((p) => !idSetBudget(wsPersons).has(String(p.id)))
-  check('demo 模式：Store 人员全部有 WS 运行时来源（不存在第二套运行时）', demoExtraFromRest.length === 0,
-    { storePersons: pageStorePersons.length, wsRuntime: wsPersons.length, restOnly: demoExtraFromRest.length })
-  if (demoExtraFromRest.length > 0) {
-    recordRed('D2', 'demo 模式 Store 人员多于 WS 运行时（REST 静态 + WS 运行时双来源）',
-      `Store ${pageStorePersons.length} 人 / WS runtime ${wsPersons.length} 人；仅 REST 来源 ${demoExtraFromRest.length} 人，示例 ${demoExtraFromRest.slice(0, 3).map((p) => p.id).join(',')}`,
+
+  // ⑤ 人员集合分层（Q2）：ledgerPersons（全楼栋静态台账） vs runtimePersons（当前演练楼栋运行时）
+  const wsRuntimeIdSet = idSetBudget(wsPersons)
+  const runtimePersons = pageStorePersons.filter((p) => String(p.buildingId) === demoBuildingId)
+  const ledgerPersons = pageStorePersons.filter((p) => String(p.buildingId) !== demoBuildingId)
+  const runtimeMissingInWs = runtimePersons.filter((p) => !wsRuntimeIdSet.has(String(p.id)))
+  check(`演练楼栋 ${demoBuildingId}：Store 人员全部来自 WS 运行时（不存在第二套运行时）`,
+    runtimePersons.length > 0 && runtimeMissingInWs.length === 0,
+    { demoBuildingId, storeRuntime: runtimePersons.length, wsRuntime: wsPersons.length,
+      missing: runtimeMissingInWs.slice(0, 3).map((p) => p.id) })
+  if (runtimeMissingInWs.length > 0) {
+    recordRed('D2', `演练楼栋 ${demoBuildingId} 存在无 WS 运行时来源的人员`,
+      `演练楼栋 Store 人员 ${runtimePersons.length} 人 / WS runtime ${wsPersons.length} 人；无运行时来源 ${runtimeMissingInWs.length} 人，示例 ${runtimeMissingInWs.slice(0, 3).map((p) => p.id).join(',')}`,
       'src/App.vue:36（initFromRemote 全量 REST） + src/stores/fireStore.js:140-160,261-321（与 WS 快照合并）')
   }
+  const ledgerLeaked = ledgerPersons.filter((p) => wsRuntimeIdSet.has(String(p.id)))
+  check('其它楼栋人员为 ledger-only（不进入 WS runtime，不要求 runtime 字段）', ledgerLeaked.length === 0,
+    { ledgerPersons: ledgerPersons.length, ledgerInRuntime: ledgerLeaked.length, demoBuildingId })
+
+  // 身份字段（personId / buildingId / floorId / zone）一致性不得因放宽口径而丢失
+  const wsPersonMap = new Map(wsPersons.map((p) => [String(p.id), p]))
+  const normIdField = (v) => (v === undefined || v === null ? '' : String(v))
+  const runtimeIdentityBad = []
+  runtimePersons.forEach((sp) => {
+    const wp = wsPersonMap.get(String(sp.id))
+    if (!wp) return
+    ;['buildingId', 'floorId', 'zone'].forEach((k) => {
+      if (normIdField(sp[k]) !== normIdField(wp[k])) {
+        runtimeIdentityBad.push({ id: sp.id, field: k, store: sp[k], ws: wp[k] })
+      }
+    })
+  })
+  check(`演练楼栋 runtime 人员身份字段一致（personId / buildingId / floorId / zone）`,
+    runtimeIdentityBad.length === 0, runtimeIdentityBad.slice(0, 3))
   const mockRuntimeLeft = pageStorePersons.filter((p) => p.mockRuntime)
   check('demo 模式：Store 人员无 mock 本地运行态残留（_evac / _evacDone）', mockRuntimeLeft.length === 0,
     { bad: mockRuntimeLeft.length, sample: mockRuntimeLeft.slice(0, 3).map((p) => p.id) })
@@ -794,16 +840,22 @@ const keysOf = (o) => (o && typeof o === 'object' ? Object.keys(o) : [])
   })()
   check('同一设备运行时字段 WS ↔ Store 一致（status/currentMode/direction/brightness/emergencyFlash）',
     runtimeBadSelf.length === 0, runtimeBadSelf.slice(0, 4))
-  const runtimeBadLedger = compareAcross(RUNTIME_FIELDS)
-  check('同一设备运行时字段 WS ↔ REST/Mock(静态台账) 无漂移',
-    runtimeBadLedger.length === 0, runtimeBadLedger.slice(0, 3))
-  if (runtimeBadLedger.length > 0) {
+  if (runtimeBadSelf.length > 0) {
     const byField = {}
-    runtimeBadLedger.forEach((b) => { byField[b.field] = (byField[b.field] || 0) + 1 })
-    recordRed('D4', '设备运行时字段与静态台账分裂（REST / Mock 永不随 tick 更新）',
-      `${runtimeBadLedger.length} 处不一致，按字段统计 ${JSON.stringify(byField)}；示例 ${JSON.stringify(runtimeBadLedger.slice(0, 2))}`,
-      'worker/src/routes/devices.ts:19-26 + worker/src/db.ts:71-108（REST 直读 D1 devices，不经过 normalizeDeviceRuntime 也不接收 tick）；engine.ts 只在 DO 内存改 DeviceRuntime')
+    runtimeBadSelf.forEach((b) => { byField[b.field] = (byField[b.field] || 0) + 1 })
+    recordRed('D4', '设备运行时字段 WS ↔ Store 漂移',
+      `${runtimeBadSelf.length} 处不一致，按字段统计 ${JSON.stringify(byField)}；示例 ${JSON.stringify(runtimeBadSelf.slice(0, 2))}`,
+      'src/stores/fireStore.js（applyDemoSnapshot 设备合并） ↔ src/stores/demoStore.js（WS 镜像）')
   }
+  // Q2 口径：REST / Mock 是静态台账（D1 + 种子），不承担 Demo 运行时；
+  // 运行时状态经 WS snapshot / stage 广播，只与 Store 比对，不再要求 REST/Mock == WS runtime
+  const ledgerStaticOk = restDevices.length > 0
+    && restDevices.every((d) => d.status !== undefined && d.currentMode !== undefined)
+  check('REST / Mock 设备保持静态台账口径（台账运行时字段完整，不要求跟随 runtime）', ledgerStaticOk,
+    { rest: restDevices.length,
+      missing: restDevices.filter((d) => d.status === undefined || d.currentMode === undefined).length })
+  const ledgerVsRuntime = compareAcross(RUNTIME_FIELDS).filter((b) => b.layer === 'WS→REST' || b.layer === 'WS→Mock')
+  console.log(`  ℹ 台账/运行时分层：WS runtime 与 REST/Mock 台账存在 ${ledgerVsRuntime.length} 处差异（Q2 口径下属预期，不登记为缺陷）`)
 
   // C1：种子是否自身携带 canonical zone（而非仅 area / zoneName）
   const mockNoOwnZone = (mockLayer.devices || []).filter((d) => !d.hasOwnZone)
@@ -877,15 +929,19 @@ const keysOf = (o) => (o && typeof o === 'object' ? Object.keys(o) : [])
       check(`${bid}-${floor} 设备集合一致（REST / Store / Mock 同源同量）`, deviceOk, dCounts)
     })
   })
-  const runtimeCoveredScenarios = BUILDINGS.flatMap((bid) => FLOORS.filter((f) => (pmWs.get(`${bid}|${f}`) || 0) > 0).map((f) => `${bid}-${f}`))
-  check('24 个楼层场景全部有 WS 运行时人员参与数据链', runtimeCoveredScenarios.length === 24,
-    { covered: runtimeCoveredScenarios.length, missing: BUILDINGS.flatMap((bid) => FLOORS.filter((f) => (pmWs.get(`${bid}|${f}`) || 0) === 0).map((f) => `${bid}-${f}`)) })
-  if (runtimeCoveredScenarios.length !== 24) {
-    console.log('    └ 24 场景覆盖明细：' + scenarioSummary.join(' | '))
+  // 24 个 ledger 场景（4 栋 × 6F）是台账口径，已由上面 48 条断言覆盖；
+  // runtime 只覆盖当前演练楼栋（Q1），因此这里按 demoBuildingId 的 1F~6F 校验
+  const runtimeCoveredScenarios = FLOORS.filter((f) => (pmWs.get(`${demoBuildingId}|${f}`) || 0) > 0)
+  check(`演练楼栋 ${demoBuildingId} 的 ${FLOORS[0]}~${FLOORS[FLOORS.length - 1]} 全部有 WS 运行时人员参与数据链`,
+    runtimeCoveredScenarios.length === FLOORS.length,
+    { demoBuildingId, covered: runtimeCoveredScenarios,
+      missing: FLOORS.filter((f) => (pmWs.get(`${demoBuildingId}|${f}`) || 0) === 0) })
+  if (runtimeCoveredScenarios.length !== FLOORS.length) {
+    console.log('    └ 演练楼栋覆盖明细：' + scenarioSummary.filter((s) => s.startsWith(demoBuildingId)).join(' | '))
   }
 
-  /* ══════════════════ [DEMO] snapshot ↔ tick 字段集合 ══════════════════ */
-  console.log('\n[DEMO] snapshot ↔ tick 字段集合（runtime-update 实体不得丢字段）')
+  /* ══════════════════ [DEMO] snapshot / stage / tick 协议口径 ══════════════════ */
+  console.log('\n[DEMO] snapshot / stage = 完整运行时；tick = 持续增量')
   const wsProbe = await new Promise((resolve) => {
     const out = { snapshot: null, stage: null, tick: null, tickCount: 0, error: null }
     let ws
@@ -909,18 +965,75 @@ const keysOf = (o) => (o && typeof o === 'object' ? Object.keys(o) : [])
     const tickPersonKeys = keysOf((wsProbe.tick.persons || [])[0]).sort().join(',')
     check('tick.persons 与 snapshot.persons 字段集合一致', snapPersonKeys === tickPersonKeys,
       { snapshot: snapPersonKeys, tick: tickPersonKeys })
-    const runtimeEntities = ['devices', 'lighting', 'buildingPlans', 'plans', 'fire', 'rescue', 'metrics', 'stage']
-    const missingInTick = runtimeEntities.filter((k) => wsProbe.tick[k] === undefined)
-    check('tick 携带设备 runtime payload（devices）', !missingInTick.includes('devices'),
+    // 协议口径：tick = 持续增量（persons / metrics / 阶段字段）；devices 的权威路径是 snapshot / stage
+    const tickRequired = ['persons', 'metrics', 'stage']
+    const missingInTick = tickRequired.filter((k) => wsProbe.tick[k] === undefined)
+    check('tick 携带持续增量必需字段（persons / metrics / stage）', missingInTick.length === 0,
       { tickTopKeys: keysOf(wsProbe.tick).join(','), missingInTick })
-    if (missingInTick.includes('devices')) {
-      recordRed('D3', 'demo.tick 缺少 devices runtime payload',
-        `snapshot 顶层字段 ${keysOf(wsProbe.snapshot).length} 项（含 devices），tick 仅 ${keysOf(wsProbe.tick).join(',')}；设备状态在 tick 期间无法增量更新，只能等 snapshot / demo.stage 全量重发`,
-        'worker/src/durable/DemoRoom.ts:230-239（tick 构造）vs :562-596（snapshot 构造）')
+    if (missingInTick.length > 0) {
+      recordRed('D3', 'demo.tick 缺少持续增量必需字段',
+        `tick 顶层字段 ${keysOf(wsProbe.tick).join(',')}；缺少 ${missingInTick.join(',')}`,
+        'worker/src/durable/DemoRoom.ts（tick 构造）')
+    }
+    const snapHasDevices = Array.isArray(wsProbe.snapshot.devices) && wsProbe.snapshot.devices.length > 0
+    check('demo.snapshot 携带完整运行时状态（含 devices）', snapHasDevices,
+      { devices: (wsProbe.snapshot.devices || []).length, topKeys: keysOf(wsProbe.snapshot).length })
+    if (!snapHasDevices) {
+      recordRed('D3', 'demo.snapshot 未携带 devices 完整运行时',
+        `snapshot 顶层字段 ${keysOf(wsProbe.snapshot).join(',')}`,
+        'worker/src/durable/DemoRoom.ts:562-596（snapshot 构造）')
     }
     check('tick 与 snapshot 的 stage 语义一致（同为当前阶段）',
       String(wsProbe.tick.stage) === String(wsProbe.snapshot.stage),
       { tick: wsProbe.tick.stage, snapshot: wsProbe.snapshot.stage })
+  }
+
+  // 阶段切换必须能拿到含 devices 的完整运行时：用独立 session 触发（DO 按 sessionId 隔离），
+  // 避免把 default 会话推离 IDLE 而污染后续测试套件
+  const PROBE_SESSION = 'p163-d3-probe'
+  let stageMsg = null
+  try {
+    await sendCommandTo(PROBE_SESSION, 'RESET')
+    await sleep(700)
+    stageMsg = await new Promise((resolve) => {
+      let ws
+      let settled = false
+      const finish = (m) => {
+        if (settled) return
+        settled = true
+        try { ws.close() } catch { /* 已关闭 */ }
+        resolve(m)
+      }
+      try {
+        ws = new WebSocket(`ws://${new URL(API_BASE).host}/api/v1/demo/ws?sessionId=${PROBE_SESSION}`)
+      } catch (e) { resolve(null); return }
+      ws.onmessage = (e) => {
+        let m = null
+        try { m = JSON.parse(e.data) } catch { return }
+        if (m.type === 'demo.stage' && m.stage && m.stage !== 'IDLE') finish(m)
+      }
+      ws.onerror = () => { if (!settled) finish(null) }
+      setTimeout(async () => {
+        try { await sendCommandTo(PROBE_SESSION, 'START_FIRE') } catch { /* 指令失败由断言兜底 */ }
+      }, 800)
+      setTimeout(() => { if (!settled) finish(null) }, 9000)
+    })
+  } catch (e) {
+    console.log(`  ⚠ D3 stage 探针异常：${e.message}`)
+  } finally {
+    try { await sendCommandTo(PROBE_SESSION, 'RESET') } catch { /* 隔离会话复位失败不影响主流程 */ }
+  }
+  const stageHasDevices = Boolean(stageMsg) && Array.isArray(stageMsg.devices) && stageMsg.devices.length > 0
+  check('阶段切换：demo.stage 携带完整运行时状态（含 devices）', stageHasDevices,
+    stageMsg
+      ? { stage: stageMsg.stage, devices: (stageMsg.devices || []).length, topKeys: keysOf(stageMsg).length }
+      : { stage: null })
+  if (!stageHasDevices) {
+    recordRed('D3', 'demo.stage 未携带 devices 完整运行时',
+      stageMsg
+        ? `stage=${stageMsg.stage}，顶层字段 ${keysOf(stageMsg).join(',')}`
+        : '探针窗口内未收到非 IDLE 的 demo.stage 报文',
+      'worker/src/durable/DemoRoom.ts（demo.stage 广播）')
   }
 
   /* ══════════════════ [PLAN] 整栋楼疏散方案权威链 ══════════════════ */
