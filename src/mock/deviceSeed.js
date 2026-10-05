@@ -2,6 +2,9 @@
 // 每台设备都带 x/y 坐标与疏散方向，首页、设备管理、联动、路线规划读的是同一批对象；id 含楼栋前缀保证全局唯一
 // 从 fireStore 抽出为纯函数模块：store 与 MockRepository 共用，保证 mock / api 双数据源形状完全一致
 import { generateFloorDevices } from './floorPlanData'
+// P1.6.3 C1：设备种子必须自带 canonical zone（取值与全链路同口径），
+// area / zoneName 退化为只读别名，各层不再靠 zone ?? area 回退来还原区域身份
+import { zoneOf } from '../../shared/person/personRuntime.js'
 
 export function buildSeedDevices() {
   const list = []
@@ -37,6 +40,7 @@ export function buildSeedDevices() {
           buildingId: bid,
           floor: fid,
           floorId: fid,
+          zone: zoneOf({ area: pd.area }),
           area: pd.area,
           zoneName: pd.zoneName || pd.area,
           x: pd.x,

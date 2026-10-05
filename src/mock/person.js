@@ -10,6 +10,9 @@
  */
 
 import { devices } from './devices'
+// P1.6.3 C5：人员种子必须自带 canonical 身份字段（buildingId / floorId），
+// 取值与全链路同口径（shared 契约），旧别名 building / floor 只作只读兼容，不再充当权威来源
+import { buildingIdOf, floorIdOf } from '../../shared/person/personRuntime.js'
 
 // 楼层房间几何（与 floorPlanData.js 完全一致；只读共享，勿改）
 // A区 大厅/办公 (90,28,105,122) | B区 (90,210,105,70)
@@ -95,9 +98,12 @@ Object.entries(FLOOR_PERSON_COUNT).forEach(([key, totalCount]) => {
       const pos = samplePoint(zone)
       persons.push({
         id: `T${String(idCounter++).padStart(3, '0')}`,
+        // canonical 身份三元组（权威）：由同一份 shared 契约解析，与 REST / WS / Store 完全同口径
+        buildingId: buildingIdOf({ building }),
+        floorId: floorIdOf({ floorId: floor }),
+        zone, // zone = 平面图房间区域名（A区/B区/C区/D区/走廊）
         building,
         floor,
-        zone, // zone = 平面图房间区域名（A区/B区/C区/D区/走廊）
         x: pos.x,
         y: pos.y,
         status: isStatic ? 'static' : 'normal',

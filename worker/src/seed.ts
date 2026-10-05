@@ -39,7 +39,8 @@ export async function seed(db: D1Database): Promise<Record<string, number>> {
        battery, temperature, last_report, install_position, work_hours, voltage, signal, direction, recommended_direction,
        brightness, current_mode, detection_range, detected_persons, exit_id, stair_id, door_id, emergency_flash, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
-      d.id, d.planId ?? null, d.name, d.type, d.buildingId, d.floorId, d.area ?? null, d.zoneName ?? null,
+      // P1.6.3 C1：D1 的 zone 列取 canonical 的 zone（缺了才兼容回退旧别名 area）
+      d.id, d.planId ?? null, d.name, d.type, d.buildingId, d.floorId, d.zone ?? d.area ?? null, d.zoneName ?? null,
       d.x ?? null, d.y ?? null, d.status, d.controllable ? 1 : 0, d.communication,
       d.battery ?? null, d.temperature ?? null, minutesAgo((i % 60) + 1), d.installPosition ?? null,
       d.workHours ?? null, d.voltage ?? null, d.signal ?? null, d.direction ?? null, d.recommendedDirection ?? null,
@@ -81,7 +82,9 @@ export async function seed(db: D1Database): Promise<Record<string, number>> {
     stmts.push(db.prepare(`INSERT OR REPLACE INTO person_presence
       (id, building_id, floor_id, zone, x, y, status, speed, direction, distance, movement_type, detected_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
-      String(p.id), BUILDING_NAME_TO_ID[String(p.building)] ?? 'B001', String(p.floor), String(p.zone),
+      // P1.6.3 C5：canonical buildingId / floorId 优先，中文名映射只作兜底（别名不再是身份来源）
+      String(p.id), String(p.buildingId ?? BUILDING_NAME_TO_ID[String(p.building)] ?? 'B001'),
+      String(p.floorId ?? p.floor), String(p.zone),
       (p.x as number) ?? null, (p.y as number) ?? null, String(p.status ?? 'normal'),
       (p.speed as number) ?? null, (p.direction as number) ?? null, (p.distance as number) ?? null,
       String(p.movementType ?? 'static'), minutesAgo((i % 55) + 5), ts,
