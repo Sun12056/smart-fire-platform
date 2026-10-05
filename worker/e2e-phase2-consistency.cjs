@@ -132,6 +132,122 @@ function consistencyFn() {
   }
 }
 
+/**
+ * P1.6.1 人员身份链采集（浏览器内执行）
+ * 校验链路每一跳都不得改变人员身份：
+ *  ① 快照人员 id 唯一
+ *  ② snapshot → demoStore → fireStore：id / floorId / zone / routeId / status 全程不变
+ *  ③ progress 恒在 0~1
+ *  ④ 3D 不产生新的 routeId、不修改业务 status、不产生新 routeKey
+ *  ⑤ 整栋楼 1F~6F 每层人员数 / ID / floorId / zone / routeId / status 三方一致
+ */
+function identityFn() {
+  const demo = window.__demo.demoStore
+  const store = window.__demo.store
+  const dt = window.__dtwin
+  const norm = (v) => (v === undefined || v === null ? '' : String(v))
+  const backend = (demo.persons || []).filter(Boolean)
+  const buildingId = backend.length ? backend[0].buildingId : ''
+
+  const indexById = (list, key) => {
+    const m = new Map()
+    ;(list || []).filter(Boolean).forEach((x) => m.set(norm(x[key || 'id']), x))
+    return m
+  }
+  const backendIds = backend.map((p) => norm(p.id))
+  const storeMap = indexById(store.persons)
+  const threeMap = indexById(dt.persons.data)
+
+  const hopMissingInStore = backendIds.filter((id) => !storeMap.has(id))
+  const hopMissingIn3D = backendIds.filter((id) => !threeMap.has(id))
+  const dupIds = backendIds.filter((id, i) => backendIds.indexOf(id) !== i)
+
+  const floorBad = []
+  const zoneBad = []
+  const routeIdBad = []
+  const statusBad = []
+  const progressBad = []
+  backend.forEach((p) => {
+    const id = norm(p.id)
+    if (typeof p.progress === 'number' && (p.progress < 0 || p.progress > 1)) progressBad.push([id, p.progress])
+    const s = storeMap.get(id)
+    const t = threeMap.get(id)
+    if (s) {
+      if (norm(s.floorId) !== norm(p.floorId)) floorBad.push({ id, backend: p.floorId, layer: '2D', got: s.floorId })
+      if (norm(s.zone) !== norm(p.zone)) zoneBad.push({ id, backend: p.zone, layer: '2D', got: s.zone })
+      if (norm(s.routeId) !== norm(p.routeId)) routeIdBad.push({ id, backend: p.routeId, layer: '2D', got: s.routeId })
+      if (norm(s.status) !== norm(p.status)) statusBad.push({ id, backend: p.status, layer: '2D', got: s.status })
+      if (typeof s.progress === 'number' && (s.progress < 0 || s.progress > 1)) progressBad.push([`2D:${id}`, s.progress])
+    }
+    if (t) {
+      if (norm(t.floorId) !== norm(p.floorId)) floorBad.push({ id, backend: p.floorId, layer: '3D', got: t.floorId })
+      if (norm(t.zone) !== norm(p.zone)) zoneBad.push({ id, backend: p.zone, layer: '3D', got: t.zone })
+      if (norm(t.routeId) !== norm(p.routeId)) routeIdBad.push({ id, backend: p.routeId, layer: '3D', got: t.routeId })
+      if (norm(t.status) !== norm(p.status)) statusBad.push({ id, backend: p.status, layer: '3D', got: t.status })
+    }
+  })
+
+  // ④ 3D 不得生产任何后端没有的 routeId / status / routeKey（3D 只消费）
+  const backendRouteIds = new Set(backend.map((p) => norm(p.routeId)).filter(Boolean))
+  const planRouteIds = new Set(((store.activeBuildingPlan || {}).routes || []).map((r) => norm(r.routeId)).filter(Boolean))
+  const backendStatuses = new Set(backend.map((p) => norm(p.status)).filter(Boolean))
+  const routeId3DExtra = []
+  const status3DExtra = []
+  const routeKey3DExtra = []
+  ;(dt.persons.data || []).filter(Boolean).forEach((d) => {
+    const id = norm(d.id)
+    const rid = norm(d.routeId)
+    if (rid && !backendRouteIds.has(rid) && !planRouteIds.has(rid)) routeId3DExtra.push([id, rid])
+    const st = norm(d.status)
+    if (st && !backendStatuses.has(st)) status3DExtra.push([id, st])
+    const key = String(d.routeKey || '')
+    if (key && !/^(backend|bp|mock|none):/.test(key)) routeKey3DExtra.push([id, key])
+  })
+
+  // ⑤ 整栋楼逐层比对（1F ~ 6F）
+  const FLOORS = ['1F', '2F', '3F', '4F', '5F', '6F']
+  const perFloor = FLOORS.map((f) => {
+    const b = backend.filter((p) => norm(p.floorId) === f)
+    const s2d = (store.persons || []).filter((p) => p && norm(p.buildingId) === String(buildingId) && norm(p.floorId) === f)
+    const s3d = (dt.persons.data || []).filter((d) => d && norm(d.floorId) === f)
+    const bIds = b.map((p) => norm(p.id)).sort()
+    const dIds = s2d.map((p) => norm(p.id)).sort()
+    const tIds = s3d.map((d) => norm(d.id)).sort()
+    const zoneMismatch = []
+    const routeMismatch = []
+    const statusMismatch = []
+    b.forEach((p) => {
+      const id = norm(p.id)
+      const t = threeMap.get(id)
+      const s = storeMap.get(id)
+      if (t && norm(t.zone) !== norm(p.zone)) zoneMismatch.push({ id, backend: p.zone, got: t.zone })
+      if (s && norm(s.routeId) !== norm(p.routeId)) routeMismatch.push({ id, backend: p.routeId, got: s.routeId })
+      if (t && norm(t.status) !== norm(p.status)) statusMismatch.push({ id, backend: p.status, got: t.status })
+    })
+    return {
+      floor: f,
+      backend: b.length,
+      twoD: s2d.length,
+      threeD: s3d.length,
+      idsSame2D: JSON.stringify(bIds) === JSON.stringify(dIds),
+      idsSame3D: JSON.stringify(bIds) === JSON.stringify(tIds),
+      zoneMismatch: zoneMismatch.length,
+      routeMismatch: routeMismatch.length,
+      statusMismatch: statusMismatch.length,
+      zones: [...new Set(b.map((p) => norm(p.zone)))].sort(),
+    }
+  })
+
+  return {
+    buildingId,
+    backendCount: backend.length,
+    dupIds, hopMissingInStore, hopMissingIn3D,
+    floorBad, zoneBad, routeIdBad, statusBad, progressBad,
+    routeId3DExtra, status3DExtra, routeKey3DExtra,
+    perFloor,
+  }
+}
+
 ;(async () => {
   console.log(`\n=== P1.6.3 2D/3D 一致性验收（${PAGE_URL} · ${API_BASE}）===\n`)
   const browser = await chromium.launch({ channel: 'msedge', headless: true })
@@ -323,6 +439,47 @@ function consistencyFn() {
   const advanced = (await page.evaluate(() => (window.__demo.demoStore.persons || [])
     .filter((p) => p.status === 'safe' || p.status === 'evacuating').length))
   check('后端人员在推进（存在疏散 / 撤离完成状态）', advanced > 0, { advanced, sample: c2.statusSamples })
+
+  // ── 6. 人员身份链一致性（P1.6.1）──
+  console.log('\n[身份链] snapshot → demoStore → fireStore(2D) → PersonLayer3D(3D)')
+  const idc = await page.evaluate(identityFn)
+  check('① 快照中每个人员 id 唯一', idc.dupIds.length === 0, idc.dupIds)
+  check('② snapshot → fireStore：后端人员 id 全部保留（不改名/不重建）',
+    idc.hopMissingInStore.length === 0, idc.hopMissingInStore)
+  check('② fireStore → 3D：人员 id 与后端一一对应',
+    idc.hopMissingIn3D.length === 0, idc.hopMissingIn3D)
+  check('④ 后端 floorId 与前端 floorId 一致（2D / 3D 口径统一）',
+    idc.floorBad.length === 0, idc.floorBad.slice(0, 3))
+  check('⑤ 后端 zone 与前端 zone 一致（避免 area 别名成为第二套身份）',
+    idc.zoneBad.length === 0, idc.zoneBad.slice(0, 3))
+  check('⑥ routeId 后端 → 2D / 3D 全程一致', idc.routeIdBad.length === 0, idc.routeIdBad.slice(0, 3))
+  check('⑨ 后端 status 变化后 2D / 3D 同步', idc.statusBad.length === 0, idc.statusBad.slice(0, 3))
+  check('⑧ progress 始终落在 0~1（含后端与 2D）',
+    idc.progressBad.length === 0, idc.progressBad.slice(0, 3))
+  check('⑩ 3D 不产生新的 routeId（全部来自后端或当前整栋楼方案）',
+    idc.routeId3DExtra.length === 0, idc.routeId3DExtra.slice(0, 3))
+  check('⑪ 3D 不修改人员业务状态（status 取值不超出后端集合）',
+    idc.status3DExtra.length === 0, idc.status3DExtra.slice(0, 3))
+  check('⑩ 3D 路线来源指纹只来自权威三类（backend / bp / mock / none）',
+    idc.routeKey3DExtra.length === 0, idc.routeKey3DExtra.slice(0, 3))
+
+  // ── 7. 整栋楼覆盖：1F ~ 6F 三方一致（人员数 / ID / floorId / zone / routeId / status）──
+  console.log('\n[整栋楼] 1F ~ 6F 逐层三方一致（后端 / 2D / 3D）')
+  idc.perFloor.forEach((f) => {
+    check(`${f.floor}：人员数量三方一致（${f.backend} 人）`,
+      f.backend > 0 && f.backend === f.twoD && f.backend === f.threeD, f)
+    check(`${f.floor}：人员 ID 三方一致`, f.idsSame2D && f.idsSame3D, f)
+    check(`${f.floor}：zone 三方一致`, f.zoneMismatch === 0, f)
+    check(`${f.floor}：routeId 三方一致`, f.routeMismatch === 0, f)
+    check(`${f.floor}：status 三方一致`, f.statusMismatch === 0, f)
+  })
+  check('整栋楼 6 层全部有人员进入数据链（1F~6F）',
+    idc.perFloor.length === 6 && idc.perFloor.every((f) => f.backend > 0),
+    idc.perFloor.map((f) => [f.floor, f.backend, f.twoD, f.threeD]))
+  check('每层都出现多个人员区域（zone 覆盖不是单一火源区）',
+    idc.perFloor.every((f) => f.zones.length > 0)
+    && new Set(idc.perFloor.flatMap((f) => f.zones)).size > 1,
+    idc.perFloor.map((f) => [f.floor, f.zones]))
 
   check('无 JS 运行时错误', consoleErrors.length === 0, consoleErrors.slice(0, 2))
 

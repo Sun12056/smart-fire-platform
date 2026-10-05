@@ -18,6 +18,7 @@ import {
   isCanonicalPerson, routeIdBelongsToPlan, personZoneKey,
   positionOf, progressOf, routePointsOf, floorIdOf, zoneOf, buildingIdOf,
   RETAINED_CANDIDATES, RETAINED_HOLD_PROGRESS, isRetainedCandidate, pickRetainedCandidates,
+  personInLocation, countPersonsInLocation,
 } from './personRuntime.js'
 
 let pass = 0, fail = 0
@@ -178,6 +179,53 @@ const a2 = JSON.stringify(normalizePersonRuntime(backendPerson))
 check('同一输入规范化结果稳定（无随机/无时间戳）', a1 === a2)
 check('重复规范化不放大数据（无引用泄漏）',
   normalizePersonRuntime(dto).routePoints !== dto.routePoints)
+
+// ── 8. P1.6.1 空间身份统一：旧别名只读派生，不得产生第二套权威身份 ──
+console.log('\n[7] P1.6.1 空间身份统一（buildingId / floorId / zone）')
+const legacyShape = { id: 'T200', building: '3号楼', floor: '4F', area: 'C区', x: 120, y: 90 }
+const nb = normalizePersonRuntime(legacyShape)
+check('旧别名 building / floor / area 派生为统一字段',
+  nb.buildingId === 'B003' && nb.floorId === '4F' && nb.zone === 'C区', [nb.buildingId, nb.floorId, nb.zone])
+check('position 与 x / y 同源（别名由统一字段派生）',
+  nb.position.x === nb.x && nb.position.y === nb.y, [nb.position, nb.x, nb.y])
+
+// 冲突输入：统一字段优先，旧别名不得反过来覆盖权威身份（禁止第二套权威数据）
+const conflict = normalizePersonRuntime({
+  id: 'T201', buildingId: 'B003', floorId: '5F', zone: 'A区',
+  building: '1号楼', floor: '2F', area: 'D区', x: 10, y: 20,
+})
+check('统一字段优先：buildingId / floorId / zone 不被旧别名覆盖',
+  conflict.buildingId === 'B003' && conflict.floorId === '5F' && conflict.zone === 'A区',
+  [conflict.buildingId, conflict.floorId, conflict.zone])
+check('旧别名随统一字段重算，保持可读兼容',
+  conflict.building === '3号楼' && conflict.floor === '5F' && conflict.area === 'A区',
+  [conflict.building, conflict.floor, conflict.area])
+
+// personInLocation 是 P1.6.1 里 2D / 3D 各视图共用的唯一空间身份口径
+const floorPool = [
+  { id: 'T210', buildingId: 'B003', floorId: '1F', zone: 'A区', status: 'evacuating' },
+  { id: 'T211', buildingId: 'B003', floorId: '2F', zone: 'A区', status: 'evacuating' },
+  { id: 'T212', buildingId: 'B003', floorId: '6F', zone: '走廊', status: 'evacuating' },
+  legacyShape,
+]
+check('personInLocation 按 buildingId + floorId 命中同一楼层的不同区域',
+  personInLocation(floorPool[0], { buildingId: 'B003', floorId: '1F' }))
+check('跨楼层不命中', !personInLocation(floorPool[0], { buildingId: 'B003', floorId: '2F' }))
+check('跨楼栋不命中', !personInLocation(floorPool[0], { buildingId: 'B001', floorId: '1F' }))
+check('zone 不一致不命中', !personInLocation(floorPool[0], { floorId: '1F', zone: 'B区' }))
+check('旧别名形态的人员同样能被统一口径命中（兼容回退）',
+  personInLocation(legacyShape, { buildingId: 'B003', floorId: '4F', zone: 'C区' }))
+check('countPersonsInLocation 与逐个判定口径一致',
+  countPersonsInLocation(floorPool, { buildingId: 'B003', floorId: '1F' }) === 1
+  && countPersonsInLocation(floorPool, { buildingId: 'B003' }) === 4
+  && countPersonsInLocation(floorPool, { buildingId: 'B003', zone: 'A区' }) === 2,
+  countPersonsInLocation(floorPool, { buildingId: 'B003' }))
+
+// progress 恒在 0~1（8. 进度范围约束）
+const clampIn = progressOf({ progress: 2.5 })
+const clampNeg = progressOf({ progress: -1 })
+const clampOk = progressOf({ progress: 0.42 })
+check('progress 越界收敛到 0~1', clampIn === 1 && clampNeg === 0 && clampOk === 0.42, [clampIn, clampNeg, clampOk])
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`)
 if (fail) process.exit(1)

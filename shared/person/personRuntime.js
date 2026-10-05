@@ -168,7 +168,9 @@ export function normalizePersonRuntime(raw, ctx = {}) {
   if (typeof r.waypoint === 'number' && Number.isFinite(r.waypoint)) out.waypoint = r.waypoint
   if (Array.isArray(r.route)) out.route = r.route.slice()
   // ── 旧只读别名（由统一字段派生；旧组件 / SVG 模板仍在用）──
-  const name = buildingNameOf(r, ctx)
+  // ⚠️ 别名只能跟着统一字段走：即使源对象同时给了冲突的 building / floor / area，
+  //    也必须以 buildingId / floorId / zone 为准（禁止旧别名反向成为第二套权威身份）
+  const name = BUILDING_ID_TO_NAME[out.buildingId] || buildingNameOf(r, ctx)
   if (name) out.building = name
   if (out.floorId) out.floor = out.floorId
   if (out.zone) out.area = out.zone
@@ -235,6 +237,35 @@ export function isCanonicalPerson(p) {
 export function routeIdBelongsToPlan(routeId, buildingPlanId) {
   if (!routeId || !buildingPlanId) return false
   return String(routeId) === String(buildingPlanId) || String(routeId).startsWith(`${buildingPlanId}:`)
+}
+
+/**
+ * 人员空间身份判定（P1.6.1：2D / 3D 各视图共用的唯一口径）
+ *   统一以 buildingId / floorId / zone 判定；旧别名 building / floor / area 只读兼容。
+ * @param {object} p 人员对象（store 里的统一契约对象）
+ * @param {{buildingId?:string, building?:string, floorId?:string, zone?:string}} loc 目标位置（未提供的一侧不参与判定）
+ */
+export function personInLocation(p, loc = {}) {
+  if (!p || typeof p !== 'object') return false
+  const { buildingId, building, floorId, zone } = loc || {}
+  if (floorId !== undefined && floorId !== null && floorId !== '') {
+    if (String(floorIdOf(p)) !== String(floorId)) return false
+  }
+  if (zone !== undefined && zone !== null && zone !== '') {
+    if (String(zoneOf(p)) !== String(zone)) return false
+  }
+  if (buildingId || building) {
+    const bid = String(buildingIdOf(p))
+    const okId = Boolean(bid && String(buildingId) === bid)
+    const okName = building ? String(p.building || '') === String(building) : false
+    if (!okId && !okName) return false
+  }
+  return true
+}
+
+/** 统计落在指定位置的人员数（同 personInLocation 口径） */
+export function countPersonsInLocation(list, loc = {}) {
+  return (Array.isArray(list) ? list : []).filter((p) => personInLocation(p, loc)).length
 }
 
 /** 人员归属 key：`${floorId}:${zone}`（与 buildingEvacuationTypes.zoneKeyOf 同构） */

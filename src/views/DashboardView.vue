@@ -1137,6 +1137,8 @@ import {
 } from '../mock/floorPlanData'
 // 路网调试层必须与寻路同一张图（shared/evacuation 拓扑）
 import { getFloorTopology } from '../mock/routeGraph'
+// P1.6.1：人员的「楼层 / 区域 / 楼栋」判定统一走契约 helper（buildingId / floorId / zone）
+import { personInLocation, countPersonsInLocation } from '../../shared/person/personRuntime.js'
 
 const store = useFireStore()
 const router = useRouter()
@@ -1296,7 +1298,7 @@ function dispatchRescue() {
 }
 // 滞留人员所在区域汇总（如 "5F A区 + C区"）
 const strandedZoneText = computed(() => {
-  const zones = store.strandedPersons.map((p) => `${p.floor} ${p.zone}`)
+  const zones = store.strandedPersons.map((p) => `${p.floorId || p.floor} ${p.zone}`)
   return zones.length ? zones.join(' + ') : '—'
 })
 // 顶层流程文案（供 stepper / 徽标使用）— 六阶段模型
@@ -1323,7 +1325,7 @@ const fireRoomDef = computed(() => {
 const fireAlertZonePeople = computed(() => {
   const fe = store.fireEvent
   if (!fe || !currentBuilding.value || fe.building !== currentBuilding.value.name) return 0
-  return store.persons.filter((p) => p && p.floor === fe.floor && (p.zone || p.area) === fe.area).length
+  return countPersonsInLocation(store.persons, { floorId: fe.floor, zone: fe.area })
 })
 // 火源区域可用疏散方案（routeMatrix 同源，绝不为凑数造假）
 // ⚠️ 只读展示：火源区在当前整栋楼方案里的那条路线（不再使用 routeMatrix.perZone 做决策）
@@ -1422,7 +1424,7 @@ function floorNote(floorId) {
 // ============ 人员感知 ============
 function buildingPersonCount(bname) {
   if (!bname) return 0
-  return (store.persons || []).filter(p => p && p.building === bname).length
+  return countPersonsInLocation(store.persons, { building: bname })
 }
 const riskCount = computed(() =>
   (store.riskAreas || []).filter(r => r && r.building === currentBuilding.value?.name).length
@@ -1430,8 +1432,12 @@ const riskCount = computed(() =>
 const focusFloor = computed(() => {
   if (store.fireEvent && store.fireEvent.building === currentBuilding.value?.name) return store.fireEvent.floor
   const counts = {}
-  ;(store.persons || []).forEach(p => {
-    if (p && p.building === currentBuilding.value?.name) counts[p.floor] = (counts[p.floor] || 0) + 1
+  ;(store.persons || []).forEach((p) => {
+    if (!personInLocation(p, {
+      buildingId: currentBuilding.value ? currentBuilding.value.id : '',
+      building: currentBuilding.value ? currentBuilding.value.name : '',
+    })) return
+    counts[p.floorId] = (counts[p.floorId] || 0) + 1
   })
   let max = 0, f = '-'
   Object.entries(counts).forEach(([k, v]) => { if (v > max) { max = v; f = k } })
@@ -1445,27 +1451,39 @@ const focusArea = computed(() => {
 const radarPersonList = computed(() => {
   if (!selectedPerson.value) return []
   const p = selectedPerson.value
-  const zone = p.zone || p.area
-  return (store.persons || []).filter(x =>
-    x && x.building === currentBuilding.value?.name &&
-    x.floor === p.floor &&
-    (x.zone || x.area) === zone
-  )
+  return (store.persons || []).filter((x) => personInLocation(x, {
+    buildingId: currentBuilding.value ? currentBuilding.value.id : '',
+    building: currentBuilding.value ? currentBuilding.value.name : '',
+    floorId: p.floorId || p.floor,
+    zone: p.zone || p.area,
+  }))
 })
 
+// P1.6.1：人员空间身份统一从 buildingId / floorId / zone 判定（旧别名 building / floor / area 由统一字段派生，仅兼容）
 function getPersonsForFloor(floorId, limit = 10) {
   const fe = store.fireEvent
-  const list = store.persons.filter((p) => p && !p._hide && p.floor === floorId && p.building === (currentBuilding.value ? currentBuilding.value.name : p.building))
+  const loc = {
+    buildingId: currentBuilding.value ? currentBuilding.value.id : '',
+    building: currentBuilding.value ? currentBuilding.value.name : '',
+    floorId,
+  }
+  const list = store.persons.filter((p) => personInLocation(p, loc))
   const fireZone = fe && currentBuilding.value && fe.building === currentBuilding.value.name ? fe.floor : null
   if (fireZone === floorId) return list.slice(0, 14)
   return list.slice(0, limit)
 }
 function getPersonCount(floorId) {
-  return store.persons.filter((p) => p && !p._hide && p.floor === floorId && p.building === (currentBuilding.value ? currentBuilding.value.name : p.building)).length
+  return countPersonsInLocation(store.persons, {
+    buildingId: currentBuilding.value ? currentBuilding.value.id : '',
+    building: currentBuilding.value ? currentBuilding.value.name : '',
+    floorId,
+  })
 }
 function getPersonCountInArea(dev) {
   if (!dev) return 0
-  return store.persons.filter((p) => p && !p._hide && p.building === dev.building && p.floor === dev.floorId && (p.zone || p.area) === dev.area).length
+  return countPersonsInLocation(store.persons, {
+    buildingId: dev.buildingId || '', building: dev.building || '', floorId: dev.floorId, zone: dev.zone || dev.area,
+  })
 }
 function getPersonStatus(p) {
   return p.status === 'warning' ? 'person-warning' : 'person-normal'
@@ -1689,9 +1707,12 @@ function emergencyHighlight(device) {
 
 function showPerception(device) {
   if (!device) return
-  const persons = (store.persons || []).filter(p =>
-    p && p.building === currentBuilding.value?.name && p.floor === device.floorId && (p.zone || p.area) === device.area
-  )
+  const persons = (store.persons || []).filter((p) => personInLocation(p, {
+    buildingId: currentBuilding.value ? currentBuilding.value.id : '',
+    building: currentBuilding.value ? currentBuilding.value.name : '',
+    floorId: device.floorId,
+    zone: device.zone || device.area,
+  }))
   if (persons.length > 0) {
     selectedPerson.value = persons[0]
   } else {
@@ -1747,7 +1768,7 @@ const expandedSummary = computed(() =>
 function floorPersonMotion(floorId) {
   const b = currentBuilding.value
   if (!b) return { moving: 0, static: 0, risk: 0 }
-  const ps = (store.persons || []).filter((p) => p && p.building === b.name && p.floor === floorId)
+  const ps = (store.persons || []).filter((p) => personInLocation(p, { buildingId: b.id, building: b.name, floorId }))
   return {
     moving: ps.filter((p) => p && p.movementType === 'moving').length,
     static: ps.filter((p) => p && p.movementType === 'static').length,

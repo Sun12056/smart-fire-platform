@@ -383,6 +383,12 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import * as echarts from 'echarts'
 import { useFireStore } from '../stores/fireStore'
+// P1.6.1：本视图是「人员感知平面图」，房间矩形是本页自己的展示版式（viewBox 800×420），
+// 而人员权威坐标来自后端 / mock 的平面图坐标空间（floorPlanData: 560×300）。
+// 因此这里做的是与 3D svgToStand 同性质的「视图坐标变换」——只读统一字段 position，
+// 绝不重算路线、进度或速度，也不回写 store。
+import { SVG_W as PLAN_W, SVG_H as PLAN_H } from '../mock/floorPlanData.js'
+import { positionOf, BUILDING_NAME_TO_ID } from '../../shared/person/personRuntime.js'
 
 const store = useFireStore()
 
@@ -464,24 +470,40 @@ function resolveZoneName(token, type) {
   return fallback ? fallback.name : zones[0].name
 }
 
-// 雷达局部坐标(20~80) → 映射到所属区域矩形内部（人员点位随楼层分布）
-function projectToZone(p, zone) {
-  const nx = Math.min(1, Math.max(0, ((typeof p.x === 'number' ? p.x : 50) - 20) / 60))
-  const ny = Math.min(1, Math.max(0, ((typeof p.y === 'number' ? p.y : 50) - 20) / 60))
+/**
+ * 平面图权威坐标 → 本视图展示坐标（只读 view 变换，单向）
+ *   后端 / mock 的人员坐标统一走 personRuntime.positionOf()（position || x/y 别名），
+ *   再按平面图坐标系整体等比缩放到本页房间版式区域 —— 与 3D 的 svgToStand 是同一类变换，
+ *   ⚠️ 不做任何「第二次位置推导」：不算路线、不算速度、不回写 store。
+ */
+const VIEW_BAND = { x: 20, y: 20, w: 760, h: 380 }
+function projectToView(p) {
+  const pos = positionOf(p)
+  if (!pos) return null
+  const nx = Math.min(1, Math.max(0, pos.x / PLAN_W))
+  const ny = Math.min(1, Math.max(0, pos.y / PLAN_H))
   return {
-    x: Math.round(zone.x + 12 + nx * (zone.w - 24)),
-    y: Math.round(zone.y + 16 + ny * (zone.h - 32)),
+    x: Math.round(VIEW_BAND.x + nx * VIEW_BAND.w),
+    y: Math.round(VIEW_BAND.y + ny * VIEW_BAND.h),
   }
 }
 
+/** 楼栋判定：统一字段 buildingId 优先，旧别名 building（中文名）仅作兼容回退 */
+function inBuilding(p, buildingName, buildingId) {
+  const pid = String(p.buildingId || p.building || '')
+  return (buildingId && pid === String(buildingId)) || pid === String(buildingName)
+}
+
 // 楼层按钮列表（含每楼层实时人数标签）
+// P1.6.1：按统一字段 buildingId / floorId 统计
 const floorOptions = computed(() => {
   const building = selectedBuildingName.value
+  const buildingId = BUILDING_NAME_TO_ID[building] || ''
   const floors = FLOOR_MAP[building] || allFloors
   const list = Array.isArray(store.persons) ? store.persons : []
   return floors.map((floor) => ({
     floor,
-    count: list.filter((p) => p && p.building === building && p.floor === floor).length,
+    count: list.filter((p) => p && inBuilding(p, building, buildingId) && String(p.floorId || p.floor || '') === String(floor)).length,
   }))
 })
 
@@ -501,19 +523,23 @@ function onFloorSelect(floor) {
 }
 
 /* ==================== 当前楼层人员（按楼栋+楼层过滤并投影到平面图） ==================== */
+// P1.6.1：过滤一律用统一字段 buildingId / floorId / zone（旧别名 building / floor / area 仅兼容回退）
 const currentFloorPersons = computed(() => {
   const type = currentLayoutType()
   const building = selectedBuildingName.value
+  const buildingId = BUILDING_NAME_TO_ID[building] || ''
   const floor = selectedFloor.value
   const zones = layoutZonesOf(type)
   const list = Array.isArray(store.persons) ? store.persons : []
   const out = []
   for (const p of list) {
-    if (!p || p.building !== building || p.floor !== floor) continue
-    const zname = resolveZoneName(p.zone, type)
+    if (!p || !inBuilding(p, building, buildingId)) continue
+    if (String(p.floorId || p.floor || '') !== String(floor)) continue
+    const zname = resolveZoneName(p.zone || p.area, type)
     const zone = zones.find((z) => z.name === zname)
     if (!zone) continue
-    const pos = projectToZone(p, zone)
+    const pos = projectToView(p)
+    if (!pos) continue
     out.push({
       ...p,
       x: pos.x,

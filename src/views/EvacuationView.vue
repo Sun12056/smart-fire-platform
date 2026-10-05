@@ -447,6 +447,8 @@ import { useDemoStore } from '../stores/demoStore'
 import { dataSource } from '../api'
 import { directionMap, directionAngle, floorOptions } from '../mock/evacuation'
 import OperationLog from '../components/OperationLog.vue'
+// P1.6.1：人员「楼层 / 区域 / 楼栋」判定统一走契约 helper（buildingId / floorId / zone）
+import { countPersonsInLocation } from '../../shared/person/personRuntime.js'
 
 const fireStore = useFireStore()
 const demoStore = useDemoStore()
@@ -539,20 +541,21 @@ const statusLabel = computed(() => {
 
 // 疏散区域人数：当前选中疏散设备所在区域（building+floor+zone）的人员数
 // 区域内无人（如楼梯间疏散灯）时回落为该楼层总人数
+// P1.6.1：人员按统一字段 buildingId / floorId / zone 计数（与 2D/3D 同一口径）
 const evacFloorPersons = computed(() => {
   const dev = fireStore.devices.find((d) => d.id === currentDeviceId.value)
   if (!dev) return 0
-  const building = dev.building || EVAC_BUILDING
-  const floor = dev.floor || currentFloor.value
-  const floorPersons = (fireStore.persons || []).filter(
-    (p) => p && p.building === building && p.floor === floor
-  )
-  const zone = dev.area || ''
-  if (zone) {
-    const zonePersons = floorPersons.filter((p) => p.zone === zone)
-    if (zonePersons.length > 0) return zonePersons.length
+  const loc = {
+    buildingId: dev.buildingId || '', building: dev.building || EVAC_BUILDING,
+    floorId: dev.floorId || dev.floor || currentFloor.value,
   }
-  return floorPersons.length
+  const floorCount = countPersonsInLocation(fireStore.persons, loc)
+  const zone = dev.zone || dev.area || ''
+  if (zone) {
+    const zoneCount = countPersonsInLocation(fireStore.persons, { ...loc, zone })
+    if (zoneCount > 0) return zoneCount
+  }
+  return floorCount
 })
 
 // 保持模板变量名不变的兼容对象

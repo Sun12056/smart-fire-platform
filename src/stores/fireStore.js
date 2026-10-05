@@ -296,6 +296,10 @@ export const useFireStore = defineStore('fire', () => {
         delete p.evacuating
         delete p.retained
         delete p.rescued
+        // P1.6.1：_evac / _evacDone 是 mock 本地疏散运行态，复位时必须一并清掉，
+        // 否则 demo 模式下 3D（路线优先级 ②mock _evac）会残留本地模拟路线
+        delete p._evac
+        delete p._evacDone
         p.routePoints = []
         p.progress = 0
         p.routeId = null
@@ -980,9 +984,14 @@ export const useFireStore = defineStore('fire', () => {
     if (!fe) return
     stopEvacuationSim()
     addOperationLog('启动智能疏散', '演示流程', '整栋楼多楼层同步疏散', 'warning')
-
-    // ── 整栋楼疏散（scope=BUILDING）：每个人员按自己 floorId+zone 的路线撤离 ──
-    // 火灾只决定路线怎么绕开火区，不决定「谁参与疏散」—— 整栋楼有人区域全部纳入。
+    // P1.6.1：demo 模式下人员的路线 / 位置 / 进度 / 状态一律以后端 WebSocket 广播为唯一权威。
+    // ⚠️ 必须在写任何本地运行态之前返回 —— 一旦本地写 routeId / status / _evac，
+    //    就会与后端 PersonRuntime 形成「两套互相竞争的位置来源」（2D / 3D 只消费后端人员快照）。
+    if (dataSource.isDemo) {
+      evacRun.value = true
+      return true
+    }
+    // 以下为 mock / 离线模式的本地模拟（p._evac = 本地运行态，非权威数据）
     const bp = activeBuildingPlan.value
     if (!bp) return false
     // 统一字段：按 buildingId 判定参与范围（与后端 PersonRuntime 同一个 id / 同一套字段）
@@ -1028,14 +1037,7 @@ export const useFireStore = defineStore('fire', () => {
         total++
       }
     })
-    // P1.6.1：demo 模式（后端状态机驱动）下，人员位置 / 进度 / 滞留判定一律以后端广播为准，
-    // 前端不再并行跑自己的疏散模拟（否则 2D/3D 与后端坐标分裂）。
-    if (dataSource.isDemo) {
-      stopEvacuationSim()
-      evacRun.value = true
-      return true
-    }
-    // P2 确定性滞留（mock / 离线模式）：与后端共用同一份固定候选名单 RETAINED_CANDIDATES，
+    // ── 以下仅 mock / 离线模式：P2 确定性滞留，与后端共用同一份固定候选名单 RETAINED_CANDIDATES ──
     // 只允许 evacuating → stranded —— 严禁把已撤离或未参与疏散的人重新标记为滞留，
     // 也不再按「火源区第一个 / C区第一个」这种顺序取人（否则同一份场景每次跑出来的人不一样）
     const strandedPicks = pickRetainedCandidates(
@@ -1072,10 +1074,13 @@ export const useFireStore = defineStore('fire', () => {
     const floorPersons = asArray(persons.value)
       .filter((p) => p && (p.buildingId || fireBuildingId(p.building)) === feBuildingId)
     const stranded = floorPersons.filter((p) => p._stranded)
+    // P1.6.1：滞留名单同样携带统一空间身份（buildingId / floorId / zone），2D 只读统一字段
     strandedPersons.value = stranded.map((p) => ({
       id: p.id,
       name: p.name,
+      buildingId: p.buildingId,
       building: p.building,
+      floorId: p.floorId,
       floor: p.floor,
       zone: p.zone,
       area: p.area,

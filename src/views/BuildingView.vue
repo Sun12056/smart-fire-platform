@@ -406,6 +406,8 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useFireStore } from '../stores/fireStore'
 import BuildingDigitalTwin from '../components/BuildingDigitalTwin.vue'
+// P1.6.1：人员「楼层 / 区域 / 楼栋」判定统一走契约 helper（buildingId / floorId / zone）
+import { countPersonsInLocation } from '../../shared/person/personRuntime.js'
 
 const store = useFireStore()
 const router = useRouter()
@@ -430,10 +432,12 @@ const selectedZoneId = computed(() => store.dashboardView.selectedZone)
 
 // 底部状态栏
 const statusPersonsInZone = computed(() => {
-  const b = selectedBld.value ? selectedBld.value.name : null
-  return (store.persons || []).filter(
-    (p) => p.building === b && p.floor === selectedFloorId.value && (p.zone || p.area) === selectedZoneId.value
-  ).length
+  return countPersonsInLocation(store.persons, {
+    buildingId: selectedBld.value ? selectedBld.value.id : '',
+    building: selectedBld.value ? selectedBld.value.name : '',
+    floorId: selectedFloorId.value,
+    zone: selectedZoneId.value,
+  })
 })
 const statusDevices = computed(() => {
   const b = selectedBld.value ? selectedBld.value.name : null

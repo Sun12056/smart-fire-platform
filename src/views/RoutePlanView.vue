@@ -276,6 +276,8 @@ import { useFireStore } from '../stores/fireStore'
 import { useDemoStore } from '../stores/demoStore'
 import { dataSource } from '../api'
 import { getFloorTopology, WALLS } from '../mock/routeGraph'
+// P1.6.1：人员「楼层 / 区域 / 楼栋」判定统一走契约 helper（buildingId / floorId / zone）
+import { countPersonsInLocation, BUILDING_NAME_TO_ID } from '../../shared/person/personRuntime.js'
 
 const store = useFireStore()
 const demoStore = useDemoStore()
@@ -408,10 +410,14 @@ function isFireZone(zone) {
   return isRouteFloorOnFire.value && store.fireEvent.area === zone
 }
 
+// P1.6.1：人员按统一字段 buildingId / floorId / zone 计数（与 2D/3D 同一口径）
 function personCount(zone) {
-  return store.persons.filter(
-    (p) => p.building === currentBuildingName.value && p.floor === routeFloorId.value && (p.zone || p.area) === zone
-  ).length
+  return countPersonsInLocation(store.persons, {
+    buildingId: BUILDING_NAME_TO_ID[currentBuildingName.value] || '',
+    building: currentBuildingName.value,
+    floorId: routeFloorId.value,
+    zone,
+  })
 }
 
 function onBuildingChange() {

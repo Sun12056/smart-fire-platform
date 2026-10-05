@@ -123,13 +123,24 @@ export class PersonLayer3D {
    * 指纹一律携带「权威 routeId」（backend:<routeId>:<点数> / bp:<方案id>:<routeId>），
    * 便于校验 2D / 3D / 后端使用的是同一条路线。
    */
+  /**
+   * mock 本地疏散运行态 p._evac（P1.6.1）：
+   *   mock 模式才有 —— p._evac 是 store 沿合法路线推进的本地模拟点列；
+   *   demo / api 模式不存在该字段（路由/位置/进度一律来自后端 snapshot / tick），
+   *   即使历史残留也必须忽略，否则 3D 会出现「本地模拟」与后端权威并存的第二套位置来源。
+   */
+  _mockRuntime(store, p) {
+    if (store && store.demoMode) return null
+    const ev = p._evac
+    return ev && Array.isArray(ev.pts) && ev.pts.length > 1 ? ev : null
+  }
+
   _routeKey(p, store) {
     if (Array.isArray(p.routePoints) && p.routePoints.length > 1) {
       return `backend:${p.routeId || 'none'}:${p.routePoints.length}`
     }
-    if (p._evac && Array.isArray(p._evac.pts) && p._evac.pts.length > 1) {
-      return `mock:${p._evac.pts.length}:${p._evac.pts[0].x}`
-    }
+    const ev = this._mockRuntime(store, p)
+    if (ev) return `mock:${ev.pts.length}:${ev.pts[0].x}`
     // 整栋楼方案（authoritative）：buildingPlanId + 该人员 floor+zone 的路线
     const bp = store.activeBuildingPlan
     if (bp) {
@@ -156,15 +167,16 @@ export class PersonLayer3D {
       const pts = polylineFromSvg(this.model, p.routePoints, p.route || [], PERSON_Y)
       if (pts.length > 1) return this._pack(pts, `backend:${p.routeId || 'none'}:${pts.length}`)
     }
-    // ② mock 运行时路线（store 沿合法路线推进的点列，同层）
-    if (p._evac && Array.isArray(p._evac.pts) && p._evac.pts.length > 1) {
+    // ② mock 运行时路线（store 沿合法路线推进的点列，同层；demo / api 模式不存在）
+    const ev = this._mockRuntime(store, p)
+    if (ev) {
       const pts = polylineFromSvg(
         this.model,
-        p._evac.pts.map((q) => ({ x: q.x, y: q.y, floorId: p.floorId || p.floor })),
+        ev.pts.map((q) => ({ x: q.x, y: q.y, floorId: p.floorId || p.floor })),
         [],
         PERSON_Y,
       )
-      if (pts.length > 1) return this._pack(pts, `mock:${p._evac.pts.length}:${p._evac.pts[0].x}`)
+      if (pts.length > 1) return this._pack(pts, `mock:${ev.pts.length}:${ev.pts[0].x}`)
     }
     // ③ 整栋楼方案（未确认前的 A/B/C 预览）：activeBuildingPlanId 唯一决定
     //    ⚠️ 不读 store.routeMatrix.perZone —— 它只是只读兼容投影，不能驱动 3D 人员路线
