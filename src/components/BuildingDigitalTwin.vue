@@ -177,8 +177,17 @@ watch(() => store.selectedBuilding, () => {
 watch(() => store.persons, () => persons && persons.update(store), { deep: false })
 watch(() => store.devices, () => em && em.update(store), { deep: false })
 watch(() => store.routePlans, () => { route && route.update(store); persons && persons.update(store) }, { deep: true })
-// A/B/C 切换：2D 平面图与 3D 人员跟随同一条路线（activeRoutePlanId 唯一驱动）
+// P1.7.3-B4-01：3D 当前方案的**直接权威 = fireStore.activeBuildingPlan**
+// 之前全靠「syncLegacyRouteState 顺手改了 activeRoutePlanId / routePlans」的副作用刷新；
+// 现在直接订阅方案本身（id + 方案对象），activeRoutePlanId 不再驱动 3D 方案切换。
+watch(() => [store.activeBuildingPlanId, store.activeBuildingPlan], () => {
+  route && route.update(store)
+  persons && persons.update(store)
+})
+// activeRoutePlanId：仅保留「没有整栋楼方案时」的 legacy 单路线兜底刷新，
+// 不再是 3D 方案切换的权威触发源（P1.7.3-B4-01）
 watch(() => store.activeRoutePlanId, () => {
+  if (store.activeBuildingPlan) return
   route && route.update(store)
   persons && persons.update(store)
 })

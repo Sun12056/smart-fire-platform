@@ -1,7 +1,8 @@
 // RouteLayer3D · 疏散路线（A/B/C 方案切换 + CatmullRomCurve3 + TubeGeometry）
 // ────────────────────────────────────────────────
 // 职责：
-//   • 从 store.activeRoutePlanId 读取当前方案
+//   • 当前方案 = store.activeBuildingPlan（P1.7.3-B4-01：直接权威，由 BuildingDigitalTwin watch 驱动）
+//   • legacy store.activeRoutePlanId 仅作为「无整栋楼方案」时的单路线兼容分支，不是权威
 //   • 路线基于 store 路网节点（房间出口→走廊→楼梯→安全出口），严禁直线穿墙
 //   • SVG 平面图坐标 → GLB 世界坐标（BuildingModel.svgToWorld）
 //   • CatmullRomCurve3 + TubeGeometry，绿色 #39FF88，流动贴图
@@ -55,6 +56,8 @@ export class RouteLayer3D {
     }
     const plans = store.routePlans || []
     if (!plans.length) {
+      // 无方案（RESET / 新一轮开始前）：3D 不得继续自称持有旧方案
+      this.currentPlanId = null
       if (this.group.visible) {
         this.group.visible = false
         this.activeCurves = []
