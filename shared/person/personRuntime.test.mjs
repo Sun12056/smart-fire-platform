@@ -221,6 +221,39 @@ check('countPersonsInLocation 与逐个判定口径一致',
   && countPersonsInLocation(floorPool, { buildingId: 'B003', zone: 'A区' }) === 2,
   countPersonsInLocation(floorPool, { buildingId: 'B003' }))
 
+// ── 9. P1.7.3-B3：canonical 与旧别名冲突时，必须以 canonical 为准 ──
+console.log('\n[9] B3 canonical 优先（旧别名不得成为第二权威）')
+const b3Conflict = {
+  id: 'T900',
+  buildingId: 'B003', building: '2号楼',
+  floorId: '5F', floor: '4F',
+  zone: 'A区', area: 'D区',
+  status: 'evacuating',
+}
+check('buildingIdOf：冲突时取 canonical（B003，不是别名的 2号楼）',
+  buildingIdOf(b3Conflict) === 'B003', buildingIdOf(b3Conflict))
+check('floorIdOf：冲突时取 canonical（5F，不是别名的 4F）',
+  floorIdOf(b3Conflict) === '5F', floorIdOf(b3Conflict))
+check('zoneOf：冲突时取 canonical（A区，不是别名的 D区）',
+  zoneOf(b3Conflict) === 'A区', zoneOf(b3Conflict))
+const b3Norm = normalizePersonRuntime(b3Conflict)
+check('规范化后别名按 canonical 重算（building=3号楼 / floor=5F / area=A区）',
+  b3Norm.building === '3号楼' && b3Norm.floor === '5F' && b3Norm.area === 'A区',
+  [b3Norm.building, b3Norm.floor, b3Norm.area])
+check('personInLocation：canonical 命中 / 别名口径不命中',
+  personInLocation(b3Conflict, { buildingId: 'B003', floorId: '5F', zone: 'A区' })
+  && !personInLocation(b3Conflict, { buildingId: 'B002', floorId: '4F', zone: 'D区' }))
+check('personInLocation：中文名入参反查 canonical（3号楼命中 / 2号楼不命中）',
+  personInLocation(b3Conflict, { building: '3号楼' }) && !personInLocation(b3Conflict, { building: '2号楼' }))
+check('未知楼栋不得静默归到当前楼栋（9号楼 → 反查为空 → 不命中）',
+  !personInLocation(b3Conflict, { building: '9号楼' }) && !personInLocation(b3Conflict, { buildingId: 'B099' }))
+check('countPersonsInLocation 与 canonical 口径一致（B003=1 / B002=0 / 别名 4F D区=0）',
+  countPersonsInLocation([b3Conflict], { buildingId: 'B003', floorId: '5F', zone: 'A区' }) === 1
+  && countPersonsInLocation([b3Conflict], { buildingId: 'B002' }) === 0
+  && countPersonsInLocation([b3Conflict], { buildingId: 'B003', floorId: '4F', zone: 'D区' }) === 0)
+check('floorIdOf 归一化：数字楼层 5 → 5F（避免 5 与 5F 两套口径）',
+  floorIdOf({ floorId: 5 }) === '5F' && floorIdOf({ floor: '5F' }) === '5F')
+
 // progress 恒在 0~1（8. 进度范围约束）
 const clampIn = progressOf({ progress: 2.5 })
 const clampNeg = progressOf({ progress: -1 })

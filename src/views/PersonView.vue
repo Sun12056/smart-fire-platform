@@ -388,7 +388,10 @@ import { useFireStore } from '../stores/fireStore'
 // 因此这里做的是与 3D svgToStand 同性质的「视图坐标变换」——只读统一字段 position，
 // 绝不重算路线、进度或速度，也不回写 store。
 import { SVG_W as PLAN_W, SVG_H as PLAN_H } from '../mock/floorPlanData.js'
-import { positionOf, BUILDING_NAME_TO_ID } from '../../shared/person/personRuntime.js'
+// P1.7.3-B3：楼层 / 区域 / 楼栋判定统一走 canonical helper
+import {
+  positionOf, BUILDING_NAME_TO_ID, buildingIdOf, floorIdOf, zoneOf,
+} from '../../shared/person/personRuntime.js'
 
 const store = useFireStore()
 
@@ -488,10 +491,14 @@ function projectToView(p) {
   }
 }
 
-/** 楼栋判定：统一字段 buildingId 优先，旧别名 building（中文名）仅作兼容回退 */
+/**
+ * 楼栋判定（P1.7.3-B3）：canonical buildingId 唯一权威，
+ * 旧别名 building（中文名）只在 buildingId 缺失时兜底；冲突时以 canonical 为准。
+ */
 function inBuilding(p, buildingName, buildingId) {
-  const pid = String(p.buildingId || p.building || '')
-  return (buildingId && pid === String(buildingId)) || pid === String(buildingName)
+  const pid = buildingIdOf(p)
+  if (pid) return String(pid) === String(buildingId || BUILDING_NAME_TO_ID[buildingName] || '')
+  return String(p.building || '') === String(buildingName)
 }
 
 // 楼层按钮列表（含每楼层实时人数标签）
@@ -503,7 +510,7 @@ const floorOptions = computed(() => {
   const list = Array.isArray(store.persons) ? store.persons : []
   return floors.map((floor) => ({
     floor,
-    count: list.filter((p) => p && inBuilding(p, building, buildingId) && String(p.floorId || p.floor || '') === String(floor)).length,
+    count: list.filter((p) => p && inBuilding(p, building, buildingId) && floorIdOf(p) === String(floor)).length,
   }))
 })
 
@@ -534,8 +541,8 @@ const currentFloorPersons = computed(() => {
   const out = []
   for (const p of list) {
     if (!p || !inBuilding(p, building, buildingId)) continue
-    if (String(p.floorId || p.floor || '') !== String(floor)) continue
-    const zname = resolveZoneName(p.zone || p.area, type)
+    if (floorIdOf(p) !== String(floor)) continue
+    const zname = resolveZoneName(zoneOf(p), type)
     const zone = zones.find((z) => z.name === zname)
     if (!zone) continue
     const pos = projectToView(p)
@@ -554,8 +561,10 @@ const currentFloorPersons = computed(() => {
 /* ==================== 当前楼层统计（每楼层独立） ==================== */
 const currentFloorStats = computed(() => {
   const ps = currentFloorPersons.value
+  // P1.7.3-B3：设备归属按 canonical（buildingId / floorId）
+  const bid = BUILDING_NAME_TO_ID[selectedBuildingName.value] || ''
   const sensors = (Array.isArray(store.devices) ? store.devices : []).filter(
-    (d) => d && d.building === selectedBuildingName.value && d.floor === selectedFloor.value && d.type === 'radar_sensor'
+    (d) => d && buildingIdOf(d) === bid && floorIdOf(d) === String(selectedFloor.value) && d.type === 'radar_sensor'
   ).length
   return {
     total: ps.length,
@@ -574,8 +583,13 @@ const currentFloorRiskZones = computed(() => {
   const risks = Array.isArray(store.riskAreas) ? store.riskAreas : []
   const out = []
   const seen = new Set()
+  const bid = BUILDING_NAME_TO_ID[building] || ''
   for (const r of risks) {
-    if (!r || r.building !== building || r.floor !== floor) continue
+    // P1.7.3-B3：风险区域 canonical 优先（riskAreas 已带 buildingId / floorId），别名仅兜底
+    if (!r) continue
+    if (r.buildingId || r.floorId) {
+      if (String(r.buildingId || '') !== bid || String(r.floorId || '') !== String(floor)) continue
+    } else if (r.building !== building || r.floor !== floor) continue
     const zname = resolveZoneName(r.zone, type)
     if (!zname || seen.has(zname)) continue
     const zone = zones.find((z) => z.name === zname)

@@ -156,5 +156,33 @@ check('火警楼层 5F 烟感为 warning，其余楼层仍为 normal',
   devicesOnFloor(list, 'B003', '5F').filter((d) => d.type === 'smoke_detector').every((d) => d.status === 'warning')
   && devicesOnFloor(list, 'B003', '1F').filter((d) => d.type === 'smoke_detector').every((d) => d.status === 'normal'))
 
+// ── 7. P1.7.3-B3：canonical 与旧别名冲突时以 canonical 为准 ──
+console.log('\n[7] B3 canonical 优先（设备归属）')
+const devConflict = {
+  id: 'B003-EL-5F-01',
+  type: 'evacuation_light',
+  buildingId: 'B003', building: '2号楼',
+  floorId: '5F', floor: '4F',
+  zone: 'A区', area: 'D区',
+  status: 'emergency', currentMode: 'emergency', direction: 'left', brightness: 100, emergencyFlash: false,
+}
+const devNorm = normalizeDeviceRuntime(devConflict)
+check('设备 canonical 优先：buildingId=B003 / floorId=5F / zone=A区',
+  devNorm.buildingId === 'B003' && devNorm.floorId === '5F' && devNorm.zone === 'A区',
+  [devNorm.buildingId, devNorm.floorId, devNorm.zone])
+check('设备别名随 canonical 重算（building=3号楼 / floor=5F / area=A区）',
+  devNorm.building === '3号楼' && devNorm.floor === '5F' && devNorm.area === 'A区',
+  [devNorm.building, devNorm.floor, devNorm.area])
+check('deviceInBuilding：canonical 命中，别名口径（B002）不命中',
+  deviceInBuilding(devNorm, 'B003') && !deviceInBuilding(devNorm, 'B002'))
+check('deviceInBuilding：按中文名入参反查 canonical（3号楼命中 / 2号楼不命中）',
+  deviceInBuilding(devNorm, '3号楼') && !deviceInBuilding(devNorm, '2号楼'))
+check('deviceOnFloor：只看 canonical floorId（5F 命中 / 别名 4F 不命中）',
+  deviceOnFloor(devNorm, '5F', 'B003') && !deviceOnFloor(devNorm, '4F', 'B003'))
+check('deviceZoneKey：按 canonical 生成（5F:A区，不是 4F:D区）',
+  deviceZoneKey(devNorm) === '5F:A区', deviceZoneKey(devNorm))
+check('未知楼栋不得静默归当前楼栋（B099 / 9号楼 均不命中）',
+  !deviceInBuilding(devNorm, 'B099') && !deviceInBuilding(devNorm, '9号楼'))
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`)
 process.exit(fail ? 1 : 0)

@@ -448,7 +448,10 @@ import { dataSource } from '../api'
 import { directionMap, directionAngle, floorOptions } from '../mock/evacuation'
 import OperationLog from '../components/OperationLog.vue'
 // P1.6.1：人员「楼层 / 区域 / 楼栋」判定统一走契约 helper（buildingId / floorId / zone）
-import { countPersonsInLocation } from '../../shared/person/personRuntime.js'
+// P1.7.3-B3：设备 / 火灾归属同样只认 canonical（buildingId / floorId / zone）
+import {
+  countPersonsInLocation, BUILDING_NAME_TO_ID, buildingIdOf, floorIdOf, zoneOf,
+} from '../../shared/person/personRuntime.js'
 
 const fireStore = useFireStore()
 const demoStore = useDemoStore()
@@ -473,9 +476,11 @@ function selectDirection(dir) {
 }
 
 // 当前楼栋+楼层疏散设备列表（真实层级过滤，不再混入其他楼栋同层设备）
+// P1.7.3-B3：按 canonical buildingId / floorId 过滤（EVAC_BUILDING 只作为展示名 → 反查 id）
+const EVAC_BUILDING_ID = BUILDING_NAME_TO_ID[EVAC_BUILDING] || 'B003'
 const currentFloorDevices = computed(() =>
   fireStore.devices
-    .filter((d) => d.type === 'evacuation_light' && d.building === EVAC_BUILDING && d.floor === currentFloor.value)
+    .filter((d) => d.type === 'evacuation_light' && buildingIdOf(d) === EVAC_BUILDING_ID && floorIdOf(d) === currentFloor.value)
     .sort((a, b) => a.id.localeCompare(b.id))
 )
 
@@ -497,11 +502,13 @@ const currentDevice = computed(() => {
   return new Proxy(dev, {
     get(target, prop) {
       if (prop === 'risk') {
+        // P1.7.3-B3：canonical 三元组匹配（buildingId / floorId / zone），别名不再参与
+        const fe = fireStore.fireEvent
         return !!(
-          fireStore.fireEvent &&
-          fireStore.fireEvent.building === target.building &&
-          fireStore.fireEvent.floor === target.floor &&
-          fireStore.fireEvent.area === target.area
+          fe &&
+          buildingIdOf(fe) === buildingIdOf(target) &&
+          floorIdOf(fe) === floorIdOf(target) &&
+          zoneOf(fe) === zoneOf(target)
         )
       }
       return target[prop]
@@ -510,7 +517,8 @@ const currentDevice = computed(() => {
 })
 
 const fireSimulation = computed(() => !!fireStore.fireEvent)
-const fireLocation = computed(() => fireStore.fireEvent?.area || fireStore.riskAreas[0]?.zone || null)
+// P1.7.3-B3：火源区域读 canonical zone（fe.area 只是只读别名）
+const fireLocation = computed(() => zoneOf(fireStore.fireEvent || {}) || fireStore.riskAreas[0]?.zone || null)
 
 const currentDirectionLabel = computed(() =>
   currentDevice.value ? directionMap[currentDevice.value.direction] : '—'
@@ -546,11 +554,12 @@ const evacFloorPersons = computed(() => {
   const dev = fireStore.devices.find((d) => d.id === currentDeviceId.value)
   if (!dev) return 0
   const loc = {
-    buildingId: dev.buildingId || '', building: dev.building || EVAC_BUILDING,
-    floorId: dev.floorId || dev.floor || currentFloor.value,
+    // P1.7.3-B3：canonical 归属（buildingId / floorId / zone）
+    buildingId: buildingIdOf(dev) || EVAC_BUILDING_ID,
+    floorId: floorIdOf(dev) || currentFloor.value,
   }
   const floorCount = countPersonsInLocation(fireStore.persons, loc)
-  const zone = dev.zone || dev.area || ''
+  const zone = zoneOf(dev)
   if (zone) {
     const zoneCount = countPersonsInLocation(fireStore.persons, { ...loc, zone })
     if (zoneCount > 0) return zoneCount

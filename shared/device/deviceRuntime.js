@@ -114,10 +114,12 @@ export function normalizeDeviceRuntime(raw, ctx = {}) {
     emergencyFlash: emergencyFlashOf(r),
   })
   // ── 旧只读别名（由统一字段派生；旧视图 / 台账组件仍在用）──
-  const name = buildingNameOf(r, context)
+  // P1.7.3-B3：别名必须跟着 canonical 走 —— 即使源对象给了冲突的 building / floor / area，
+  //   也必须以 buildingId / floorId / zone 为准（禁止旧别名反向成为第二套权威身份）
+  const name = BUILDING_ID_TO_NAME[out.buildingId] || buildingNameOf(r, context)
   if (name) out.building = name
   if (out.floorId) out.floor = out.floorId
-  if (out.zone && !out.area) out.area = out.zone
+  if (out.zone) out.area = out.zone
   if (out.type === undefined) out.type = ''
   return out
 }
@@ -152,9 +154,12 @@ export function assignDeviceRuntime(target, source, ctx = {}) {
   if (!target.buildingId) target.buildingId = buildingIdOf(target, ctx)
   if (!target.floorId) target.floorId = floorIdOf(target, ctx)
   if (!target.zone) target.zone = zoneOf(target, ctx)
-  if (target.buildingId && !target.building) target.building = BUILDING_ID_TO_NAME[target.buildingId] || target.building
+  // P1.7.3-B3：别名按 canonical 重算（冲突时以 canonical 为准，不是「缺了才补」）
+  const cname = BUILDING_ID_TO_NAME[target.buildingId]
+  if (cname) target.building = cname
+  else if (!target.building) target.building = buildingNameOf(target, ctx)
   if (target.floorId) target.floor = target.floorId
-  if (target.zone && !target.area) target.area = target.zone
+  if (target.zone) target.area = target.zone
   return target
 }
 

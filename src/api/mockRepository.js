@@ -6,6 +6,8 @@ import { alarms as mockAlarms } from '../mock/alarms'
 import { persons as mockPersons, personStats as mockPersonStats, zoneHeatmap as mockZoneHeatmap } from '../mock/person'
 import { inspectionHistory as mockInspectionHistory } from '../mock/inspection'
 import { buildSeedDevices } from '../mock/deviceSeed'
+// P1.7.3-B3：canonical 归属解析（buildingId / floorId / zone），别名只在 canonical 缺失时兜底
+import { buildingIdOf, floorIdOf, zoneOf } from '../../shared/person/personRuntime.js'
 
 // 会话内可变状态（模拟远端持久化）
 let sessionPlans = []
@@ -26,11 +28,12 @@ function hashSeed(str) {
   return () => { h = Math.imul(h ^ (h >>> 15), 2246822507); h ^= h >>> 13; return (h >>> 0) / 4294967296 }
 }
 
+// P1.7.3-B3：canonical 筛选（buildingId / floorId / zone）—— 旧别名 area 不再作为第二套口径
 function filterByParams(list, params = {}) {
   return list.filter((item) => {
-    if (params.buildingId && item.buildingId !== params.buildingId) return false
-    if (params.floorId && item.floorId !== params.floorId) return false
-    if (params.zone && item.zone !== params.zone && item.area !== params.zone) return false
+    if (params.buildingId && buildingIdOf(item) !== params.buildingId) return false
+    if (params.floorId && floorIdOf(item) !== floorIdOf({ floorId: params.floorId })) return false
+    if (params.zone && zoneOf(item) !== zoneOf({ zone: params.zone })) return false
     if (params.type && item.type !== params.type) return false
     if (params.status && item.status !== params.status) return false
     if (params.controllable !== undefined && params.controllable !== null && String(item.controllable) !== String(params.controllable)) return false

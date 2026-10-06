@@ -211,10 +211,12 @@ export function assignPersonRuntime(target, source, ctx = {}) {
   if (typeof n.rescued === 'boolean') target.rescued = n.rescued
   if (typeof n.waypoint === 'number') target.waypoint = n.waypoint
   if (Array.isArray(n.route)) target.route = n.route
-  // 旧别名跟随统一字段（不反向写回）
-  if (target.buildingId && !target.building) target.building = BUILDING_ID_TO_NAME[target.buildingId] || target.building
+  // P1.7.3-B3：旧别名按 canonical 重算（冲突时以 canonical 为准，不是「缺了才补」），不反向写回
+  const cname = BUILDING_ID_TO_NAME[target.buildingId]
+  if (cname) target.building = cname
+  else if (!target.building) target.building = buildingNameOf(target, ctx)
   if (target.floorId) target.floor = target.floorId
-  if (target.zone && !target.area) target.area = target.zone
+  if (target.zone) target.area = target.zone
   return target
 }
 
@@ -249,16 +251,24 @@ export function personInLocation(p, loc = {}) {
   if (!p || typeof p !== 'object') return false
   const { buildingId, building, floorId, zone } = loc || {}
   if (floorId !== undefined && floorId !== null && floorId !== '') {
-    if (String(floorIdOf(p)) !== String(floorId)) return false
+    // P1.7.3-B3：两侧都归一成 canonical floorId（'5' → '5F'）
+    if (String(floorIdOf(p)) !== String(floorIdOf({ floorId }))) return false
   }
   if (zone !== undefined && zone !== null && zone !== '') {
-    if (String(zoneOf(p)) !== String(zone)) return false
+    if (String(zoneOf(p)) !== String(zoneOf({ zone }))) return false
   }
   if (buildingId || building) {
-    const bid = String(buildingIdOf(p))
-    const okId = Boolean(bid && String(buildingId) === bid)
-    const okName = building ? String(p.building || '') === String(building) : false
-    if (!okId && !okName) return false
+    const bid = buildingIdOf(p)
+    // 期望值也归一到 canonical id（传中文名时按 BUILDING_NAME_TO_ID 反查）；canonical 与别名冲突时以 canonical 为准
+    const wantBid = buildingIdOf({ buildingId, building }) || ''
+    if (bid) {
+      // canonical 有值 → 只认 canonical，禁止旧别名 building 成为第二套权威
+      if (!wantBid || String(wantBid) !== String(bid)) return false
+    } else {
+      // canonical 缺失时才允许按旧别名兜底
+      const okName = building ? String(p.building || '') === String(building) : false
+      if (!okName) return false
+    }
   }
   return true
 }

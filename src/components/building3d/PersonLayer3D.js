@@ -16,7 +16,10 @@
 import * as THREE from 'three'
 import { personColor, seededRand, currentBuildingName } from './building3dUtils.js'
 // 人员统一契约（与后端 / 2D 同一套字段解析规则）
-import { positionOf } from '../../../shared/person/personRuntime.js'
+// P1.7.3-B3：楼栋 / 楼层 / 区域归属一律走 canonical helper（buildingIdOf / floorIdOf / zoneOf）
+import {
+  positionOf, BUILDING_NAME_TO_ID, buildingIdOf, floorIdOf, zoneOf,
+} from '../../../shared/person/personRuntime.js'
 import {
   polylineFromSvg, arcLengths, pointAtArc, svgToStand, PERSON_Y,
 } from './coords.js'
@@ -64,11 +67,16 @@ export class PersonLayer3D {
     if (!this.model.idx.entries.length) return
     const bldName = currentBuildingName(store)
     const bldId = (store.dashboardView || {}).selectedBuildingId
-    // 统一字段过滤：buildingId 为主（与后端 PersonRuntime 同一个 id 空间），楼栋名为兼容回退
-    const list = (store.persons || []).filter((p) => p && (
-      (bldId && String(p.buildingId || '') === String(bldId))
-      || (!bldId && (p.building === bldName || !bldName))
-    ))
+    // P1.7.3-B3：canonical buildingId 唯一权威（与后端 PersonRuntime 同一个 id 空间）；
+    // 只有人员自身完全没有 canonical 时才允许按中文名兜底（别名与 canonical 冲突 → 以 canonical 为准）
+    const wantBldId = bldId ? String(bldId) : (bldName ? BUILDING_NAME_TO_ID[bldName] || '' : '')
+    const list = (store.persons || []).filter((p) => {
+      if (!p) return false
+      const bid = buildingIdOf(p)
+      if (bid || wantBldId) return bid === wantBldId
+      // 只有 p.buildingId 完全缺失时才按旧别名兜底（别名与 canonical 冲突 → 以 canonical 为准）
+      return !p.buildingId && (p.building === bldName || !bldName)
+    })
     const N = Math.min(list.length, MAX)
     this.mesh.count = N
 
@@ -85,9 +93,10 @@ export class PersonLayer3D {
       }
       // 统一字段（后端 / 2D / 3D 同一个 id、同一个 routeId）
       d.id = p.id
-      d.buildingId = p.buildingId || ''
-      d.floorId = p.floorId || p.floor
-      d.zone = p.zone || p.area
+      // P1.7.3-B3：canonical 三元组（别名仅作兜底）
+      d.buildingId = buildingIdOf(p)
+      d.floorId = floorIdOf(p)
+      d.zone = zoneOf(p)
       d.status = p.status
       d.routeId = p.routeId === undefined ? null : p.routeId
       const rt = this._resolveRoute(store, p)
@@ -145,7 +154,7 @@ export class PersonLayer3D {
     const bp = store.activeBuildingPlan
     if (bp) {
       const r = store.buildingRouteOfPerson
-        ? store.buildingRouteOfPerson(bp, { floorId: p.floorId || p.floor, zone: p.zone || p.area })
+        ? store.buildingRouteOfPerson(bp, { floorId: floorIdOf(p), zone: zoneOf(p) })
         : null
       if (r) return `bp:${bp.id}:${r.routeId}`
     }
@@ -172,7 +181,7 @@ export class PersonLayer3D {
     if (ev) {
       const pts = polylineFromSvg(
         this.model,
-        ev.pts.map((q) => ({ x: q.x, y: q.y, floorId: p.floorId || p.floor })),
+        ev.pts.map((q) => ({ x: q.x, y: q.y, floorId: floorIdOf(p) })),
         [],
         PERSON_Y,
       )
@@ -183,14 +192,14 @@ export class PersonLayer3D {
     const bp = store.activeBuildingPlan
     if (bp) {
       const route = store.buildingRouteOfPerson
-        ? store.buildingRouteOfPerson(bp, { floorId: p.floorId || p.floor, zone: p.zone || p.area })
+        ? store.buildingRouteOfPerson(bp, { floorId: floorIdOf(p), zone: zoneOf(p) })
         : null
       if (route && Array.isArray(route.points) && route.points.length > 1) {
         const pts = polylineFromSvg(this.model, route.points, route.nodes || [], PERSON_Y)
         if (pts.length > 1) return this._pack(pts, `bp:${bp.id}:${route.routeId}`)
       }
       // 该人员所属区域没有路线（如走廊已归并）：回退到同层任意一条同方案路线做预览
-      const fallback = (bp.routes || []).find((r) => r && r.floorId === (p.floorId || p.floor))
+      const fallback = (bp.routes || []).find((r) => r && r.floorId === floorIdOf(p))
       if (fallback && Array.isArray(fallback.points) && fallback.points.length > 1) {
         const pts = polylineFromSvg(this.model, fallback.points, fallback.nodes || [], PERSON_Y)
         if (pts.length > 1) return this._pack(pts, `bp:${bp.id}:${fallback.routeId}`)
@@ -226,11 +235,12 @@ export class PersonLayer3D {
   /** 非疏散态：直接取权威平面坐标（统一字段 position，旧别名 x/y 由它派生） */
   _staticPos(p) {
     const pos = positionOf(p)
+    // P1.7.3-B3：落层 / 落区读 canonical（floorId / zone）；_fallbackPos 机制本身保持不变
     if (!pos) {
-      return this._fallbackPos({ zone: p.zone || p.area, floorId: p.floorId || p.floor, id: p.id })
+      return this._fallbackPos({ zone: zoneOf(p), floorId: floorIdOf(p), id: p.id })
     }
-    const v = svgToStand(this.model, pos.x, pos.y, p.floorId || p.floor, PERSON_Y)
-    return v || this._fallbackPos({ zone: p.zone || p.area, floorId: p.floorId || p.floor, id: p.id })
+    const v = svgToStand(this.model, pos.x, pos.y, floorIdOf(p), PERSON_Y)
+    return v || this._fallbackPos({ zone: zoneOf(p), floorId: floorIdOf(p), id: p.id })
   }
 
   /**

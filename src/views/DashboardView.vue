@@ -324,7 +324,7 @@
             @click.stop="selectPerson(p)"
           >
             <!-- 疏散中人员：带路径动画 -->
-            <g :class="'person-evac-' + (p.zone || p.area)">
+            <g :class="'person-evac-' + zoneOf(p)">
               <!-- 正常人员：静态圆 -->
               <circle v-if="!store.evacRun || p.status !== 'evacuating'"
                 :cx="p.x" :cy="p.y" r="6" :fill="personStatusColor(p)" stroke="rgba(255,255,255,0.3)" stroke-width="1" opacity="0.85"/>
@@ -511,7 +511,7 @@
                     :style="{ stroke: store.emergencyStage >= 4 ? '#4CC9F0' : '#4361EE' }"
                   />
                   <g v-for="zr in allZoneRoutes" :key="'zdr-' + zr.zone">
-                    <template v-if="!(store.fireEvent && zr.zone === store.fireEvent.area)">
+                    <template v-if="!(store.fireEvent && zr.zone === zoneOf(store.fireEvent))">
                       <polyline
                         v-if="backupSegments[zr.zone] && backupSegments[zr.zone].length"
                         :points="backupSegments[zr.zone].map(p => p.x + ',' + p.y).join(' ')"
@@ -573,7 +573,7 @@
                   @click.stop="selectPerson(p)"
                 >
                   <!-- 疏散中人员：带路径动画 -->
-                  <g :class="'person-evac-' + (p.zone || p.area)">
+                  <g :class="'person-evac-' + zoneOf(p)">
                     <!-- 正常人员：静态圆 -->
                     <circle v-if="!store.evacRun || p.status !== 'evacuating'"
                       :cx="p.x" :cy="p.y" r="7" :fill="personStatusColor(p)" stroke="rgba(255,255,255,0.3)" stroke-width="1.5" opacity="0.85"/>
@@ -790,7 +790,7 @@
             <div v-for="b in store.buildings" :key="b.id" class="bldg-row" :class="{ cur: b.name === currentBuilding.name }">
               <span class="bldg-dot" :class="b.status"></span>
               <span class="bldg-name">{{ b.name }}</span>
-              <span v-if="store.fireEvent && store.fireEvent.building === b.name" class="bldg-fire">🔥 火警</span>
+              <span v-if="store.fireEvent && buildingIdOf(store.fireEvent) === b.id" class="bldg-fire">🔥 火警</span>
               <span class="bldg-num num-font">{{ b.deviceCount }}</span>
             </div>
           </div>
@@ -1159,11 +1159,25 @@ import {
 // 路网调试层必须与寻路同一张图（shared/evacuation 拓扑）
 import { getFloorTopology } from '../mock/routeGraph'
 // P1.6.1：人员的「楼层 / 区域 / 楼栋」判定统一走契约 helper（buildingId / floorId / zone）
-import { personInLocation, countPersonsInLocation } from '../../shared/person/personRuntime.js'
+// P1.7.3-B3：火灾三元组同样只认 canonical（buildingId / floorId / zone），别名仅供文案展示
+import {
+  personInLocation, countPersonsInLocation, buildingIdOf, floorIdOf, zoneOf,
+} from '../../shared/person/personRuntime.js'
 
 const store = useFireStore()
 const router = useRouter()
 const route = useRoute()
+
+/** 火灾 canonical 三元组（别名冲突时以 canonical 为准） */
+function fireLocOf(fe) {
+  const f = fe || {}
+  return { buildingId: buildingIdOf(f), floorId: floorIdOf(f), zone: zoneOf(f) }
+}
+/** 按 canonical buildingId 定位楼栋（查不到返回 null，禁止按别名静默兜底到当前楼栋） */
+function buildingById(buildingId) {
+  if (!buildingId) return null
+  return (store.buildings || []).find((b) => b && String(b.id) === String(buildingId)) || null
+}
 
 // ============ 楼栋选择 ============
 const selectedBuildingId = ref('B003') // 默认 3号楼
@@ -1242,21 +1256,24 @@ watch(
   (s) => {
     // 火情进入处置阶段（emergencyStage > 0）：自动从楼栋总览跳转到对应楼栋楼层视图
     if (s > 0 && store.fireEvent) {
-      const fb = store.buildings.find((b) => b && b.name === store.fireEvent.building)
+      // P1.7.3-B3：按 canonical buildingId 定位火警楼栋
+      const fb = buildingById(buildingIdOf(store.fireEvent))
       if (fb) selectedBuildingId.value = fb.id
       if (viewMode.value === 'buildings') viewMode.value = 'floors'
     }
     if (s === 2) {
       const fe = store.fireEvent
       if (!fe || !currentBuilding.value) return
-      if (currentBuilding.value.name !== fe.building) {
-        const fb = store.buildings.find((b) => b && b.name === fe.building)
+      const loc = fireLocOf(fe)
+      if (loc.buildingId && loc.buildingId !== String(currentBuilding.value.id)) {
+        const fb = buildingById(loc.buildingId)
         if (fb) selectedBuildingId.value = fb.id
       }
-      zoomToFloorId(fe.floor)
+      zoomToFloorId(loc.floorId)
     } else if (s === 4) {
-      if (store.fireEvent && store.fireEvent.building === (currentBuilding.value ? currentBuilding.value.name : '')) {
-        zoomToFloorId(store.fireEvent.floor)
+      const loc = fireLocOf(store.fireEvent)
+      if (store.fireEvent && loc.buildingId && loc.buildingId === (currentBuilding.value ? String(currentBuilding.value.id) : '')) {
+        zoomToFloorId(loc.floorId)
       }
       // 阶段 4：智能疏散的主视觉是 3D 数字孪生里的人流 —— 回到 3D 总览（3D 组件必须挂载才能看到人员移动）
       viewMode.value = 'buildings'
@@ -1266,9 +1283,10 @@ watch(
       // 该入口会被卸载 —— 用户在界面上找不到也点不到（P1-03）。
       const fe = store.fireEvent
       if (fe) {
-        const fb = store.buildings.find((b) => b && b.name === fe.building)
+        const loc = fireLocOf(fe)
+        const fb = buildingById(loc.buildingId)
         if (fb) selectedBuildingId.value = fb.id
-        zoomToFloorId(fe.floor)
+        zoomToFloorId(loc.floorId)
       }
     }
   }
@@ -1298,10 +1316,11 @@ function handleViewFire() {
   if (!fe) return
   store.dismissFireAlert()
   // 自动切换至火警楼栋并内联展开火警楼层（平面图火灾危险区高亮）
-  const fb = store.buildings.find((b) => b && b.name === fe.building)
+  const loc = fireLocOf(fe)
+  const fb = buildingById(loc.buildingId)
   if (fb) selectedBuildingId.value = fb.id
   if (viewMode.value === 'buildings') viewMode.value = 'floors'
-  zoomToFloorId(fe.floor)
+  zoomToFloorId(loc.floorId)
   if (responseDialogTimer) clearTimeout(responseDialogTimer)
   responseDialogTimer = setTimeout(() => { showFireConfirmDialog.value = true }, 800)
 }
@@ -1369,19 +1388,22 @@ const emgSteps = [
 ]
 // 页面内火情指挥区已删除：火情信息由顶部流程、平面图、右侧信息栏、业务弹窗表达
 
-// 火警楼层房间矩形（按 fireEvent.area 匹配房间 name，动态危险区）
+// 火警楼层房间矩形（P1.7.3-B3：按 canonical zone 匹配房间 name，动态危险区）
 const fireRoomDef = computed(() => {
   const fe = store.fireEvent
   if (!fe || !expandedFloor.value || !currentBuilding.value) return null
-  if (fe.building !== currentBuilding.value.name || fe.floor !== expandedFloor.value.id) return null
-  const room = roomDefsForFloor(fe.floor).find((r) => r && r.name === fe.area)
+  const loc = fireLocOf(fe)
+  if (loc.buildingId !== String(currentBuilding.value.id) || loc.floorId !== expandedFloor.value.id) return null
+  const room = roomDefsForFloor(loc.floorId).find((r) => r && r.name === loc.zone)
   return room || null
 })
 // 火源区域人员数（riskZone 口径，同 fireStore 联动判定）
 const fireAlertZonePeople = computed(() => {
   const fe = store.fireEvent
-  if (!fe || !currentBuilding.value || fe.building !== currentBuilding.value.name) return 0
-  return countPersonsInLocation(store.persons, { floorId: fe.floor, zone: fe.area })
+  if (!fe || !currentBuilding.value) return 0
+  const loc = fireLocOf(fe)
+  if (loc.buildingId !== String(currentBuilding.value.id)) return 0
+  return countPersonsInLocation(store.persons, { buildingId: loc.buildingId, floorId: loc.floorId, zone: loc.zone })
 })
 // 火源区域可用疏散方案（routeMatrix 同源，绝不为凑数造假）
 // ⚠️ 只读展示：火源区在当前整栋楼方案里的那条路线（不再使用 routeMatrix.perZone 做决策）
@@ -1389,7 +1411,8 @@ const fireZoneInfo = computed(() => {
   const fe = store.fireEvent
   const bp = store.activeBuildingPlan
   if (!fe || !bp || !bp.routesByZone) return null
-  return bp.routesByZone[`${fe.floor}:${fe.area}`] || null
+  const loc = fireLocOf(fe)
+  return bp.routesByZone[`${loc.floorId}:${loc.zone}`] || null
 })
 /**
  * 整栋楼方案 · 本层各区域路线（只读投影）
@@ -1411,7 +1434,8 @@ const buildingZoneRoutes = computed(() => {
       distance: Math.round(r.distance || 0),
       estimatedTime: r.estimatedTime,
       personCount: r.personCount || 0,
-      isFire: !!(fe && fe.floor === r.floorId && fe.area === r.zone),
+      // P1.7.3-B3：canonical 火源三元组（floorId / zone）
+      isFire: !!(fe && floorIdOf(fe) === r.floorId && zoneOf(fe) === r.zone),
     }))
 })
 // 整栋楼方案汇总（scope = BUILDING）
@@ -1482,11 +1506,17 @@ function buildingPersonCount(bname) {
   if (!bname) return 0
   return countPersonsInLocation(store.persons, { building: bname })
 }
-const riskCount = computed(() =>
-  (store.riskAreas || []).filter(r => r && r.building === currentBuilding.value?.name).length
-)
+// P1.7.3-B3：风险区域按 canonical buildingId 归属（riskAreas 已带 buildingId，别名只作兜底）
+const riskCount = computed(() => {
+  const bid = currentBuilding.value ? String(currentBuilding.value.id) : ''
+  const bname = currentBuilding.value ? currentBuilding.value.name : ''
+  return (store.riskAreas || []).filter(r => r && (
+    r.buildingId ? String(r.buildingId) === bid : r.building === bname
+  )).length
+})
 const focusFloor = computed(() => {
-  if (store.fireEvent && store.fireEvent.building === currentBuilding.value?.name) return store.fireEvent.floor
+  const fe = store.fireEvent
+  if (fe && buildingIdOf(fe) === (currentBuilding.value ? String(currentBuilding.value.id) : '')) return floorIdOf(fe)
   const counts = {}
   ;(store.persons || []).forEach((p) => {
     if (!personInLocation(p, {
@@ -1500,7 +1530,8 @@ const focusFloor = computed(() => {
   return f
 })
 const focusArea = computed(() => {
-  if (store.fireEvent && store.fireEvent.building === currentBuilding.value?.name) return store.fireEvent.area
+  const fe = store.fireEvent
+  if (fe && buildingIdOf(fe) === (currentBuilding.value ? String(currentBuilding.value.id) : '')) return zoneOf(fe)
   return 'A区'
 })
 
@@ -1510,8 +1541,8 @@ const radarPersonList = computed(() => {
   return (store.persons || []).filter((x) => personInLocation(x, {
     buildingId: currentBuilding.value ? currentBuilding.value.id : '',
     building: currentBuilding.value ? currentBuilding.value.name : '',
-    floorId: p.floorId || p.floor,
-    zone: p.zone || p.area,
+    floorId: floorIdOf(p),
+    zone: zoneOf(p),
   }))
 })
 
@@ -1524,7 +1555,7 @@ function getPersonsForFloor(floorId, limit = 10) {
     floorId,
   }
   const list = store.persons.filter((p) => personInLocation(p, loc))
-  const fireZone = fe && currentBuilding.value && fe.building === currentBuilding.value.name ? fe.floor : null
+  const fireZone = fe && currentBuilding.value && buildingIdOf(fe) === String(currentBuilding.value.id) ? floorIdOf(fe) : null
   if (fireZone === floorId) return list.slice(0, 14)
   return list.slice(0, limit)
 }
@@ -1537,8 +1568,9 @@ function getPersonCount(floorId) {
 }
 function getPersonCountInArea(dev) {
   if (!dev) return 0
+  // P1.7.3-B3：设备 → 人员位置入参全部走 canonical（buildingId / floorId / zone）
   return countPersonsInLocation(store.persons, {
-    buildingId: dev.buildingId || '', building: dev.building || '', floorId: dev.floorId, zone: dev.zone || dev.area,
+    buildingId: buildingIdOf(dev), floorId: floorIdOf(dev), zone: zoneOf(dev),
   })
 }
 function getPersonStatus(p) {
@@ -1548,15 +1580,19 @@ function getPersonStatus(p) {
 // ============ 设备状态/方向/颜色 ============
 function isFloorOnFire(floorId) {
   const b = currentBuilding.value
-  return !!(store.fireEvent && b && store.fireEvent.building === b.name && store.fireEvent.floor === floorId)
+  const fe = store.fireEvent
+  if (!fe || !b) return false
+  // P1.7.3-B3：canonical 判定（buildingId / floorId）
+  return !!(buildingIdOf(fe) === String(b.id) && floorIdOf(fe) === floorId)
 }
 
-// 总览卡片火警房间：动态匹配 fireEvent.area（不写死区域，配合 isFloorOnFire 使用）
+// 总览卡片火警房间：动态匹配 canonical zone（不写死区域，配合 isFloorOnFire 使用）
 function floorFireRoom(floorId) {
   const b = currentBuilding.value
   const fe = store.fireEvent
-  if (!fe || !b || fe.building !== b.name || fe.floor !== floorId) return null
-  return roomDefsForFloor(floorId).find((r) => r && r.name === fe.area) || null
+  if (!fe || !b) return null
+  if (buildingIdOf(fe) !== String(b.id) || floorIdOf(fe) !== floorId) return null
+  return roomDefsForFloor(floorId).find((r) => r && r.name === zoneOf(fe)) || null
 }
 
 // 楼层运行状态文案（与 floorStatusClass 同一统计口径）
@@ -1664,7 +1700,8 @@ const recStatusMap = computed(() => {
   // 火源区所在路线标红（避让提示），其余正常
   const fe = store.fireEvent
   const map = {}
-  if (fe) map[fe.area] = 'BLOCKED'
+  // P1.7.3-B3：按 canonical zone 标记火源区路线
+  if (fe) map[zoneOf(fe)] = 'BLOCKED'
   return map
 })
 
@@ -1766,8 +1803,8 @@ function showPerception(device) {
   const persons = (store.persons || []).filter((p) => personInLocation(p, {
     buildingId: currentBuilding.value ? currentBuilding.value.id : '',
     building: currentBuilding.value ? currentBuilding.value.name : '',
-    floorId: device.floorId,
-    zone: device.zone || device.area,
+    floorId: floorIdOf(device),
+    zone: zoneOf(device),
   }))
   if (persons.length > 0) {
     selectedPerson.value = persons[0]

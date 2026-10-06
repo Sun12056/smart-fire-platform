@@ -277,7 +277,10 @@ import { useDemoStore } from '../stores/demoStore'
 import { dataSource } from '../api'
 import { getFloorTopology, WALLS } from '../mock/routeGraph'
 // P1.6.1：人员「楼层 / 区域 / 楼栋」判定统一走契约 helper（buildingId / floorId / zone）
-import { countPersonsInLocation, BUILDING_NAME_TO_ID } from '../../shared/person/personRuntime.js'
+// P1.7.3-B3：火灾判定同样只认 canonical（buildingId / floorId / zone）
+import {
+  countPersonsInLocation, BUILDING_NAME_TO_ID, buildingIdOf, floorIdOf, zoneOf,
+} from '../../shared/person/personRuntime.js'
 
 const store = useFireStore()
 const demoStore = useDemoStore()
@@ -403,11 +406,19 @@ const zonePlanCards = computed(() => {
     }))
 })
 
-const isRouteFloorOnFire = computed(() =>
-  !!(store.fireEvent && store.fireEvent.floor === routeFloorId.value && store.fireEvent.building === currentBuildingName.value)
-)
+// P1.7.3-B3：canonical 火源判定（buildingId / floorId / zone），别名不再参与
+const fireLoc = computed(() => {
+  const fe = store.fireEvent
+  return fe ? { buildingId: buildingIdOf(fe), floorId: floorIdOf(fe), zone: zoneOf(fe) } : null
+})
+const isRouteFloorOnFire = computed(() => {
+  const loc = fireLoc.value
+  const bid = BUILDING_NAME_TO_ID[currentBuildingName.value] || ''
+  return !!(loc && loc.floorId === routeFloorId.value && loc.buildingId && loc.buildingId === bid)
+})
 function isFireZone(zone) {
-  return isRouteFloorOnFire.value && store.fireEvent.area === zone
+  const loc = fireLoc.value
+  return isRouteFloorOnFire.value && !!loc && loc.zone === zone
 }
 
 // P1.6.1：人员按统一字段 buildingId / floorId / zone 计数（与 2D/3D 同一口径）

@@ -49,11 +49,14 @@ import { EVACUATION_SCOPE, STRATEGY, zoneKeyOf } from '../../shared/evacuation/b
 // 人员运行时统一契约（P1.6.1）：后端 / 2D / 3D 同一个 id、同一个 routeId
 import {
   normalizePersonRuntime, assignPersonRuntime, isCanonicalPerson, pickRetainedCandidates,
+  BUILDING_ID_TO_NAME,
 } from '../../shared/person/personRuntime.js'
 // 设备运行时统一契约（P1.6.2）：后端 / 2D / 3D 同一个设备 id、同一个楼层归属（buildingId/floorId/zone）
 import {
   normalizeDeviceRuntime, assignDeviceRuntime, isCanonicalDevice,
   devicesOnFloor, floorsOfDevices, deviceInBuilding,
+  // P1.7.3-B3：canonical 归属解析（person / device 共用同一套；别名只在 canonical 缺失时兜底）
+  buildingIdOf, floorIdOf, zoneOf, buildingNameOf,
 } from '../../shared/device/deviceRuntime.js'
 import {
   ROOM_AREAS,
@@ -383,14 +386,15 @@ export const useFireStore = defineStore('fire', () => {
       // canonical 三元组是唯一权威：buildingId / floorId / zone
       // building / floor / area 只是由 canonical 派生的只读别名（供旧 UI 读，禁止反向写回）
       const fireBuildingId = snap.fire.buildingId || buildingIdFromName(snap.fire.buildingName)
-      const fireFloorId = snap.fire.floorId
-      const fireZone = snap.fire.zone
+      const fireFloorId = floorIdOf({ floorId: snap.fire.floorId })
+      const fireZone = zoneOf(snap.fire)
       fireEvent.value = {
         id: snap.fire.id,
         buildingId: fireBuildingId,
         floorId: fireFloorId,
         zone: fireZone,
-        building: snap.fire.buildingName || snap.fire.buildingId,
+        // P1.7.3-B3：别名由 canonical 派生（buildingName 与 buildingId 冲突时以 canonical 为准）
+        building: BUILDING_ID_TO_NAME[fireBuildingId] || snap.fire.buildingName || snap.fire.buildingId || '',
         floor: fireFloorId,
         area: fireZone,
         level: snap.fire.level || 'danger',
@@ -512,7 +516,8 @@ export const useFireStore = defineStore('fire', () => {
     if (p.routeId) return p.routeId
     const bp = activeBuildingPlan.value
     if (!bp) return null
-    const route = buildingRouteOfPerson(bp, { floorId: p.floorId || p.floor, zone: p.zone || p.area })
+    // P1.7.3-B3：canonical 归属（floorId / zone）
+    const route = buildingRouteOfPerson(bp, { floorId: floorIdOf(p), zone: zoneOf(p) })
     return route ? route.routeId : null
   }
 
@@ -717,12 +722,16 @@ export const useFireStore = defineStore('fire', () => {
     // B1-02：demo 模式下设备方向只能来自 DemoWorld.devices → WS → store
     if (demoGuard('batchSwitchEvacuationDirection')) return { count: 0, ids: [], oldDirections: [] }
     addOperationLog('批量调整疏散灯方向', '设备控制', reason + ' ' + newDirection)
+    // P1.7.3-B3：canonical 筛选（buildingId / floorId / zone）；别名只在 canonical 缺失时兜底
+    const wantBid = filters.buildingId || buildingIdFromName(filters.building)
+    const wantFloors = (filters.floors || []).map((f) => floorIdOf({ floorId: f }))
+    const wantZones = filters.areas || []
     const devs = asArray(devices.value).filter((d) => {
       if (!d || d.type !== 'evacuation_light') return false
-      if (filters.buildingId && d.buildingId !== filters.buildingId) return false
-      if (filters.building && d.building !== filters.building) return false
-      if (filters.floors && filters.floors.length > 0 && !filters.floors.includes(d.floorId) && !filters.floors.includes(d.floor)) return false
-      if (filters.areas && filters.areas.length > 0 && !filters.areas.includes(d.area) && !filters.areas.includes(d.zone)) return false
+      if (wantBid && buildingIdOf(d) !== wantBid) return false
+      if (!wantBid && filters.building && buildingNameOf(d) !== filters.building) return false
+      if (wantFloors.length > 0 && !wantFloors.includes(floorIdOf(d))) return false
+      if (wantZones.length > 0 && !wantZones.includes(zoneOf(d))) return false
       return true
     })
 
@@ -856,9 +865,23 @@ export const useFireStore = defineStore('fire', () => {
   let evacTimer = null
 
   // 火警楼栋 id（按名称反查，支持任意楼栋演示）
+  // P1.7.3-B3：查不到时必须返回 '' —— 禁止回退「当前楼栋」，否则未知楼栋会被静默归到当前楼栋（跨楼栋串用）
   function fireBuildingId(name) {
     const b = asArray(buildings.value).find((x) => x && x.name === name)
-    return b ? b.id : routeBuildingId.value
+    return b ? String(b.id) : ''
+  }
+
+  /**
+   * P1.7.3-B3：火灾三元组（canonical 唯一权威）。
+   * 顺序：fire.buildingId / floorId / zone → 缺失时才用别名反查；别名与 canonical 冲突时以 canonical 为准。
+   */
+  function fireLocation(fe) {
+    const f = fe || {}
+    return {
+      buildingId: buildingIdOf(f) || fireBuildingId(f.building) || '',
+      floorId: floorIdOf(f),
+      zone: zoneOf(f),
+    }
   }
 
   // ── 阶段 1：检测发现火情（仅产生发现产物；灯/人员联动等待管理员确认） ──
@@ -883,8 +906,12 @@ export const useFireStore = defineStore('fire', () => {
       , status: 'pending' // pending=待启动应急响应 / active=应急响应已启动
     }
     // ① 同区烟感/温感先告警（感知层）
+    // P1.7.3-B3：按 canonical 三元组匹配（buildingId / floorId / zone），别名不再参与判定
+    const fireBid = buildingIdOf({ buildingId: buildingIdFromName(building), building })
+    const fireFid = floorIdOf({ floorId: floor })
+    const fireZone = zoneOf({ zone: area })
     asArray(devices.value).forEach((d) => {
-      if (d && d.building === building && d.floor === floor && d.area === area && ['smoke_detector', 'temperature_sensor'].includes(d.type)) {
+      if (d && buildingIdOf(d) === fireBid && floorIdOf(d) === fireFid && zoneOf(d) === fireZone && ['smoke_detector', 'temperature_sensor'].includes(d.type)) {
         d.status = 'warning'
         if (d.type === 'temperature_sensor') d.temperature = 45 + Math.floor(Math.random() * 15)
       }
@@ -941,13 +968,15 @@ export const useFireStore = defineStore('fire', () => {
     addOperationLog('启动应急响应', '演示流程', '联动应急灯+生成路线')
     emergencyResponseConfirmed.value = true
     fe.status = 'active'
-    const building = fe.building
-    const floor = fe.floor
-    const area = fe.area
+    // P1.7.3-B3：canonical 三元组（权威）；building/floor/area 只保留给文案使用
+    const loc = fireLocation(fe)
+    const building = fe.building // 仅用于日志/告警文案
+    const floor = fe.floor       // 仅用于日志/告警文案
+    const area = fe.area         // 仅用于日志/告警文案
     // ① 火源房门对应走廊 x：距门 ≤110px 的灯进入 emergency；指向火源门的疏散灯自动反向
-    const fireDoorX = PLAN_DOORS.find((dd) => dd.zone === area)?.x ?? 140
+    const fireDoorX = PLAN_DOORS.find((dd) => dd.zone === loc.zone)?.x ?? 140
     asArray(devices.value).forEach((d) => {
-      if (!d || d.building !== building || d.floor !== floor) return
+      if (!d || buildingIdOf(d) !== loc.buildingId || floorIdOf(d) !== loc.floorId) return
       if (d.type !== 'emergency_light' && d.type !== 'evacuation_light') return
       if (typeof d.x !== 'number' || Math.abs(d.x - fireDoorX) > 110) return
       d.status = 'emergency'
@@ -965,14 +994,17 @@ export const useFireStore = defineStore('fire', () => {
     })
     // ② 风险人员标记（同区）
     asArray(persons.value)
-      .filter((p) => p && p.building === building && p.floor === floor && p.zone === area)
+      .filter((p) => p && buildingIdOf(p) === loc.buildingId && floorIdOf(p) === loc.floorId && zoneOf(p) === loc.zone)
       .forEach((p) => { p.status = 'warning' })
-    // ③ 风险区域
+    // ③ 风险区域（canonical 三元组 + 只读别名：下游判定一律用 canonical）
     riskAreas.value.push({
       id: `RA-${String(riskAreas.value.length + 1).padStart(3, '0')}`
+      , buildingId: loc.buildingId
+      , floorId: loc.floorId
+      , zone: loc.zone
       , building
       , floor
-      , zone: area
+      , area
       , level: 'high'
       , type: '火灾风险'
       , description: `${building}${floor}${area}已确认真实火情，启动应急响应`
@@ -990,8 +1022,8 @@ export const useFireStore = defineStore('fire', () => {
       , status: 'active'
       , steps: emergencySteps.map((s) => ({ ...s, status: 'pending' }))
     }
-    // ⑤ 照明状态聚合
-    const affectedLight = devices.value.find((d) => d.building === building && d.floor === floor && d.type === 'emergency_light')
+    // ⑤ 照明状态聚合（canonical 判定）
+    const affectedLight = devices.value.find((d) => d && buildingIdOf(d) === loc.buildingId && floorIdOf(d) === loc.floorId && d.type === 'emergency_light')
     if (affectedLight) {
       lightingStatus.value.currentDevice = affectedLight
       lightingStatus.value.currentMode = lightingModes.emergency
@@ -1030,11 +1062,13 @@ export const useFireStore = defineStore('fire', () => {
     const fe = fireEvent.value
     if (!fe) return []
     addOperationLog('生成疏散路线', '疏散规划', '整栋楼各楼层/区域生成整体疏散方案')
+    // P1.7.3-B3：canonical 三元组（fire.buildingId / floorId / zone）
+    const floc = fireLocation(fe)
     // ① 整栋楼方案（scope=BUILDING）：A/B/C = 均衡 / 快速 / 安全三种整栋楼策略（唯一权威）
-    const built = generateBuildingEvacuationPlans({ buildingId: fireBuildingId(fe.building) })
+    const built = generateBuildingEvacuationPlans({ buildingId: floc.buildingId })
     if (!built.plans.length) {
       // 整栋楼规划失败时回退旧的单楼层矩阵（仅用于页面展示，不是权威方案）
-      generateRoutePlans({ buildingId: fireBuildingId(fe.building), floorId: fe.floor })
+      generateRoutePlans({ buildingId: floc.buildingId, floorId: floc.floorId })
       applyFireBlocking(fe)
       replanRoutesForFire()
     }
@@ -1155,10 +1189,11 @@ export const useFireStore = defineStore('fire', () => {
     const bp = activeBuildingPlan.value
     if (!bp) return false
     // 统一字段：按 buildingId 判定参与范围（与后端 PersonRuntime 同一个 id / 同一套字段）
-    const feBuildingId = fireBuildingId(fe.building)
+    // P1.7.3-B3：canonical 唯一权威，别名（p.building）不再作为第二套身份来源
+    const feBuildingId = buildingIdOf(fe) || fireBuildingId(fe.building)
     let total = 0
     asArray(persons.value).forEach((p) => {
-      if (!p || (p.buildingId || fireBuildingId(p.building)) !== feBuildingId) return
+      if (!p || buildingIdOf(p) !== feBuildingId) return
       delete p._evacDone
       delete p._evac
       // 走廊等公共区域没有房间节点 → 与规划阶段同一套归属规则，保证人人有路线
@@ -1201,7 +1236,7 @@ export const useFireStore = defineStore('fire', () => {
     // 只允许 evacuating → stranded —— 严禁把已撤离或未参与疏散的人重新标记为滞留，
     // 也不再按「火源区第一个 / C区第一个」这种顺序取人（否则同一份场景每次跑出来的人不一样）
     const strandedPicks = pickRetainedCandidates(
-      asArray(persons.value).filter((p) => p && (p.buildingId || fireBuildingId(p.building)) === feBuildingId),
+      asArray(persons.value).filter((p) => p && buildingIdOf(p) === feBuildingId),
       'evacuating',
     )
     strandedPicks.forEach((p) => {
@@ -1230,11 +1265,11 @@ export const useFireStore = defineStore('fire', () => {
     const fe = fireEvent.value
     if (!fe) return
     stopEvacuationSim()
-    const feBuildingId = fireBuildingId(fe.building)
+    const feBuildingId = buildingIdOf(fe) || fireBuildingId(fe.building)
     // P2 确定性滞留：滞留名单来自整栋楼固定候选（可能是火警楼层之外的楼层），
     // 因此这里按「火警楼栋」而不是「火警楼层」取，保证 2D 名单与 3D / 后端同一批人
     const floorPersons = asArray(persons.value)
-      .filter((p) => p && (p.buildingId || fireBuildingId(p.building)) === feBuildingId)
+      .filter((p) => p && buildingIdOf(p) === feBuildingId)
     const stranded = floorPersons.filter((p) => p._stranded)
     // P1.6.1：滞留名单同样携带统一空间身份（buildingId / floorId / zone），2D 只读统一字段
     strandedPersons.value = stranded.map((p) => ({
@@ -1352,17 +1387,21 @@ export const useFireStore = defineStore('fire', () => {
     return true
   }
   // 按楼栋+楼层+类型筛选设备
-  // P1.6.2：统一字段（buildingId / floorId / zone）优先，旧中文名 / 旧 area 过滤器仍兼容
+  // P1.6.2：统一字段（buildingId / floorId / zone）优先
+  // P1.7.3-B3：canonical 唯一权威 —— 中文名 / 旧 area 过滤器只在 canonical 缺失时兜底，
+  //   且 canonical 与别名冲突时以 canonical 为准（禁止别名成为第二套筛选口径）
   function getDevicesFiltered(filters = {}) {
+    const wantBid = filters.buildingId || buildingIdFromName(filters.building)
+    const wantFid = floorIdOf({ floorId: filters.floorId || filters.floor })
+    const wantFloors = (filters.floors || []).map((f) => floorIdOf({ floorId: f }))
+    const wantZone = zoneOf({ zone: filters.zone || filters.area })
     return asArray(devices.value).filter((d) => {
       if (!d) return false
-      if (filters.buildingId && d.buildingId !== filters.buildingId) return false
-      if (filters.building && d.building !== filters.building) return false
-      if (filters.floorId && d.floorId !== filters.floorId) return false
-      if (filters.floor && d.floor !== filters.floor) return false
-      if (filters.floors && filters.floors.length > 0 && !filters.floors.includes(d.floorId) && !filters.floors.includes(d.floor)) return false
-      if (filters.zone && d.zone !== filters.zone && d.area !== filters.zone) return false
-      if (filters.area && d.area !== filters.area) return false
+      if (wantBid && buildingIdOf(d) !== wantBid) return false
+      if (!wantBid && filters.building && buildingNameOf(d) !== filters.building) return false
+      if (wantFid && floorIdOf(d) !== wantFid) return false
+      if (wantFloors.length > 0 && !wantFloors.includes(floorIdOf(d))) return false
+      if (wantZone && zoneOf(d) !== wantZone) return false
       if (filters.type && d.type !== filters.type) return false
       if (filters.types && filters.types.length > 0 && !filters.types.includes(d.type)) return false
       if (filters.controllable !== undefined && d.controllable !== filters.controllable) return false
@@ -1421,7 +1460,8 @@ export const useFireStore = defineStore('fire', () => {
     buildings.value.forEach((b) => {
       if (!b) return
       const devs = asArray(devices.value)
-      const bldDevs = devs.filter((d) => d && d.building === b.name)
+      // P1.7.3-B3：楼栋归属按 canonical buildingId（b.id），别名中文名不再参与统计
+      const bldDevs = devs.filter((d) => d && buildingIdOf(d) === String(b.id))
       b.deviceCount = bldDevs.length
       b.online = bldDevs.filter((d) => d && d.status !== 'fault').length
       b.abnormal = bldDevs.filter((d) => d && (d.status === 'warning' || d.status === 'emergency')).length
@@ -1442,11 +1482,12 @@ export const useFireStore = defineStore('fire', () => {
     ps.staticTargets = pers.filter((p) => p && p.movementType === 'static').length
     ps.riskZones = risks.length
     ps.sensorDevices = devs.filter((d) => d && d.type === 'radar_sensor').length
+    // P1.7.3-B3：按 canonical buildingId 统计（展示 key 仍是中文楼栋名）
     ps.buildingDistribution = {
-      '1号楼': pers.filter((p) => p && p.building === '1号楼').length,
-      '2号楼': pers.filter((p) => p && p.building === '2号楼').length,
-      '3号楼': pers.filter((p) => p && p.building === '3号楼').length,
-      '4号楼': pers.filter((p) => p && p.building === '4号楼').length,
+      '1号楼': pers.filter((p) => p && buildingIdOf(p) === 'B001').length,
+      '2号楼': pers.filter((p) => p && buildingIdOf(p) === 'B002').length,
+      '3号楼': pers.filter((p) => p && buildingIdOf(p) === 'B003').length,
+      '4号楼': pers.filter((p) => p && buildingIdOf(p) === 'B004').length,
     }
     ps.statusDistribution = {
       normal: pers.filter((p) => p && p.status === 'normal').length,
@@ -1582,8 +1623,10 @@ export const useFireStore = defineStore('fire', () => {
     }
 
     // 1. 影响附近检测设备：烟感/温感 warning
+    // P1.7.3-B3：canonical 三元组匹配（buildingId / floorId / zone）
+    const tloc = fireLocation(fireEvent.value)
     const smokeAndTempDevs = asArray(devices.value).filter(
-      (d) => d && d.building === building && d.floor === floor && d.area === area && ['smoke_detector', 'temperature_sensor'].includes(d.type)
+      (d) => d && buildingIdOf(d) === tloc.buildingId && floorIdOf(d) === tloc.floorId && zoneOf(d) === tloc.zone && ['smoke_detector', 'temperature_sensor'].includes(d.type)
     )
     smokeAndTempDevs.forEach((d) => {
       d.status = 'warning'
@@ -1593,9 +1636,9 @@ export const useFireStore = defineStore('fire', () => {
     // 2+3. 火源房门对应的走廊 x，按几何距离联动灯光：
     //   - 距房门 ≤110px 的应急照明/疏散灯进入 emergency（灯光全亮）；
     //   - 疏散灯若当前指向火源房门（朝危险区）则自动反向，其余保持指向安全方向
-    const fireDoorX = PLAN_DOORS.find((dd) => dd.zone === area)?.x ?? 140
+    const fireDoorX = PLAN_DOORS.find((dd) => dd.zone === tloc.zone)?.x ?? 140
     asArray(devices.value).forEach((d) => {
-      if (!d || d.building !== building || d.floor !== floor) return
+      if (!d || buildingIdOf(d) !== tloc.buildingId || floorIdOf(d) !== tloc.floorId) return
       if (d.type !== 'emergency_light' && d.type !== 'evacuation_light') return
       if (typeof d.x !== 'number') return
       const near = Math.abs(d.x - fireDoorX) <= 110
@@ -1617,15 +1660,18 @@ export const useFireStore = defineStore('fire', () => {
 
     // 4. 人员风险标记
     asArray(persons.value)
-      .filter((p) => p && p.building === building && p.floor === floor && p.zone === area)
+      .filter((p) => p && buildingIdOf(p) === tloc.buildingId && floorIdOf(p) === tloc.floorId && zoneOf(p) === tloc.zone)
       .forEach((p) => { p.status = 'warning' })
 
-    // 5. 风险区域
+    // 5. 风险区域（canonical 三元组 + 只读别名）
     riskAreas.value.push({
       id: `RA-${String(riskAreas.value.length + 1).padStart(3, '0')}`,
+      buildingId: tloc.buildingId,
+      floorId: tloc.floorId,
+      zone: tloc.zone,
       building,
       floor,
-      zone: area,
+      area,
       level: 'high',
       type: '火灾风险',
       description: `${building}${floor}${area}检测到火情风险`,
@@ -1672,8 +1718,8 @@ export const useFireStore = defineStore('fire', () => {
       level: 'danger',
     })
 
-    // 9. 照明状态聚合
-    const affectedLight = devices.value.find((d) => d.building === building && d.floor === floor && d.type === 'emergency_light')
+    // 9. 照明状态聚合（canonical 判定）
+    const affectedLight = devices.value.find((d) => d && buildingIdOf(d) === tloc.buildingId && floorIdOf(d) === tloc.floorId && d.type === 'emergency_light')
     if (affectedLight) {
       lightingStatus.value.currentDevice = affectedLight
       lightingStatus.value.currentMode = lightingModes.emergency
@@ -1706,8 +1752,11 @@ export const useFireStore = defineStore('fire', () => {
   function simulateAlarm(opts = {}) {
     const targetBuilding = opts.building || buildings.value[Math.floor(Math.random() * buildings.value.length)]
     const targetFloor = opts.floor || `${randInt(1, 6)}F`
+    // P1.7.3-B3：canonical 归属匹配（buildingId / floorId）
+    const targetBid = buildingIdOf(targetBuilding) || buildingIdFromName(targetBuilding && targetBuilding.name)
+    const targetFid = floorIdOf({ floorId: targetFloor })
     const targetDevice = opts.device || devices.value.find(
-      (d) => d.building === targetBuilding.name && d.floor === targetFloor
+      (d) => d && buildingIdOf(d) === targetBid && floorIdOf(d) === targetFid
     ) || devices.value[Math.floor(Math.random() * devices.value.length)]
 
     if (targetDevice) {
@@ -2251,6 +2300,10 @@ export const useFireStore = defineStore('fire', () => {
     rescueState.value = true
     rescueTask.value = {
       id: `RSC-${Date.now()}`,
+      // P1.7.3-B3：canonical 三元组（权威）+ 只读别名（展示）
+      buildingId: buildingIdOf(fe) || fireBuildingId(fe.building),
+      floorId: floorIdOf(fe),
+      zone: zoneOf(fe),
       building: fe.building,
       floor: fe.floor,
       area: fe.area,
@@ -2343,9 +2396,18 @@ export const useFireStore = defineStore('fire', () => {
     const b = asArray(buildings.value).find((x) => x.id === buildingId)
     return b && b.floors ? b.floors : 7
   }
-  function personCountAt(buildingName, floorId, zone) {
+  /**
+   * P1.7.3-B3：按 canonical 三元组统计人员（buildingId / floorId / zone）。
+   * 兼容旧入参：传中文楼栋名时先反查成 buildingId；查不到返回 0（禁止按别名兜底，防跨楼栋串用）。
+   */
+  function personCountAt(buildingIdOrName, floorId, zone) {
+    const bid = buildingIdOf({ buildingId: /^B\d{3}$/.test(String(buildingIdOrName || '')) ? buildingIdOrName : '', building: buildingIdOrName })
+      || buildingIdFromName(buildingIdOrName)
+    const fid = floorIdOf({ floorId })
+    const zid = zoneOf({ zone })
+    if (!bid || !fid || !zid) return 0
     return asArray(persons.value).filter(
-      (p) => p && p.building === buildingName && p.floor === floorId && (p.zone || p.area) === zone
+      (p) => p && buildingIdOf(p) === bid && floorIdOf(p) === fid && zoneOf(p) === zid
     ).length
   }
 
@@ -2537,19 +2599,22 @@ export const useFireStore = defineStore('fire', () => {
     }
   }
 
-  /** 火灾上下文：只描述位置，不含疏散范围 */
+  /** 火灾上下文：只描述位置，不含疏散范围（P1.7.3-B3：canonical 唯一权威） */
   function buildingFireContext() {
     const fe = fireEvent.value
     if (!fe) return null
-    return { buildingId: fireBuildingId(fe.building), floorId: fe.floor, zone: fe.area }
+    const loc = fireLocation(fe)
+    return { buildingId: loc.buildingId, floorId: loc.floorId, zone: loc.zone }
   }
 
   /** store 人员 → 规划器入参（buildingId + floorId + zone） */
   function buildingPlanningPersons(buildingId, buildingName) {
+    const bid = buildingId || buildingIdFromName(buildingName)
     return asArray(persons.value)
-      .filter((p) => p && (!buildingName || p.building === buildingName))
+      // P1.7.3-B3：canonical 判定（别名 p.building 只在 buildingId 缺失时兜底）
+      .filter((p) => p && (!bid || buildingIdOf(p) === bid))
       .map((p) => ({
-        id: p.id, buildingId, floorId: p.floor, zone: p.zone || p.area, status: p.status, x: p.x, y: p.y,
+        id: p.id, buildingId: bid, floorId: floorIdOf(p), zone: zoneOf(p), status: p.status, x: p.x, y: p.y,
       }))
       .filter((p) => p.floorId && p.zone)
   }
@@ -2760,7 +2825,8 @@ export const useFireStore = defineStore('fire', () => {
     // 整栋楼模式下火源由规划器（blockedNodes）统一避让，不再依赖这里的投影。
     if (activeBuildingPlan.value) return
     const m = routeMatrix.value
-    const info = m && m.perZone && m.perZone[fe.area]
+    // P1.7.3-B3：火源区域取 canonical zone（fe.area 只是只读别名）
+    const info = m && m.perZone && m.perZone[zoneOf(fe)]
     const recId = info && info.recommendedId
     const rec = asArray(routePlans.value).find((p) => p.id === recId)
     const bNode = new Set(blockedNodeIds.value)
@@ -2786,8 +2852,13 @@ export const useFireStore = defineStore('fire', () => {
 
   function evaluatePlanFire(plan) {
     const fe = fireEvent.value
-    if (!fe || fe.building !== plan.buildingName) return 'NORMAL'
-    if (plan.floorsPassed.indexOf(fe.floor) < 0) return 'NORMAL'
+    if (!fe) return 'NORMAL'
+    // P1.7.3-B3：canonical 比较（buildingId / floorId），别名不参与
+    const loc = fireLocation(fe)
+    const planBid = buildingIdOf(plan) || buildingIdFromName(plan.buildingName)
+    if (loc.buildingId && planBid && loc.buildingId !== planBid) return 'NORMAL'
+    if (!loc.buildingId && !planBid && fe.building !== plan.buildingName) return 'NORMAL'
+    if (plan.floorsPassed.indexOf(loc.floorId) < 0) return 'NORMAL'
     return planUsesBlocked(plan) ? 'BLOCKED' : 'WARNING'
   }
 
@@ -2799,8 +2870,10 @@ export const useFireStore = defineStore('fire', () => {
     // 不做「按区域局部重规划」—— 那会把 routeMatrix.perZone 变成业务状态。
     if (activeBuildingPlan.value) return
     routeFireAutoSwitch.value = true
+    // P1.7.3-B3：canonical 三元组（别名仅留给文案与 plan.buildingName 展示）
+    const floc2 = fireLocation(fe)
     const buildingName = fe.building
-    const buildingId = routeBuildingId.value
+    const buildingId = floc2.buildingId || routeBuildingId.value
     const maxF = getBuildingFloors(buildingId)
     routeGraphCache = buildBuildingGraph(maxF)
     const affectedZones = new Set()
@@ -2810,7 +2883,7 @@ export const useFireStore = defineStore('fire', () => {
     })
     affectedZones.forEach((zone) => {
       const exits = exitIdsOf(routeGraphCache, '1F')
-      const startId = sharedNodeId(fe.floor, ZONE_NODE_KEY[zone])
+      const startId = sharedNodeId(floc2.floorId, ZONE_NODE_KEY[zone])
       if (!routeGraphCache.nodes[startId]) return
       const newPlans = []
       exits.forEach((exit) => {
@@ -2823,7 +2896,7 @@ export const useFireStore = defineStore('fire', () => {
           3
         )
         paths.forEach((p, idx) => {
-          const plan = buildPlanFromPath(p, buildingId, buildingName, fe.floor, zone, exit, idx)
+          const plan = buildPlanFromPath(p, buildingId, buildingName, floc2.floorId, zone, exit, idx)
           plan.status = 'NORMAL'
           newPlans.push(plan)
         })
@@ -2946,7 +3019,8 @@ export const useFireStore = defineStore('fire', () => {
       if (
         d &&
         deviceInBuilding(d, buildingKey) &&
-        floorsPassed.includes(d.floorId || d.floor) &&
+        // P1.7.3-B3：楼层只看 canonical floorId（别名 d.floor 不再作为第二套口径）
+        floorsPassed.includes(floorIdOf(d)) &&
         (d.type === 'evacuation_light' || d.type === 'emergency_light')
       ) {
         if (d.type === 'evacuation_light') {

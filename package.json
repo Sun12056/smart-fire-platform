@@ -18,6 +18,7 @@
     "test:e2e:retention": "node worker/e2e-phase3-retention.cjs",
     "test:e2e:b1": "node worker/e2e-p173-b1-guard.cjs",
     "test:e2e:b2": "node worker/e2e-p173-b2-ws-consistency.cjs",
+    "test:e2e:b3": "node worker/e2e-p173-b3-legacy-fields.cjs",
     "test:demo:building": "node worker/walkthrough-building.cjs",
     "preview": "vite preview"
   },

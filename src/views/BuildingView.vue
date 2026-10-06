@@ -407,7 +407,10 @@ import { useRouter } from 'vue-router'
 import { useFireStore } from '../stores/fireStore'
 import BuildingDigitalTwin from '../components/BuildingDigitalTwin.vue'
 // P1.6.1：人员「楼层 / 区域 / 楼栋」判定统一走契约 helper（buildingId / floorId / zone）
-import { countPersonsInLocation } from '../../shared/person/personRuntime.js'
+// P1.7.3-B3：设备 / 火灾归属同样只认 canonical（buildingId / floorId / zone）
+import {
+  countPersonsInLocation, buildingIdOf, floorIdOf, zoneOf,
+} from '../../shared/person/personRuntime.js'
 
 const store = useFireStore()
 const router = useRouter()
@@ -440,31 +443,36 @@ const statusPersonsInZone = computed(() => {
   })
 })
 const statusDevices = computed(() => {
-  const b = selectedBld.value ? selectedBld.value.name : null
+  const bid = selectedBld.value ? String(selectedBld.value.id) : ''
   if (!selectedFloorId.value) return 0
-  return (store.devices || []).filter((d) => d.building === b && d.floor === selectedFloorId.value).length
+  // P1.7.3-B3：canonical 归属（buildingId / floorId）
+  return (store.devices || []).filter((d) => d && buildingIdOf(d) === bid && floorIdOf(d) === selectedFloorId.value).length
 })
 const statusFire = computed(() => {
   const fe = store.fireEvent
-  const b = selectedBld.value ? selectedBld.value.name : null
-  return fe && fe.building === b ? fe : null
+  const bid = selectedBld.value ? String(selectedBld.value.id) : ''
+  // P1.7.3-B3：canonical buildingId 判定（别名 fe.building 不再参与）
+  return fe && buildingIdOf(fe) === bid ? fe : null
 })
 
 // 楼层列表数据：从 store.devices 实时聚合，每楼层设备数不同
 const floorData = computed(() => {
   if (!selectedBld.value) return []
-  const bName = selectedBld.value.name
-  const devs = (store.devices || []).filter((d) => d.building === bName)
+  const bid = String(selectedBld.value.id)
+  // P1.7.3-B3：楼栋 / 楼层归属按 canonical（buildingId / floorId）
+  const devs = (store.devices || []).filter((d) => d && buildingIdOf(d) === bid)
   const floorMap = {}
   devs.forEach((d) => {
-    if (!floorMap[d.floor]) {
-      floorMap[d.floor] = { floor: d.floor, total: 0, normal: 0, abnormal: 0 }
+    const fid = floorIdOf(d)
+    if (!fid) return
+    if (!floorMap[fid]) {
+      floorMap[fid] = { floor: fid, total: 0, normal: 0, abnormal: 0 }
     }
-    floorMap[d.floor].total++
+    floorMap[fid].total++
     if (d.status === 'warning' || d.status === 'emergency' || d.status === 'fault') {
-      floorMap[d.floor].abnormal++
+      floorMap[fid].abnormal++
     } else if (d.status === 'normal') {
-      floorMap[d.floor].normal++
+      floorMap[fid].normal++
     }
   })
   return Object.values(floorMap).reverse()
@@ -473,8 +481,9 @@ const floorData = computed(() => {
 // 当前选中楼层的设备：用于 SVG 点位和设备列表
 const currentFloorDevices = computed(() => {
   if (!selectedFloorId.value || !selectedBld.value) return []
+  const bid = String(selectedBld.value.id)
   return (store.devices || []).filter(
-    (d) => d.building === selectedBld.value.name && d.floor === selectedFloorId.value
+    (d) => d && buildingIdOf(d) === bid && floorIdOf(d) === selectedFloorId.value
   )
 })
 
