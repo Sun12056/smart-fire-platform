@@ -41,6 +41,8 @@ export const useDemoStore = defineStore('demo', () => {
   const eventLog = ref([])
   const evacuationSettled = ref(false)
   const seq = ref(0)
+  /** P1.7.3-B2：requestSync 发送次数（重连是否真的发起全量同步，可观测） */
+  const syncCount = ref(0)
 
   // ── 连接与错误 ──
   const wsStatus = ref('idle')     // idle | connecting | open | reconnecting | closed | error
@@ -78,9 +80,28 @@ export const useDemoStore = defineStore('demo', () => {
     }[id] || id
   }
 
+  /**
+   * P1.7.3-B2-02：单一版本仲裁。
+   * DemoWorld.seq 是会话级单调递增（RESET 保留 seq），snapshot / stage / tick /
+   * REST 响应共用同一个 seq 语义 —— 因此「更旧的版本」一律丢弃：
+   *   旧 snapshot 不得覆盖新 tick，旧 tick 不得覆盖新 snapshot，晚到的 REST 响应不得覆盖更新的 WS 状态。
+   * seq 缺失（老版本后端 / 本地构造消息）按既有行为放行，不改变 mock / api 语义。
+   */
+  function isStale(incomingSeq) {
+    if (incomingSeq === undefined || incomingSeq === null) return false
+    const n = Number(incomingSeq)
+    if (!Number.isFinite(n)) return false
+    return n < seq.value
+  }
+
   // ── 应用服务端快照（并同步进 fireStore 供既有页面渲染） ──
   function applySnapshot(snap) {
-    if (!snap) return
+    if (!snap) return false
+    // B2-02：过期版本一律拒绝（返回 false 供调用方/测试判定）
+    if (isStale(snap.seq)) {
+      console.warn(`[demoStore] 丢弃过期快照：incoming.seq=${snap.seq} < local.seq=${seq.value}`)
+      return false
+    }
     if (snap.stage) {
       stage.value = snap.stage
       stageIndex.value = snap.stageIndex ?? 0
@@ -112,6 +133,7 @@ export const useDemoStore = defineStore('demo', () => {
 
     // 同步到既有 fireStore（页面读取 fireStore 渲染，避免双份数据源）
     if (fireStoreRef) fireStoreRef.applyDemoSnapshot(snap)
+    return true
   }
 
   function handleMessage(msg) {
@@ -121,13 +143,18 @@ export const useDemoStore = defineStore('demo', () => {
         applySnapshot(msg)
         break
       case WS_MSG.TICK:
+        // B2-02：过期 tick 不得覆盖已收到的更新状态（含重放 / 乱序）
+        if (isStale(msg.seq)) {
+          console.warn(`[demoStore] 丢弃过期 tick：incoming.seq=${msg.seq} < local.seq=${seq.value}`)
+          break
+        }
+        if (msg.seq !== undefined) seq.value = msg.seq
         // 实时疏散动态：只更新人员与指标（人员同样按统一契约规范化）
         if (msg.persons) persons.value = msg.persons.map((p) => normalizePersonRuntime(p))
         // 设备状态变化同样可能随 tick 下发（当前后端只在 snapshot/stage 带设备，这里做兼容）
         if (msg.devices) devices.value = msg.devices.map((d) => normalizeDeviceRuntime(d))
         if (msg.metrics) metrics.value = msg.metrics
         if (msg.evacuationSettled !== undefined) evacuationSettled.value = msg.evacuationSettled
-        if (msg.seq !== undefined) seq.value = msg.seq
         if (fireStoreRef) fireStoreRef.applyDemoTick(msg)
         break
       case WS_MSG.PONG:
@@ -156,6 +183,7 @@ export const useDemoStore = defineStore('demo', () => {
       sessionId: demoService.sessionId,
       onMessage: handleMessage,
       onStatus: (s) => { wsStatus.value = s },
+      onSync: () => { syncCount.value += 1 },
     })
     socket.connect()
   }
@@ -163,6 +191,11 @@ export const useDemoStore = defineStore('demo', () => {
   function disconnect() {
     if (socket) { socket.close(); socket = null }
     wsStatus.value = 'closed'
+  }
+
+  /** P1.7.3-B2-05：主动请求全量快照（重连后补齐断线窗口的状态） */
+  function requestSync() {
+    if (socket) socket.requestSync()
   }
 
   // ── 业务指令（前端只发起，结果由后端广播回来） ──
@@ -236,10 +269,11 @@ export const useDemoStore = defineStore('demo', () => {
     buildingPlans, activeBuildingPlanId, evacuationScope,
     persons, devices, eventLog, evacuationSettled, seq,
     // 连接
-    wsStatus, connected, error, pending, transitions, flowSteps, progress,
+    wsStatus, connected, error, pending, transitions, flowSteps, progress, syncCount,
     // 动作
-    connect, disconnect, sendCommand, advance, selectPlan,
+    connect, disconnect, requestSync, sendCommand, advance, selectPlan,
     startFire, activateResponse, planRoutes, confirmRoute, completeEvacuation, confirmRetained, completeRescue, reset,
-    applySnapshot,
+    // WS 消息入口（E2E 注入乱序/过期消息用；生产链路即 handleMessage 本身）
+    applySnapshot, handleMessage,
   }
 })

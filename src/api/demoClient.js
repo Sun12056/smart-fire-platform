@@ -21,6 +21,10 @@ export class DemoSocket {
     this.reconnectTimer = null
     this.manuallyClosed = false
     this.heartbeatMs = options.heartbeatMs || 15000
+    // P1.7.3-B2：心跳应答观测（半开连接判定）+ 同步请求回调（重连后可观测）
+    this.lastPongAt = 0
+    this.pongTimeoutMs = options.pongTimeoutMs || this.heartbeatMs * 2
+    this.onSync = options.onSync || (() => {})
   }
 
   get url() {
@@ -41,13 +45,19 @@ export class DemoSocket {
 
     this.ws.onopen = () => {
       this.retry = 0
+      this.lastPongAt = Date.now()
       this.setStatus('open')
       this.startHeartbeat()
+      // P1.7.3-B2-05：连接建立（含断线重连）后主动请求全量快照，
+      // 不再被动等下一次广播 —— 非疏散阶段后端没有 tick，等下去会导致阶段永久落后。
+      this.requestSync()
     }
     this.ws.onmessage = (evt) => {
       let msg = null
       try { msg = JSON.parse(evt.data) } catch { return }
       if (!msg || !msg.type) return
+      // P1.7.3-B2：观测心跳应答，供「半开连接」判定使用（消息仍照常转发给上层）
+      if (msg.type === WS_MSG.PONG) this.lastPongAt = Date.now()
       this.onMessage(msg)
     }
     this.ws.onerror = () => { this.setStatus('error') }
@@ -72,9 +82,14 @@ export class DemoSocket {
   startHeartbeat() {
     this.stopHeartbeat()
     this.heartbeatTimer = setInterval(() => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: WS_MSG.PING, at: new Date().toISOString() }))
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+      // P1.7.3-B2-04：心跳发出去但长时间收不到 pong ⇒ 连接实际已断（半开），
+      // 主动关闭触发 onclose → 指数退避重连，避免前端一直以为在线。
+      if (this.lastPongAt && Date.now() - this.lastPongAt > this.pongTimeoutMs) {
+        try { this.ws.close() } catch { /* ignore */ }
+        return
       }
+      this.ws.send(JSON.stringify({ type: WS_MSG.PING, at: new Date().toISOString() }))
     }, this.heartbeatMs)
   }
 
@@ -86,6 +101,7 @@ export class DemoSocket {
   requestSync() {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: WS_MSG.SYNC }))
+      this.onSync()
     }
   }
 
