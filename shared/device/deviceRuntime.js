@@ -16,7 +16,7 @@
 //   ③ 旧字段 building / floor / area 只是「只读别名」，由统一字段派生，禁止反向写回权威字段
 // ────────────────────────────────────────────────────────────
 import {
-  BUILDING_ID_TO_NAME, buildingIdOf, buildingNameOf, floorIdOf, zoneOf,
+  BUILDING_ID_TO_NAME, BUILDING_NAME_TO_ID, buildingIdOf, buildingNameOf, floorIdOf, zoneOf,
 } from '../person/personRuntime.js'
 
 /** 统一字段清单（顺序即权威字段顺序） */
@@ -192,14 +192,18 @@ export function deviceFloorIndex(d) {
   return m ? parseInt(m[1], 10) : null
 }
 
-/** 是否属于指定楼栋（同时兼容旧中文名入参） */
+/** 是否属于指定楼栋（入参同时兼容 canonical id 与旧中文名） */
 export function deviceInBuilding(d, buildingIdOrName) {
   if (!d || !buildingIdOrName) return false
-  const want = String(buildingIdOrName)
+  const raw = String(buildingIdOrName)
+  // P1.7.3-B3-03：期望值先归一成 canonical id（中文名按表反查；未知值保持原样 → 自然不命中，禁止串楼栋）
+  const want = /^B\d{3}$/.test(raw) ? raw : (BUILDING_NAME_TO_ID[raw] || raw)
   const bid = buildingIdOf(d)
-  if (bid && bid === want) return true
+  // canonical 存在 → 只认 canonical，禁止旧别名 building 成为第二套楼栋权威
+  if (bid) return String(bid) === String(want)
+  // canonical 缺失 → 才允许 legacy 别名兜底
   const bname = buildingNameOf(d)
-  return Boolean(bname && bname === want)
+  return Boolean(bname && bname === raw)
 }
 
 /** 是否位于指定楼层（只看 floorId，不解析 deviceId 字符串） */

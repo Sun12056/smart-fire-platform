@@ -8,6 +8,8 @@
 // ────────────────────────────────────────────────
 import * as THREE from 'three'
 import { COLORS, currentBuildingName } from './building3dUtils.js'
+// P1.7.3-B3-03：火灾楼栋归属只认 canonical（buildingId），别名 building 仅在 canonical 缺失时兜底
+import { buildingIdOf, buildingNameOf, floorIdOf, zoneOf } from '../../../shared/person/personRuntime.js'
 
 export class FireZone3D {
   constructor(threeScene, model, cameraDirector) {
@@ -78,9 +80,12 @@ export class FireZone3D {
     // canonical 优先：buildingId 与当前查看楼栋比；别名（中文楼栋名）仅在 buildingId 缺失时兜底
     const bldId = String((store.dashboardView || {}).selectedBuildingId || '')
     const bldName = currentBuildingName(store)
-    const match = fe && (
-      (fe.buildingId && bldId && String(fe.buildingId) === bldId)
-      || (!fe.buildingId && bldName && fe.building === bldName)
+    // canonical 存在 → 只认 canonical；canonical 缺失 → 才允许旧别名兜底（与「是否选中楼栋」无关）
+    const feBid = String(buildingIdOf(fe || {}) || '')
+    const feName = buildingNameOf(fe || {})
+    const match = Boolean(fe) && (
+      feBid ? (Boolean(bldId) && feBid === String(bldId))
+        : (Boolean(feName) && Boolean(bldName) && feName === bldName)
     )
     if (!match) {
       this.group.visible = false
@@ -88,15 +93,18 @@ export class FireZone3D {
       this.activeZone = null
       return
     }
-    const zk = this.model.getZoneBox(fe.floorId, fe.zone)
+    // P1.7.3-B3-03：火源楼层 / 区域同样只读 canonical（floorId / zone）
+    const fireFloorId = floorIdOf(fe)
+    const fireZone = zoneOf(fe)
+    const zk = this.model.getZoneBox(fireFloorId, fireZone)
     if (!zk) {
       this.group.visible = false
       return
     }
-    this.activeFloorId = fe.floorId
-    this.activeZone = fe.zone
+    this.activeFloorId = fireFloorId
+    this.activeZone = fireZone
     this.group.visible = true
-    const top = this.model.getFloorTopY(parseInt(fe.floorId)) || 0
+    const top = this.model.getFloorTopY(parseInt(fireFloorId)) || 0
     this.group.position.set(zk.center.x, top + 0.1, zk.center.z)
 
     // 区域贴片尺寸

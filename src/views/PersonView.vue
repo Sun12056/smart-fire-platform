@@ -724,13 +724,18 @@ function handleSimulatePerson() {
   const building = selectedBuildingName.value
   const floor = selectedFloor.value
   const isMoving = Math.random() > 0.3
+  // P1.7.3-B3-03：新建人员必须自带完整 canonical 三元组（buildingId / floorId / zone），
+  // 旧别名 building / floor 只作为派生展示字段，禁止成为唯一身份来源
+  const zone = targetZone ? targetZone.name : 'A区'
   const person = {
     id: `P${String((Array.isArray(store.persons) ? store.persons.length : 0) + 1).padStart(3, '0')}`,
     name: names[Math.floor(Math.random() * names.length)],
     department: departments[Math.floor(Math.random() * departments.length)],
+    buildingId: BUILDING_NAME_TO_ID[building] || '',
+    floorId: floorIdOf({ floorId: floor }),
+    zone,
     building,
     floor,
-    zone: targetZone ? targetZone.name : 'A区',
     x: 20 + Math.random() * 60,
     y: 20 + Math.random() * 60,
     enterTime: new Date().toLocaleString('zh-CN'),

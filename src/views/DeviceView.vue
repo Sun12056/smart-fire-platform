@@ -520,6 +520,10 @@ import { dataSource } from '../api'
 import { deviceTypes, nodeTypes } from '../mock/devices'
 import { generateDeviceHistory } from '../mock/statistics'
 import StatusChart from '../components/StatusChart.vue'
+// P1.7.3-B3-03：设备筛选口径统一到 canonical（buildingId / floorId），旧别名不再作为第二套筛选依据
+import {
+  buildingIdOf, floorIdOf, BUILDING_NAME_TO_ID,
+} from '../../shared/person/personRuntime.js'
 
 const store = useFireStore()
 
@@ -552,8 +556,11 @@ const filteredData = computed(() => {
     )
   }
   if (typeFilter.value) result = result.filter((d) => nodeTypes[d.type]?.label === typeFilter.value)
-  if (buildingFilter.value) result = result.filter((d) => d.building === buildingFilter.value)
-  if (floorFilter.value) result = result.filter((d) => d.floor === floorFilter.value)
+  // P1.7.3-B3-03：中文楼栋名先反查成 canonical id，再与设备的 buildingId 比对（别名冲突时以 canonical 为准）
+  const wantBid = buildingFilter.value ? (BUILDING_NAME_TO_ID[buildingFilter.value] || '') : ''
+  if (wantBid) result = result.filter((d) => buildingIdOf(d) === wantBid)
+  const wantFid = floorFilter.value ? floorIdOf({ floorId: floorFilter.value }) : ''
+  if (wantFid) result = result.filter((d) => floorIdOf(d) === wantFid)
   if (statusFilter.value) result = result.filter((d) => d.status === statusFilter.value)
   return result
 })

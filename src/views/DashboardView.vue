@@ -1924,7 +1924,9 @@ function backToBuildings() {
 function buildingDeviceCount(bname) {
   const b = store.buildings.find((x) => x && x.name === bname)
   if (!b) return 0
-  return (store.devices || []).filter((d) => d && (d.building === bname || d.buildingId === b.id)).length
+  // P1.7.3-B3-03：canonical 唯一口径（不再用 `d.building === bname` 的 OR 让别名反向入账）
+  const bid = String(b.id)
+  return (store.devices || []).filter((d) => d && String(buildingIdOf(d) || '') === bid).length
 }
 function buildingStatusColor(status) {
   return { normal: '#4361EE', warning: '#F59E0B', emergency: '#EF4444' }[status] || '#4361EE'
@@ -1951,9 +1953,12 @@ function doBatchDir(dir) {
 }
 const emPreviewCount = computed(() => {
   if (!currentBuilding.value || emFloors.value.length === 0) return 0
+  // P1.7.3-B3-03：canonical 楼栋 / 楼层（buildingId / floorId）
+  const bid = String(currentBuilding.value.id)
+  const wantFloors = emFloors.value.map((f) => floorIdOf({ floorId: f }))
   return store.devices.filter(d =>
-    d && d.building === currentBuilding.value.name &&
-    emFloors.value.includes(d.floor) &&
+    d && String(buildingIdOf(d) || '') === bid &&
+    wantFloors.includes(floorIdOf(d)) &&
     (d.type === 'emergency_light' || d.type === 'evacuation_light')
   ).length
 })

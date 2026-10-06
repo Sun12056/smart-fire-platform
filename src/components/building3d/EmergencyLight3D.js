@@ -8,6 +8,8 @@
 // ────────────────────────────────────────────────
 import * as THREE from 'three'
 import { COLORS, makeArrowTexture, seededRand, currentBuildingName } from './building3dUtils.js'
+// P1.7.3-B3-03：设备楼栋归属只认 canonical（buildingId），别名 building 仅在 canonical 缺失时兜底
+import { buildingIdOf, buildingNameOf } from '../../../shared/person/personRuntime.js'
 
 export class EmergencyLight3D {
   constructor(threeScene, model) {
@@ -33,10 +35,13 @@ export class EmergencyLight3D {
     if (!this.model.idx.entries.length) return
     const bldName = currentBuildingName(store)
     const bldId = (store.dashboardView || {}).selectedBuildingId
-    const devs = (store.devices || []).filter((d) => d && (
-      (bldId && String(d.buildingId || '') === String(bldId))
-      || (!bldId && d.building === bldName)
-    ))
+    // canonical 存在 → 只认 canonical；canonical 缺失 → 才允许旧别名兜底（与「是否选中楼栋」无关）
+    const devs = (store.devices || []).filter((d) => {
+      if (!d) return false
+      const did = String(buildingIdOf(d) || '')
+      if (did) return Boolean(bldId) && did === String(bldId)
+      return Boolean(buildingNameOf(d)) && buildingNameOf(d) === bldName
+    })
     if (!devs.length) {
       this.evacGroup.visible = false
       this.emGroup.visible = false

@@ -184,5 +184,31 @@ check('deviceZoneKey：按 canonical 生成（5F:A区，不是 4F:D区）',
 check('未知楼栋不得静默归当前楼栋（B099 / 9号楼 均不命中）',
   !deviceInBuilding(devNorm, 'B099') && !deviceInBuilding(devNorm, '9号楼'))
 
+// ── 8. B3-03：deviceInBuilding 的 canonical-first 语义（与 personInLocation 对称）──
+console.log('\n[8] B3-03 deviceInBuilding canonical-first（禁止别名反向覆盖）')
+const devAlias = { id: 'X-1', type: 'smoke_detector', building: '2号楼', floor: '4F', area: 'D区', status: 'normal' }
+const devNoId = normalizeDeviceRuntime(devAlias)
+check('canonical 缺失时才允许别名兜底（无 buildingId 设备按 2号楼 命中）',
+  deviceInBuilding(devNoId, '2号楼') === true && deviceInBuilding(devNoId, 'B002') === true)
+check('canonical 存在时别名入参不得反向命中（B003 设备不认 2号楼 / B002）',
+  deviceInBuilding(devNorm, '2号楼') === false && deviceInBuilding(devNorm, 'B002') === false)
+check('canonical 存在时中文名只认 canonical 反查得到的那一栋（3号楼命中）',
+  deviceInBuilding(devNorm, '3号楼') === true && deviceInBuilding(devNorm, 'B003') === true)
+check('devicesInBuilding / devicesOnFloor 继承同一口径（冲突设备不进 B002 分组）',
+  devicesInBuilding([devNorm, devNoId], 'B002').every((d) => d.id !== devNorm.id)
+  && devicesInBuilding([devNorm, devNoId], 'B003').some((d) => d.id === devNorm.id))
+check('空 / 非法入参一律 false（不静默归当前楼栋）',
+  deviceInBuilding(devNorm, '') === false && deviceInBuilding(null, 'B003') === false)
+
+// ── 9. B3-03：riskArea / 新建对象的 canonical 完整性（对称 personRuntime 口径）──
+console.log('\n[9] B3-03 对称回归：规范化后 canonical 三元组齐备')
+;[devNorm, devNoId].forEach((d, i) => {
+  const tag = i === 0 ? '冲突设备' : '别名设备'
+  check(`${tag}：normalize 后 buildingId / floorId / zone 齐全`,
+    Boolean(d.buildingId) && Boolean(d.floorId) && d.zone !== undefined && d.zone !== null, d)
+  check(`${tag}：别名 area 由 canonical zone 派生（不是第二套区域口径）`,
+    d.area === d.zone, [d.zone, d.area])
+})
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`)
 process.exit(fail ? 1 : 0)

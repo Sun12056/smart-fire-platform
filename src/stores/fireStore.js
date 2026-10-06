@@ -1956,13 +1956,19 @@ export const useFireStore = defineStore('fire', () => {
     const posX = Math.round(zr.x + 5 + Math.random() * (zr.w - 10))
     const posY = Math.round(zr.y + 5 + Math.random() * (zr.h - 10))
 
+    const newBuilding = buildingsList[Math.floor(Math.random() * buildingsList.length)]
+    const newFloor = floorsList[Math.floor(Math.random() * floorsList.length)]
     const newPerson = {
       id: `P${String(persons.value.length + 1).padStart(3, '0')}`,
       name: names[Math.floor(Math.random() * names.length)],
       department: departments[Math.floor(Math.random() * departments.length)],
-      building: buildingsList[Math.floor(Math.random() * buildingsList.length)],
-      floor: floorsList[Math.floor(Math.random() * floorsList.length)],
+      // P1.7.3-B3-03：canonical 三元组必须自带（buildingId / floorId / zone），
+      // building / floor 降级为派生展示别名（与 Airlock PersonRuntime 同一套字段）
+      buildingId: buildingIdFromName(newBuilding),
+      floorId: floorIdOf({ floorId: newFloor }),
       zone: zone,
+      building: newBuilding,
+      floor: newFloor,
       x: posX,
       y: posY,
       enterTime: new Date().toLocaleString('zh-CN'),
@@ -1998,11 +2004,15 @@ export const useFireStore = defineStore('fire', () => {
     const targetFloor = floor || `${Math.floor(Math.random() * 7) + 1}F`
     const targetZone = zone || ['A区', 'B区', 'C区'][Math.floor(Math.random() * 3)]
 
+    // P1.7.3-B3-03：riskArea 同样必须自带 canonical 三元组
+    // （与 :riskAreas.push 的另两处口径一致，下游判定不再需要 alias 兜底分支）
     const riskArea = {
       id: `RA-${String(riskAreas.value.length + 1).padStart(3, '0')}`,
+      buildingId: buildingIdFromName(targetBuilding),
+      floorId: floorIdOf({ floorId: targetFloor }),
+      zone: targetZone,
       building: targetBuilding,
       floor: targetFloor,
-      zone: targetZone,
       level: 'high',
       type: '火灾风险',
       description: `${targetBuilding}${targetFloor}${targetZone}检测到风险`,
@@ -2540,7 +2550,9 @@ export const useFireStore = defineStore('fire', () => {
     routePlans.value = areas.flatMap((z) => perZone[z].plans)
     routeMatrix.value = { buildingId, buildingName, floorId, areas, exits, perZone }
     selectedZone.value = areas[0]
-    if (fireEvent.value && fireEvent.value.building === buildingName) replanRoutesForFire()
+    // P1.7.3-B3-03：是否重规划只看 canonical buildingId（别名中文名不再参与）
+    const feBid = fireEvent.value ? buildingIdOf(fireEvent.value) : ''
+    if (feBid && feBid === buildingId) replanRoutesForFire()
     return routeMatrix.value
   }
 
@@ -2640,7 +2652,8 @@ export const useFireStore = defineStore('fire', () => {
     routePlans.value = (active.routes || []).map((r) => routeToRenderable(active, r))
 
     // routeMatrix：保持旧结构，perZone 用「当前查看楼层」的纯区域名做键（2D 平面图按楼层展示）
-    const floorId = routeFloorId.value || (fireEvent.value && fireEvent.value.floor) || '5F'
+    // P1.7.3-B3-03：该键进入 zoneKeyOf(floorId, zone)，必须取 canonical floorId
+    const floorId = routeFloorId.value || (fireEvent.value ? floorIdOf(fireEvent.value) : '') || '5F'
     const areas = [...new Set((active.routes || []).filter((r) => r.floorId === floorId).map((r) => r.zone))]
     const perZone = {}
     areas.forEach((zone) => {

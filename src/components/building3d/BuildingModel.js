@@ -9,6 +9,8 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { COLORS, parseNodeName, snapshotMaterial } from './building3dUtils.js'
+// P1.7.3-B3-03：火区高亮只读 canonical（floorId / zone）；fe.floor / fe.area 只是派生别名
+import { floorIdOf, zoneOf } from '../../../shared/person/personRuntime.js'
 
 const FLOORS = [1, 2, 3, 4, 5, 6]
 const ZONES = ['A区', 'B区', 'C区', 'D区']
@@ -280,9 +282,13 @@ export class BuildingModel {
 
   applyFireHighlight(fe) {
     if (!fe) return
-    const fnum = parseInt(fe.floor)
+    // canonical 楼层 / 区域（GLB tag.floorId 才是模型侧的 canonical 楼层，tag.floor 只是数字冗余）
+    const fireFloorId = floorIdOf(fe)
+    const fireZone = zoneOf(fe)
+    const fnum = parseInt(fireFloorId)
     this.idx.entries.forEach((e) => {
-      if (e.tag.floor === fnum && (e.tag.zone === fe.area || e.tag.kind === 'wall') && this._hasEmissive(e)) {
+      const floorMatch = e.tag.floorId ? String(e.tag.floorId) === String(fireFloorId) : e.tag.floor === fnum
+      if (floorMatch && (e.tag.zone === fireZone || e.tag.kind === 'wall') && this._hasEmissive(e)) {
         e.mats.forEach((m) => {
           m.emissive.setHex(COLORS.fire)
           m.emissiveIntensity = 1.0
