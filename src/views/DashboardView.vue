@@ -625,7 +625,7 @@
                       type="button"
                       class="fip-plan"
                       :class="{ active: bp.id === store.activeBuildingPlanId }"
-                      @click="store.setActiveBuildingPlan(bp.id)"
+                      @click="store.selectBuildingPlan(bp.id)"
                     >
                       <div class="fip-plan-head">
                         <span class="plan-badge">{{ bp.strategyLabel }}</span>

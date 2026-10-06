@@ -116,6 +116,10 @@ export const useDemoStore = defineStore('demo', () => {
     // 整栋楼疏散方案（scope = BUILDING）：PLAN-A/B/C = 三种整栋楼策略
     if (snap.buildingPlans !== undefined) buildingPlans.value = snap.buildingPlans || []
     if (snap.activeBuildingPlanId !== undefined) activeBuildingPlanId.value = snap.activeBuildingPlanId
+    // P1.7.3-B3-05（P0-01）：selectedPlanId 是「管理员选了哪套方案」的唯一意向槽，
+    // 它的有效性依附于后端下发的方案集合 —— 后端没有方案（RESET / 新一轮演练开始前）
+    // 就等于没有选择，禁止把上一次演练的意向残留到下一次。
+    if (snap.buildingPlans !== undefined && !(snap.buildingPlans || []).length) selectedPlanId.value = null
     if (snap.evacuationScope !== undefined) evacuationScope.value = snap.evacuationScope
     if (snap.lighting !== undefined) lighting.value = snap.lighting
     if (snap.metrics !== undefined) metrics.value = snap.metrics

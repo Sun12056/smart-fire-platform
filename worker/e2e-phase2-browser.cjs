@@ -227,6 +227,9 @@ const cmd = (command, payload = {}) =>
     })
     const pickedId = await page.evaluate(() => window.__demo.demoStore.selectedPlanId)
     check('点选方案被记录', Boolean(pickedId), pickedId)
+    // P1.7.3-B3-05（P0-01）：方案选择只有一个意向槽（demoStore.selectedPlanId），
+    // 后续任何点选都会覆盖它 —— 因此「确认时所选」= 最后一次点选，切换后再读取。
+    let confirmedPlanId = pickedId
     // 阶段 3：前端拿到的是「整栋楼」方案（PLAN-A/B/C = 三种策略，不是某区域的三条路线）
     const bpInfo = await page.evaluate(() => {
       const list = window.__demo.demoStore.buildingPlans || []
@@ -259,10 +262,15 @@ const cmd = (command, payload = {}) =>
     })
     check('切换整栋楼方案后全楼路线同步切换', switchRes.changed && switchRes.activeId === switchRes.targetId, switchRes)
 
+    // 「切换整栋楼方案」= 一次新的选择 → 意向槽同步覆盖（见上条注释）
+    confirmedPlanId = await page.evaluate(() => window.__demo.demoStore.selectedPlanId)
+    check('切换后意向槽与当前方案同源', confirmedPlanId === switchRes.activeId,
+      { confirmedPlanId, activeId: switchRes.activeId })
+
     await clickByText('确认当前疏散路径')
     check('④ 智能疏散', await waitFor(() => page.evaluate(() => window.__demo.demoStore.stage === 'SMART_EVACUATION'), 8000),
       await page.evaluate(() => window.__demo.demoStore.stage))
-    check('执行的是所选方案', await page.evaluate((id) => window.__demo.demoStore.activeBuildingPlanId === id, pickedId),
+    check('执行的是所选方案', await page.evaluate((id) => window.__demo.demoStore.activeBuildingPlanId === id, confirmedPlanId),
       await page.evaluate(() => [window.__demo.demoStore.activeBuildingPlanId, window.__demo.demoStore.activePlanId]))
     // 前端渲染的路线必须来自整栋楼方案（3D/平面图同源）
     const routeSame = await page.evaluate(() => {
@@ -414,7 +422,9 @@ const cmd = (command, payload = {}) =>
     check('B → C：每个楼层+区域的 routeId 同步变化',
       Boolean(switchAll.bc && switchAll.bc.changedAll && switchAll.bc.total > 1), switchAll.bc)
     // 恢复到最后点选的方案，避免影响后续确认流程
-    await page.evaluate((id) => window.__demo.store.setActiveBuildingPlan(id), 'PLAN-B').catch(() => {})
+    // P1.7.3-B3-05（P0-01）：这里必须恢复到「后端实际执行的方案」，
+    // 否则后续「2D/3D routeId 与后端人员 routeId 一致」会把意向与执行结果做错比对。
+    await page.evaluate((id) => window.__demo.store.setActiveBuildingPlan(id), confirmedPlanId).catch(() => {})
 
     // ── ⑤ 3D 人员沿后端路线移动 ──
     console.log('\n[⑤ 3D 人员沿路线]')

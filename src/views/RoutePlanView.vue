@@ -104,7 +104,7 @@
             <button
               v-for="bp in store.buildingEvacuationPlans" :key="bp.id"
               class="bp-chip" :class="{ active: bp.id === store.activeBuildingPlanId }"
-              @click.stop="store.setActiveBuildingPlan(bp.id)"
+              @click.stop="store.selectBuildingPlan(bp.id)"
             >{{ bp.strategyLabel }}·{{ strategyName(bp) }}</button>
           </span>
         </div>

@@ -20,6 +20,7 @@
     "test:e2e:b2": "node worker/e2e-p173-b2-ws-consistency.cjs",
     "test:e2e:b3": "node worker/e2e-p173-b3-legacy-fields.cjs",
     "test:e2e:b3c": "node worker/e2e-p173-b3c-authority-chain.cjs",
+    "test:e2e:b305": "node worker/e2e-p173-b305-p0p1.cjs",
     "test:demo:building": "node worker/walkthrough-building.cjs",
     "preview": "vite preview"
   },

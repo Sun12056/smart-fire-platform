@@ -365,6 +365,8 @@ export const useFireStore = defineStore('fire', () => {
 
   function applyDemoSnapshot(snap) {
     if (!snap) return
+    // P1.7.3-B3-05（P0-01）：绑定 demo 方案意向 → fireStore 的单向投影（幂等）
+    bindPlanSelectionProjection()
     // ① 阶段：唯一来源是后端状态机
     if (snap.stage) {
       const legacy = STAGE_TO_LEGACY[snap.stage] ?? 0
@@ -435,10 +437,18 @@ export const useFireStore = defineStore('fire', () => {
     // ④ 设备（按 id 合并后端运行时：状态 / 模式 / 方向 / 亮度 + 楼层归属 buildingId/floorId/zone）
     if (Array.isArray(snap.devices)) {
       const dmap = new Map(snap.devices.map((d) => [String(d.id), d]))
+      const authoritative = dataSource.isDemo
       asArray(devices.value).forEach((d) => {
+        if (!d) return
+        captureBusinessSeed(d, DEVICE_BUSINESS_FIELDS)
         const r = dmap.get(String(d.id))
-        if (!r) return
+        if (!r) {
+          // demo 模式：本次快照未下发 = 不由后端托管 → 只能保持静态结构
+          if (authoritative) restoreBusinessSeed(d, DEVICE_BUSINESS_FIELDS)
+          return
+        }
         assignDeviceRuntime(d, r)
+        if (authoritative) applyStrictDeviceRuntime(d, r)
       })
     }
     // ⑤ 照明
@@ -493,17 +503,100 @@ export const useFireStore = defineStore('fire', () => {
     refreshPersonStats()
   }
 
+  // ════════ P1.7.3-B3-05（P1-01）：Demo 模式下「人员 / 设备业务状态」的唯一权威 ════════
+  // Backend DemoWorld → DemoRoom snapshot/tick → demoStore → fireStore。
+  // 本地 seed（static persons / initialDevices …）只允许提供「初始静态结构」：
+  //   ① 出现在本次后端运行时的对象  → 业务字段一律以后端下发为准；后端没给的字段
+  //                                   落「契约默认值」（normalize*Runtime 的输出），
+  //                                   禁止用本地 seed 值做隐式补全；
+  //   ② 没出现在本次运行时的对象    → 一律回到 seed 基线，不允许残留上一轮 demo 的业务状态。
+  const PERSON_BUSINESS_FIELDS = [
+    'status', 'movementType', 'routeId', 'routePoints', 'progress',
+    'position', 'x', 'y', 'evacuating', 'retained', 'rescued', 'waypoint', 'route',
+  ]
+  const DEVICE_BUSINESS_FIELDS = [
+    'status', 'currentMode', 'direction', 'recommendedDirection', 'brightness', 'emergencyFlash',
+  ]
+  const businessSeed = new WeakMap()
+  const cloneValue = (v) => (
+    Array.isArray(v) ? v.slice()
+      : (v && typeof v === 'object' ? { ...v } : v)
+  )
+  /** 首次接触对象时留一份「静态基线」快照（只有我来写，业务链路不得引用它做决策） */
+  function captureBusinessSeed(obj, fields) {
+    if (!obj || businessSeed.has(obj)) return
+    const base = {}
+    fields.forEach((f) => {
+      if (!(f in obj)) { base[f] = undefined; return }
+      base[f] = cloneValue(obj[f])
+    })
+    businessSeed.set(obj, base)
+  }
+  /** 把「非后端托管」对象还原成纯静态结构（去掉所有业务状态残留） */
+  function restoreBusinessSeed(obj, fields) {
+    const base = businessSeed.get(obj)
+    if (!base) return
+    fields.forEach((f) => {
+      if (base[f] === undefined) { delete obj[f]; return }
+      obj[f] = cloneValue(base[f])
+    })
+    // mock / 本地疏散运行态：非后端托管对象同样不得残留（否则 3D 会走它的本地路线优先级）
+    delete obj._evac
+    delete obj._evacDone
+  }
+  /** 人员：后端运行时「整字段覆盖」（后端缺省 → 契约默认值，不用 seed 值补全） */
+  function applyStrictPersonRuntime(target, source) {
+    const n = normalizePersonRuntime(source)
+    target.status = n.status
+    target.routeId = n.routeId
+    target.routePoints = n.routePoints
+    target.progress = n.progress
+    if (n.position) { target.position = n.position; target.x = n.position.x; target.y = n.position.y }
+    else if (!('position' in target)) target.position = null
+    if (n.movementType) target.movementType = n.movementType
+    else delete target.movementType
+    if (typeof n.evacuating === 'boolean') target.evacuating = n.evacuating
+    else delete target.evacuating
+    if (typeof n.retained === 'boolean') target.retained = n.retained
+    else delete target.retained
+    if (typeof n.rescued === 'boolean') target.rescued = n.rescued
+    else delete target.rescued
+    if (typeof n.waypoint === 'number') target.waypoint = n.waypoint
+    else delete target.waypoint
+    if (Array.isArray(n.route)) target.route = n.route.slice()
+    else delete target.route
+  }
+  /** 设备：后端运行时「整字段覆盖」（同上） */
+  function applyStrictDeviceRuntime(target, source) {
+    const n = normalizeDeviceRuntime(source)
+    target.status = n.status
+    target.currentMode = n.currentMode
+    target.direction = n.direction
+    if ('recommendedDirection' in target) target.recommendedDirection = n.direction
+    target.brightness = n.brightness
+    target.emergencyFlash = n.emergencyFlash
+  }
+
   /**
    * 后端人员运行时 → 2D 人员对象（P1.6.1 统一契约）
    * 按 id 合并（后端 / 2D / 3D 同一个人员 id），只写后端下发的权威字段：
    * routeId / routePoints / progress / position 一律来自后端，前端不推导。
    */
   function applyDemoPersons(list) {
-    const pmap = new Map((Array.isArray(list) ? list : []).map((p) => [String(p.id), p]))
+    const source = Array.isArray(list) ? list : []
+    const pmap = new Map(source.map((p) => [String(p.id), p]))
+    const authoritative = dataSource.isDemo
     asArray(persons.value).forEach((p) => {
+      if (!p) return
+      captureBusinessSeed(p, PERSON_BUSINESS_FIELDS)
       const r = pmap.get(String(p.id))
-      if (!r) return
+      if (!r) {
+        // demo 模式：后端本次运行时的「成员名单」即权威边界，名单外一律保持静态结构
+        if (authoritative) restoreBusinessSeed(p, PERSON_BUSINESS_FIELDS)
+        return
+      }
       assignPersonRuntime(p, r)
+      if (authoritative) applyStrictPersonRuntime(p, r)
       if (r.retained) p._stranded = true
       if (r.rescued) p._stranded = false
     })
@@ -1120,6 +1213,9 @@ export const useFireStore = defineStore('fire', () => {
   }
   // 返回方案列表：重新回到当前整栋楼方案
   function backToPlanList() {
+    // P1.7.3-B3-05（P0-01）：demo 模式下不得把 fireStore 的投影值反向写回意向槽
+    // （否则 activeBuildingPlanId 会重新变成第二个「Demo 意向源」）。
+    if (demoGuard('backToPlanList')) return Boolean(activeBuildingPlanId.value)
     if (activeBuildingPlanId.value) return setActiveBuildingPlan(activeBuildingPlanId.value)
     return false
   }
@@ -2721,6 +2817,43 @@ export const useFireStore = defineStore('fire', () => {
     return { plans: res.plans, groups: res.groups, active }
   }
 
+  // ── P1.7.3-B3-05（P0-01）：方案选择的单一业务权威 ──
+  // demo 模式下「管理员选了哪套方案」只有一个可写槽：demoStore.selectedPlanId。
+  // fireStore.activeBuildingPlanId 不再被 View 直接写，而是它的**单向投影**
+  // （intent > executed：选过就用选的，没选就用后端快照里的执行方案）。
+  const planProjectionBound = ref(false)
+  /** demo 侧「已选方案」意向（自动限制在当前方案集合内，跨楼栋不生效） */
+  function demoSelectedPlanId(plans) {
+    if (!dataSource.isDemo) return null
+    const list = Array.isArray(plans) && plans.length ? plans : buildingEvacuationPlans.value
+    try {
+      const id = useDemoStore().selectedPlanId
+      if (!id) return null
+      return list.some((p) => p.id === id) ? id : null
+    } catch (_) {
+      return null
+    }
+  }
+  /**
+   * demoStore.selectedPlanId → fireStore 的单向投影（2D / 3D / 后端三者同源）。
+   * flush: 'sync' —— 保证选择动作同步驱动 2D/3D，不引入异步第二态。
+   */
+  function bindPlanSelectionProjection() {
+    if (planProjectionBound.value || !dataSource.isDemo) return false
+    try {
+      const demo = useDemoStore()
+      watch(() => demo.selectedPlanId, (id) => {
+        if (!id || id === activeBuildingPlanId.value) return
+        if (!buildingEvacuationPlans.value.some((p) => p.id === id)) return
+        applyBuildingPlanSelection(id)
+      }, { flush: 'sync' })
+      planProjectionBound.value = true
+      return true
+    } catch (_) {
+      return false
+    }
+  }
+
   /** 后端快照 → 整栋楼方案（后端是权威，前端只镜像） */
   function applyBuildingPlans(snap) {
     if (!snap || !Array.isArray(snap.buildingPlans) || !snap.buildingPlans.length) return null
@@ -2729,7 +2862,10 @@ export const useFireStore = defineStore('fire', () => {
     const bid = String(plans[0].buildingId || currentPlanBuildingId.value || routeBuildingId.value)
     // 后端方案是权威：先按所属楼栋归档，之后切回该楼栋时直接恢复，不再重新生成
     buildingPlanCache.value[bid] = plans.slice()
-    const activeId = snap.activeBuildingPlanId
+    // P0-01：demo 模式已选意向优先于「后端当前执行/推荐」方案（未选时才用后者的值）
+    const selectedId = demoSelectedPlanId(plans)
+    const activeId = selectedId
+      || snap.activeBuildingPlanId
       || (plans.find((p) => p.recommended) || {}).id
       || plans[0].id
     buildingPlanActiveCache.value[bid] = activeId
@@ -2745,8 +2881,12 @@ export const useFireStore = defineStore('fire', () => {
     return active
   }
 
-  /** 切换整栋楼方案（A/B/C）—— 全楼人员路线同步切换 */
-  function setActiveBuildingPlan(planId) {
+  /**
+   * 方案投影落地：只在两条链路里被调用 ——
+   *   ① 后端快照（applyBuildingPlans）；② demoStore.selectedPlanId 的单向投影。
+   * 其他任何地方都不得直接改 activeBuildingPlanId（P1.7.3-B3-05 P0-01）。
+   */
+  function applyBuildingPlanSelection(planId) {
     if (!buildingEvacuationPlans.value.some((p) => p.id === planId)) return false
     const active = syncLegacyRouteState(buildingEvacuationPlans.value, planId)
     if (!active) return false
@@ -2763,6 +2903,30 @@ export const useFireStore = defineStore('fire', () => {
       time: new Date().toLocaleTimeString('zh-CN'),
     })
     return true
+  }
+
+  /**
+   * P1.7.3-B3-05（P0-01）：View / 面板选择整栋楼方案的**唯一入口**。
+   *   · demo 模式：只写 demoStore.selectedPlanId（唯一意向权威），
+   *     fireStore / 2D / 3D 通过单向投影跟随 —— 不再出现「View 直接改本地业务状态」；
+   *   · mock / api 模式：保留原有本地预览行为（不做任何改动）。
+   */
+  function selectBuildingPlan(planId) {
+    if (!buildingEvacuationPlans.value.some((p) => p.id === planId)) return false
+    bindPlanSelectionProjection()
+    if (dataSource.isDemo) {
+      const bound = planProjectionBound.value
+      useDemoStore().selectPlan(planId)
+      // 极端环境下投影未绑定成功时兜底同步一次，保证 2D/3D 仍然同源
+      if (!bound && planId !== activeBuildingPlanId.value) applyBuildingPlanSelection(planId)
+      return true
+    }
+    return applyBuildingPlanSelection(planId)
+  }
+
+  /** 兼容入口：历史调用方（含既有 E2E）继续可用；demo 模式下同样不再写本地第二份状态 */
+  function setActiveBuildingPlan(planId) {
+    return selectBuildingPlan(planId)
   }
 
   /** 当前整栋楼方案（2D/3D/后端共用一个源） */
@@ -3375,6 +3539,8 @@ export const useFireStore = defineStore('fire', () => {
     evacuationScope,
     generateBuildingEvacuationPlans,
     setActiveBuildingPlan,
+    // P1.7.3-B3-05（P0-01）：View 层方案选择的唯一入口
+    selectBuildingPlan,
     applyBuildingPlans,
     buildingRouteOfPerson,
     toggleRouteDebug,

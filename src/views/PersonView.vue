@@ -392,6 +392,7 @@ import { SVG_W as PLAN_W, SVG_H as PLAN_H } from '../mock/floorPlanData.js'
 import {
   positionOf, BUILDING_NAME_TO_ID, buildingIdOf, floorIdOf, zoneOf,
 } from '../../shared/person/personRuntime.js'
+import { dataSource } from '../api'
 
 const store = useFireStore()
 
@@ -766,12 +767,18 @@ function handleSimulateRisk() {
   const target = pool[Math.floor(Math.random() * pool.length)]
   if (!target) return
   // 该区域人员同步标记为风险（风险统计按 warning 人数，点位同步变红）
-  currentFloorPersons.value
-    .filter((p) => p.zoneName === target.name)
-    .forEach((p) => {
-      const origin = (Array.isArray(store.persons) ? store.persons : []).find((o) => o && o.id === p.id)
-      if (origin) origin.status = 'warning'
-    })
+  // P1.7.3-B3-05（P1-01）：demo 模式下人员业务状态唯一权威是后端运行时，
+  // 页面不得反向把 status 写回 store（否则下一次快照前会出现前端自造的第二份状态）。
+  if (dataSource.isDemo) {
+    console.warn('[PersonView] demo 模式禁止本地改写人员状态')
+  } else {
+    currentFloorPersons.value
+      .filter((p) => p.zoneName === target.name)
+      .forEach((p) => {
+        const origin = (Array.isArray(store.persons) ? store.persons : []).find((o) => o && o.id === p.id)
+        if (origin) origin.status = 'warning'
+      })
+  }
   store.simulateRisk(selectedBuildingName.value, selectedFloor.value, target.name)
 }
 
