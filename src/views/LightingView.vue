@@ -354,6 +354,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import * as echarts from 'echarts'
 import { useFireStore } from '../stores/fireStore'
+import { dataSource } from '../api'
 
 const store = useFireStore()
 
@@ -424,9 +425,12 @@ const currentDevice = computed(() => {
 })
 
 // 将选中设备同步到照明聚合状态（楼层/设备切换后亮度、模式、人员检测联动）
+// P1.7.3-B1：demo 模式下 lightingStatus / device 亮度与人员检测都属于后端业务状态，
+// 本页只能消费（DemoWorld.lighting + DemoWorld.devices → WS → store → 本页），禁止反向写入
 function applyDeviceToStatus(dev) {
   if (!dev) return
   sliderBrightness.value = dev.brightness ?? 60
+  if (dataSource.isDemo) return
   if (store.lightingStatus) {
     store.lightingStatus.currentDevice = dev
     store.lightingStatus.brightness = dev.brightness ?? 60
@@ -559,6 +563,10 @@ function handleModeChange(mode) {
 }
 
 function handleBrightnessChange(val) {
+  if (dataSource.isDemo) {
+    console.warn('[LightingView] demo 模式禁止本地调节亮度')
+    return
+  }
   store.lightingStatus.brightness = val
   if (currentDevice.value) {
     currentDevice.value.brightness = val
@@ -599,6 +607,10 @@ function handleEmergency() {
 }
 
 function handleReset() {
+  if (dataSource.isDemo) {
+    console.warn('[LightingView] demo 模式禁止本地复位照明状态')
+    return
+  }
   store.switchLightingMode('daily')
   sliderBrightness.value = 30
   store.lightingStatus.detectedPerson = false

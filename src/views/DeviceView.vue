@@ -516,6 +516,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useFireStore } from '../stores/fireStore'
+import { dataSource } from '../api'
 import { deviceTypes, nodeTypes } from '../mock/devices'
 import { generateDeviceHistory } from '../mock/statistics'
 import StatusChart from '../components/StatusChart.vue'
@@ -649,6 +650,11 @@ function handleSelfCheck() {
 }
 
 function handleSimulateAbnormal() {
+  // P1.7.3-B1：demo 模式下设备状态只能来自后端快照，页面不得反向写入
+  if (dataSource.isDemo) {
+    console.warn('[DeviceView] demo 模式禁止本地修改设备状态')
+    return
+  }
   store.updateDeviceStatus(selectedDevice.value.id, 'warning')
   selectedDevice.value.status = 'warning'
   store.addNotification({

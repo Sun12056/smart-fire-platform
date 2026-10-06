@@ -16,6 +16,7 @@
     "test:e2e:consistency": "node worker/e2e-phase2-consistency.cjs",
     "test:e2e:journey": "node worker/e2e-phase3-journey.cjs",
     "test:e2e:retention": "node worker/e2e-phase3-retention.cjs",
+    "test:e2e:b1": "node worker/e2e-p173-b1-guard.cjs",
     "test:demo:building": "node worker/walkthrough-building.cjs",
     "preview": "vite preview"
   },

@@ -347,6 +347,19 @@ export const useFireStore = defineStore('fire', () => {
     return typeof runner === 'function' ? runner(demo) : Promise.resolve(null)
   }
 
+  /**
+   * P1.7.3-B1：demo 模式本地写入守卫。
+   * demo 模式下 Backend / DemoWorld 是业务状态唯一权威，写入链只能是
+   *   DemoRoom → DemoWorld → WebSocket → demoStore → fireStore。
+   * fireStore 里遗留的本地业务写入（阶段 / 设备 / 方案 / 灯光）一律禁止，
+   * 命中返回 true（表示「已拦截」），mock / api 模式不受影响。
+   */
+  function demoGuard(apiName) {
+    if (!dataSource.isDemo) return false
+    console.warn(`[fireStore] demo 模式禁止本地业务写入：${apiName}（请通过后端状态机 / WebSocket 快照驱动）`)
+    return true
+  }
+
   function applyDemoSnapshot(snap) {
     if (!snap) return
     // ① 阶段：唯一来源是后端状态机
@@ -701,6 +714,8 @@ export const useFireStore = defineStore('fire', () => {
   // 批量切换疏散方向
   // filters: { building, floors: [], areas: [], deviceTypes: [] }
   function batchSwitchEvacuationDirection(filters, newDirection, reason = '管理员批量切换') {
+    // B1-02：demo 模式下设备方向只能来自 DemoWorld.devices → WS → store
+    if (demoGuard('batchSwitchEvacuationDirection')) return { count: 0, ids: [], oldDirections: [] }
     addOperationLog('批量调整疏散灯方向', '设备控制', reason + ' ' + newDirection)
     const devs = asArray(devices.value).filter((d) => {
       if (!d || d.type !== 'evacuation_light') return false
@@ -750,6 +765,8 @@ export const useFireStore = defineStore('fire', () => {
 
   // 启动应急疏散模式
   function setEmergencyMode(active) {
+    // B1-02：demo 模式下 emergencyMode / 设备应急态来自 DemoWorld.lighting → WS → store
+    if (demoGuard('setEmergencyMode')) return
     emergencyMode.value = active
     asArray(devices.value).forEach((d) => {
       if (d.type === 'emergency_light' || d.type === 'evacuation_light') {
@@ -782,6 +799,8 @@ export const useFireStore = defineStore('fire', () => {
 
   // 恢复疏散指示灯默认方向（按走廊分界点 x=280：左半区朝西侧出口(左)，右半区朝东侧出口(右)）
   function resetEvacLightDirections() {
+    // B1-02：demo 模式下疏散灯方向只来自 DemoWorld.devices → WS → store
+    if (demoGuard('resetEvacLightDirections')) return
     asArray(devices.value).forEach((d) => {
       if (d && d.type === 'evacuation_light' && typeof d.x === 'number') {
         const nd = d.x < 280 ? 'left' : 'right'
@@ -844,6 +863,8 @@ export const useFireStore = defineStore('fire', () => {
 
   // ── 阶段 1：检测发现火情（仅产生发现产物；灯/人员联动等待管理员确认） ──
   function detectFireScenario(building = '3号楼', floor = '5F', area = 'A区') {
+    // B1-01：demo 模式下火情由后端状态机 START_FIRE 产生，禁止本地构造 fireEvent / 推进 emergencyStage
+    if (demoGuard('detectFireScenario')) return false
     // 已有火情（含外部页面触发残留）时先整体复位，保证演示从干净状态开始
     if (fireEvent.value) resetEmergencyFlow()
     addOperationLog('发现火灾', '演示流程', `${building} ${floor}-${area}`, 'warning')
@@ -1004,6 +1025,8 @@ export const useFireStore = defineStore('fire', () => {
 
   // ── 阶段 4 准备：路线计算（封堵火源 → 受影响区域局部重规划 → 推荐高亮 → 疏散灯按推荐方向联动） ──
   function generateEvacuationOptions() {
+    // B1-01：demo 模式下阶段与方案均由后端下发，本地不得自算并写 emergencyStage
+    if (demoGuard('generateEvacuationOptions')) return []
     const fe = fireEvent.value
     if (!fe) return []
     addOperationLog('生成疏散路线', '疏散规划', '整栋楼各楼层/区域生成整体疏散方案')
@@ -1047,6 +1070,8 @@ export const useFireStore = defineStore('fire', () => {
   // ── 阶段 4：管理员预览/切换方案 ──
   // 切换的是「整栋楼方案」：任何一条区域路线都携带 buildingPlanId，点选即全楼切换。
   function selectEvacuationPlan(planId) {
+    // B1-03：demo 模式下方案选择只走 demoStore.selectedPlanId（见 setActiveBuildingPlan）
+    if (demoGuard('selectEvacuationPlan')) return false
     const plan = getRoutePlanById(planId)
     if (!plan) return false
     if (plan.buildingPlanId && buildingEvacuationPlans.value.some((p) => p.id === plan.buildingPlanId)) {
@@ -1200,6 +1225,8 @@ export const useFireStore = defineStore('fire', () => {
 
   // 疏散完成：统一计算滞留人员并进入阶段5（滞留人员识别）
   function finishEvacuation() {
+    // B1-01：demo 模式下疏散进度由后端 tick 驱动，本地不得结算并写 emergencyStage
+    if (demoGuard('finishEvacuation')) return
     const fe = fireEvent.value
     if (!fe) return
     stopEvacuationSim()
@@ -1305,6 +1332,8 @@ export const useFireStore = defineStore('fire', () => {
 
   // ── 重置演示：整体复位（清除火情/路线/应急照明、人员坐标恢复、流程归零） ──
   function resetEmergencyFlow() {
+    // B1-01：demo 模式下复位由 RESET 命令 → 后端 snapshot 完成，禁止本地清零 emergencyStage / 人员坐标
+    if (demoGuard('resetEmergencyFlow')) return false
     // clearRouteFire 内部依次：clearFireScenario → 清封堵/方案复位/解除应急模式 → 停疏散动画 → 人员坐标恢复 → 流程归零
     clearRouteFire()
     asArray(persons.value).forEach((p) => { delete p._stranded; if (p.status === 'stranded' || p.status === 'located') p.status = 'normal' })
@@ -1313,6 +1342,8 @@ export const useFireStore = defineStore('fire', () => {
 
   // ── 外部页面直接触发火灾（triggerFireScenario/simulateFireAlarm）后回到首页：同步为「疏散方案决策」阶段 ──
   function syncStageAfterExternalFire() {
+    // B1-01：demo 模式下不存在「外部页面本地触发火灾」，火情只来自后端 START_FIRE
+    if (demoGuard('syncStageAfterExternalFire')) return false
     const fe = fireEvent.value
     if (!fe) return false
     // 等待态（0/1/2/3）→ 完整联动已发生 → 直接进入方案决策；执行中不打断
@@ -1731,6 +1762,8 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   function updateDeviceStatus(deviceId, status) {
+    // B1-02：demo 模式下设备状态只来自 DemoWorld.devices → WS → store
+    if (demoGuard('updateDeviceStatus')) return
     const dev = devices.value.find((d) => d.id === deviceId)
     if (dev) {
       dev.status = status
@@ -2004,6 +2037,8 @@ export const useFireStore = defineStore('fire', () => {
 
   // ================== 照明相关 ==================
   function switchLightingMode(mode) {
+    // B1-04：demo 模式下灯光模式只来自 DemoWorld.lighting → WS → store
+    if (demoGuard('switchLightingMode')) return lightingStatus.value
     const config = lightingModes[mode] || lightingModes.daily
     lightingStatus.value.mode = mode
     lightingStatus.value.brightness = config.brightness
@@ -2040,6 +2075,8 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   function simulatePersonEnter() {
+    // B1-04：demo 模式下设备人员感应 / 亮度联动由 DemoEngine 驱动
+    if (demoGuard('simulatePersonEnter')) return null
     const newPerson = simulatePerson()
 
     const targetLight = lightingDevices.value.find(
@@ -2147,6 +2184,8 @@ export const useFireStore = defineStore('fire', () => {
   // ================== 六阶段演示流程（真实改变平台状态，统一单一数据源） ==================
   // 0=正常 / 1=发现火灾 / 2=启动应急响应 / 3=疏散路径 / 4=智能疏散 / 5=滞留人员识别 / 6=协同救援
   function startDemoFlow() {
+    // B1-01：demo 模式的「发现火灾」必须经后端 START_FIRE（由 platformStore 派发）
+    if (demoGuard('startDemoFlow')) return false
     resetEmergencyFlow()
     demoMode.value = true
     return detectFireScenario('3号楼', '5F', 'A区') // ① 发现火灾
@@ -2155,6 +2194,8 @@ export const useFireStore = defineStore('fire', () => {
   // 推进一步：根据当前阶段执行对应的真实状态变更（供演示面板「下一步」调用）
   // 六阶段：0=正常 / 1=发现火灾 / 2=启动应急响应 / 3=疏散路径 / 4=智能疏散 / 5=滞留人员识别 / 6=协同救援
   function advanceDemoStage() {
+    // B1-01：demo 模式的阶段推进由后端状态机负责，本地不得按 emergencyStage 自行迁移
+    if (demoGuard('advanceDemoStage')) return false
     const s = emergencyStage.value
     if (s === 0) return startDemoFlow()                    // ① 发现火灾 → emergencyStage=1
     if (s === 1) return activateEmergencyResponse()        // ② 启动应急响应 → emergencyStage=2
@@ -2176,6 +2217,8 @@ export const useFireStore = defineStore('fire', () => {
 
   // 阶段4：管理员调整疏散指示灯方向（按当前推荐/已选方案联动所有 evacuation_light）
   function adjustEvacuationDirection() {
+    // B1-02：demo 模式下疏散灯方向联动由 DemoEngine 下发
+    if (demoGuard('adjustEvacuationDirection')) return false
     const plan = getRoutePlanById(activeRoutePlanId.value)
     if (!plan) return false
     applyRouteToDevices(plan)
@@ -2185,6 +2228,8 @@ export const useFireStore = defineStore('fire', () => {
 
   // 阶段4：启动疏散指示灯脉冲强闪（应急强闪）+ 开始人员疏散动态模拟
   function startPulseFlash() {
+    // B1-02：demo 模式下应急灯强闪来自 DemoWorld.lighting / devices，不由前端启动
+    if (demoGuard('startPulseFlash')) return false
     const plan = getRoutePlanById(activeRoutePlanId.value)
     if (!plan) return false
     setEmergencyMode(true)
@@ -2571,6 +2616,9 @@ export const useFireStore = defineStore('fire', () => {
 
   /** 本地（mock / 无后端）生成整栋楼三套方案 */
   function generateBuildingEvacuationPlans(opts = {}) {
+    // B1-03：demo 模式下疏散方案唯一权威是 Backend DemoEngine 生成的 buildingPlans
+    // （DemoRoom/engine → WS snapshot → demoStore → fireStore），禁止前端本地再生成一套 A/B/C
+    if (demoGuard('generateBuildingEvacuationPlans')) return { plans: [], groups: [], active: null }
     const buildingId = opts.buildingId || routeBuildingId.value
     const buildingName = getRouteBuildingName(buildingId)
     const maxFloor = getBuildingFloors(buildingId)
@@ -2675,6 +2723,18 @@ export const useFireStore = defineStore('fire', () => {
       syncLegacyRouteState(cached, buildingPlanActiveCache.value[bid] || preferredPlanIdOf(cached))
       routeBuildingId.value = bid
       return true
+    }
+    // B1-03：demo 模式下禁止本地生成方案；改为清空当前方案集合，
+    // 避免「没有该楼栋的方案」时继续渲染上一栋楼的方案（跨楼栋串用）。
+    if (dataSource.isDemo) {
+      buildingEvacuationPlans.value = []
+      activeBuildingPlanId.value = null
+      activeRoutePlanId.value = null
+      routePlans.value = []
+      routeMatrix.value = null
+      routeDeviceBindings.value = []
+      routeBuildingId.value = bid
+      return false
     }
     const res = generateBuildingEvacuationPlans({ buildingId: bid })
     const plans = (res && res.plans) || []
@@ -2876,6 +2936,8 @@ export const useFireStore = defineStore('fire', () => {
   // 根据路线出口方向自动联动沿途疏散灯
   // P1.6.2：楼层归属用统一三元组判定 —— buildingId（兼容旧 buildingName）+ floorId + 路线途经楼层
   function applyRouteToDevices(plan, bindingsAcc) {
+    // B1-02：demo 模式下设备方向 / 应急态来自 DemoWorld.devices → WS → store
+    if (demoGuard('applyRouteToDevices')) return bindingsAcc || []
     if (!plan) return
     const buildingKey = plan.buildingId || plan.buildingName
     const floorsPassed = plan.floorsPassed || []

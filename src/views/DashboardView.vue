@@ -1276,6 +1276,7 @@ watch(
 function pickPlan(p) {
   if (!p) return
   // 直接使用 activeRoutePlanId 确保预览方案切换即时生效
+  // （设备方向联动 applyRouteToDevices 在 demo 模式下已是只读空操作，不会写业务状态）
   store.activeRoutePlanId = p.id
   store.applyRouteToDevices(p)
 }

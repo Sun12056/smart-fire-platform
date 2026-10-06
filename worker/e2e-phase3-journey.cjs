@@ -53,11 +53,14 @@ function compareMovement(cur, intervalMs) {
 
 // ─────────────────────────── 采集 ───────────────────────────
 async function collectFrontend() {
-  return page.evaluate(() => {
+  return page.evaluate(async () => {
     const tally = (list) => list.reduce((m, k) => { m[k] = (m[k] || 0) + 1; return m }, {})
     const text = (sel) => { const e = document.querySelector(sel); return e ? (e.textContent || '').trim() : null }
     const demo = window.__demo.demoStore
     const store = window.__demo.store
+    // P1.7.3-B1：demo 模式下操作日志唯一权威是 D1 operation_logs，前端不再本地记账，
+    // 采集前主动回读一次，保证「日志」这一路仍是「后端权威 vs 前端镜像」的对账口径。
+    try { await store.refreshOperationLogs() } catch (e) { /* 回读失败不阻断采集 */ }
     const ps = demo.persons || []
     const ds = demo.devices || []
     const sps = store.persons || []

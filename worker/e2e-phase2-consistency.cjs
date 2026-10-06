@@ -1075,15 +1075,18 @@ const keysOf = (o) => (o && typeof o === 'object' ? Object.keys(o) : [])
     return out
   }, ['B001', 'B002', 'B003', 'B004', 'B001'])
   isolation.forEach((r) => {
-    const ok = r.planBuildingId === r.selectedBuildingId
-    check(`切至 ${r.selectedBuildingId}：activeBuildingPlan.buildingId === 当前楼栋`, ok, r)
+    // P1.7.3-B1：demo 模式下不再为「非灾情楼栋」本地生成方案（方案唯一权威是后端 buildingPlans），
+    // 因此 acceptable = 属于当前楼栋的方案，或该楼栋确实没有方案（null）——唯一不可接受的是
+    // 「渲染了别的楼栋的方案」（跨楼栋串用）。
+    const ok = r.planBuildingId === r.selectedBuildingId || r.planBuildingId === null
+    check(`切至 ${r.selectedBuildingId}：无跨楼栋方案（${r.planBuildingId === null ? '该楼栋无方案' : r.planBuildingId}）`, ok, r)
     if (!ok) {
       recordRed('E1', `切换到 ${r.selectedBuildingId} 后当前方案仍是 ${r.planBuildingId} 的方案`,
         `selectedBuildingId=${r.selectedBuildingId}, activeBuildingPlanId=${r.activeBuildingPlanId}, activeBuildingPlan.buildingId=${r.planBuildingId}`,
         'src/views/DashboardView.vue:1930-1934（plans 仅在为空时生成一次，切楼栋不清方案）；src/views/RoutePlanView.vue:523 同理')
     }
   })
-  const hasIsolationRed = isolation.some((r) => r.planBuildingId !== r.selectedBuildingId)
+  const hasIsolationRed = isolation.some((r) => r.planBuildingId !== null && r.planBuildingId !== r.selectedBuildingId)
   check('楼栋切换隔离：不存在跨楼栋方案渲染（24 场景不会被旧方案污染）', !hasIsolationRed, isolation)
 
   /* ══════════════════ [3D] 旧别名依赖（source-level） ══════════════════ */
