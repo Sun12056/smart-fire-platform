@@ -19,10 +19,12 @@ import {
 } from '../mock/person'
 import {
   lightingModes,
-  lightingDevices as initialLightingDevices,
   defaultLighting as initialLightingStatus,
   brightnessHistory as initialBrightnessHistory,
 } from '../mock/lighting'
+// P1.7.3-B4-02：不再从 mock/lighting 导入「第二份灯具台账」。
+// 灯具设备的唯一权威 = devices（Backend / WS → demoStore → fireStore.devices），
+// lightingDevices 只是它的只读派生投影（见下方定义）。
 import {
   inspectionItems,
   inspectionSteps as initialInspectionSteps,
@@ -671,7 +673,14 @@ export const useFireStore = defineStore('fire', () => {
       ? { ...initialLightingStatus, currentMode: lightingModes?.daily || {} }
       : { currentMode: lightingModes?.daily || {} }
   )
-  const lightingDevices = ref(Array.isArray(initialLightingDevices) ? [...initialLightingDevices] : [])
+  // P1.7.3-B4-02：灯具设备**不再独立维护第二份集合**。
+  // 唯一权威链：Backend / WS → demoStore.devices → fireStore.devices →（本投影）→ LightingView。
+  // 只读派生：LightingView / 各消费方只能读它，禁止写回；成员集合恒等于 devices 里的 emergency_light。
+  const lightingDevices = computed(
+    () => asArray(devices.value).filter((d) => d && d.type === 'emergency_light'),
+  )
+  // 聚合态里的「当前设备」也必须与统一集合同源（旧台账对象已退休）
+  if (lightingStatus.value) lightingStatus.value.currentDevice = lightingDevices.value[0] || null
   const brightnessHistory = ref({
     time: Array.isArray(initialBrightnessHistory?.time) ? [...initialBrightnessHistory.time] : [],
     values: Array.isArray(initialBrightnessHistory?.values) ? [...initialBrightnessHistory.values] : [],
@@ -1990,9 +1999,10 @@ export const useFireStore = defineStore('fire', () => {
     // 重置应急事件
     currentEmergency.value = null
     emergencyStepList.value = [...emergencySteps]
-    // 重置照明
+    // 重置照明（P1.7.3-B4-02：灯具集合不再单独重置 —— 上面 devices 已重建，
+    // lightingDevices 是它的派生投影会随之收敛；这里只重置聚合态与历史）
     lightingStatus.value = { ...initialLightingStatus, currentMode: lightingModes.daily }
-    lightingDevices.value = JSON.parse(JSON.stringify(initialLightingDevices))
+    lightingStatus.value.currentDevice = lightingDevices.value[0] || null
     brightnessHistory.value = {
       time: [...initialBrightnessHistory.time],
       values: [...initialBrightnessHistory.values],

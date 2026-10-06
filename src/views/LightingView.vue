@@ -387,6 +387,9 @@ const modeList = computed(() =>
   }))
 )
 
+// P1.7.3-B4-02：本页灯具设备只有一个来源 —— store.lightingDevices，
+// 它是 fireStore.devices（Backend / WS → demoStore → fireStore）的只读派生投影；
+// 本页不再持有 / 维护任何独立的灯具集合，也不得反向写入设备业务状态。
 // 楼栋/楼层选项
 const buildingOptions = computed(() => {
   const set = new Set(store.lightingDevices.map((d) => d.building))
