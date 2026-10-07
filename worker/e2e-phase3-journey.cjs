@@ -295,7 +295,7 @@ function dialogOpen(name) {
   )
 }
 
-async function stepDialog(label, dlgName, btnName, { expect = null, timeout = 12000, appearTimeout = 8000 } = {}) {
+async function stepDialog(label, dlgName, btnName, { expect = null, target = null, timeout = 12000, appearTimeout = 8000 } = {}) {
   const before = await snap()
   // ① 弹窗必须随阶段出现
   const appeared = await waitFor(() => dialogOpen(dlgName), appearTimeout)
@@ -315,8 +315,18 @@ async function stepDialog(label, dlgName, btnName, { expect = null, timeout = 12
   } else if (appeared) {
     console.log(`   ✓ B 链业务弹窗「${dlgName}」出现 → 点击「${btnName}」→ 已关闭`)
   }
-  // ③ A/B 链断裂：点业务弹窗是否推进后端阶段
-  if (!moved.changed) {
+  // ③ A/B 链断裂判定：P1.7 批次 A 起改为「后端 stage 必须落到该入口的目标阶段」。
+  //    同一条后端迁移可能被上游入口先消费（幂等），因此「本步未变化」不再直接判断裂，
+  //    只有「最终 stage 不等于目标阶段」才判断裂——仍然是后端 stage 判定，不看 UI。
+  if (target) {
+    const finalStage = row.fe.stage
+    if (finalStage === target) {
+      console.log(`   ✓ B 链业务弹窗后端 stage 落到目标阶段 ${target}${moved.changed ? `（本步推进 ${before.fe.stage} → ${moved.newStage}）` : '（上游已推进，本步幂等）'}`)
+    } else {
+      console.log(`   ✗ 点业务弹窗「${dlgName}」后后端 stage 未落到 ${target}（实际 ${finalStage}）`)
+      breaks.push(`${label}：点业务弹窗后后端 stage 未落到目标阶段（期望 ${target}，实际 ${finalStage}）`)
+    }
+  } else if (!moved.changed) {
     console.log(`   ✗ 点业务弹窗「${dlgName}」后后端阶段未推进（仍 ${before.fe.stage}）`)
     breaks.push(`${label}：点业务弹窗不推进后端阶段（点「${btnName}」后 stage 仍为 ${before.fe.stage}）`)
   } else {
@@ -325,10 +335,17 @@ async function stepDialog(label, dlgName, btnName, { expect = null, timeout = 12
   return row
 }
 
-/** B 链的业务按钮（如楼层火处置面板），同样记录「点业务入口不推进后端阶段」 */
-async function stepBiz(label, action, { expect = null, timeout = 12000 } = {}) {
+/** B 链的业务按钮（如楼层火处置面板）：同样按「后端 stage 是否落到目标阶段」判定 */
+async function stepBiz(label, action, { expect = null, target = null, timeout = 12000 } = {}) {
   const row = await step(label, action, { expect, timeout })
-  if (!row.moved.changed) {
+  if (target) {
+    const finalStage = row.fe.stage
+    if (finalStage === target) {
+      console.log(`   ✓ B 链业务入口后端 stage 落到目标阶段 ${target}${row.moved.changed ? `（本步推进）` : '（上游已推进，本步幂等）'}`)
+    } else {
+      breaks.push(`${label}：点业务入口后后端 stage 未落到目标阶段（期望 ${target}，实际 ${finalStage}）`)
+    }
+  } else if (!row.moved.changed) {
     breaks.push(`${label}：点业务入口不推进后端阶段（点击后 stage 仍为 ${row.before ? row.before.stage : row.fe.stage}）`)
   }
   return row
@@ -410,12 +427,14 @@ async function runRound(n) {
   await S('00 基线（进入页面后的初始状态）', null, { timeout: 1000 })
   const roundBase = rows.length - 1
   await S('01 模拟火灾', () => clickByText(page, '模拟火灾'), { expect: 'FIRE_DETECTED' })
-  await SD('02 查看火情（业务弹窗①）', '发现火灾', '查看火情', { timeout: 3000 })
+  // P1.7 批次 A：FIRE_DETECTED → EMERGENCY_RESPONSE 由「确认火情」拥有；
+  // 「查看火情」维持纯 UI 记账（target 仍是 FIRE_DETECTED），「启动应急预案」为幂等确认。
+  await SD('02 查看火情（业务弹窗①）', '发现火灾', '查看火情', { timeout: 3000, target: 'FIRE_DETECTED' })
   await sleep(1000) // 「确认火情」是查看火情后 800ms 自动弹出
-  await SD('03 确认火情（业务弹窗①b，任务书第 4 步）', '确认火情', '确认火情', { timeout: 3000 })
+  await SD('03 确认火情（业务弹窗①b，任务书第 4 步）', '确认火情', '确认火情', { timeout: 3000, target: 'EMERGENCY_RESPONSE' })
   await sleep(1000) // 「是否启动应急预案」是确认火情后 800ms 自动弹出
   // P1.7.2 / P1-04：业务弹窗必须驱动后端状态机 —— 这里强制要求后端落到 EMERGENCY_RESPONSE
-  await SD('04 启动应急预案（业务弹窗②）', '是否启动应急预案', '启动应急预案', { timeout: 3000, expect: 'EMERGENCY_RESPONSE' })
+  await SD('04 启动应急预案（业务弹窗②）', '是否启动应急预案', '启动应急预案', { timeout: 3000, target: 'EMERGENCY_RESPONSE' })
   await S('05 [A链] 演示控制台推进 → 疏散路径规划', () => clickFlowButton(page), { expect: 'ROUTE_PLANNING' })
   // P0-01 验证：查看火情后「发现火灾」弹窗不得再出现（连续 10s，期间 WS 快照会持续到来）
   const dlg = await sample('06 P0-01 弹窗残留监控（10s）', 10000)
@@ -436,11 +455,12 @@ async function runRound(n) {
   await sample('13 疏散采样 t0+9s', TICK_WAIT)
   await S('14 [A链] 推进 → 滞留人员识别', () => clickFlowButton(page), { expect: 'RETAINED_PERSONS' })
   await sample('15 查看滞留人员位置', 1200)
-  await SB('16 [B链] 确认人员位置（楼层火处置面板）', () => clickByText(page, '确认人员位置', null, 'button'), { timeout: 3000 })
-  await SD('17 [B链] 启动应急协同救援（业务弹窗③）', '启动应急协同救援', '启动应急协同救援', { timeout: 3000, expect: 'RESCUE_COORDINATION' })
+  // P1.7 批次 A：RETAINED_PERSONS → RESCUE_COORDINATION 由「确认人员位置」拥有，弹窗③为幂等确认。
+  await SB('16 [B链] 确认人员位置（楼层火处置面板）', () => clickByText(page, '确认人员位置', null, 'button'), { timeout: 3000, target: 'RESCUE_COORDINATION' })
+  await SD('17 [B链] 启动应急协同救援（业务弹窗③）', '启动应急协同救援', '启动应急协同救援', { timeout: 3000, target: 'RESCUE_COORDINATION' })
   // P1-03 修复后：业务弹窗③本身已把后端推到 RESCUE_COORDINATION，
   // 收尾的 COMPLETE_RESCUE 同样走业务按钮（楼层火处置面板），控制台只作为备用链条保留。
-  await SB('18 [B链] 启动消防救援协同（楼层火处置面板）', () => clickByText(page, '启动消防救援协同', null, 'button'), { expect: 'COMPLETED' })
+  await SB('18 [B链] 启动消防救援协同（楼层火处置面板）', () => clickByText(page, '启动消防救援协同', null, 'button'), { expect: 'COMPLETED', target: 'COMPLETED' })
   await sample('19 救援完成后状态', 1200)
   await S('20 [A链] 兜底：已完成阶段再点推进（不得报错/不得改变阶段）', () => clickFlowButton(page), { expect: 'COMPLETED' })
   // RESET：真实用户会先试「正常状态」，无效再试「停止重置」——两种都记录下来

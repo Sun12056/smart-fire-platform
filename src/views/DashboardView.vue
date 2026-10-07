@@ -1325,11 +1325,15 @@ function handleViewFire() {
   responseDialogTimer = setTimeout(() => { showFireConfirmDialog.value = true }, 800)
 }
 
-// ①b 确认火情：写后台日志（不是 Toast），不改变任何阶段；确认后才允许进入「是否启动应急预案」
-function confirmFireIncident() {
+// ①b 确认火情：写后台日志 + 接入 FIRE_DETECTED → EMERGENCY_RESPONSE 的后端指令链
+// P1.7 批次 A：原先只做前端本地记账（点了后端 stage 不动）。现在复用现有 ACTIVATE_RESPONSE 指令链，
+// 阶段仍由后端 snapshot 回来，前端不自行改 stage。「是否启动应急预案」弹窗行为保持不变（幂等确认）。
+async function confirmFireIncident() {
   showFireConfirmDialog.value = false
   const ok = store.confirmFireAcknowledged()
   if (!ok) return
+  // 唯一权威推进：现有 demo 指令链 ACTIVATE_RESPONSE（FIRE_DETECTED → EMERGENCY_RESPONSE）
+  await store.activateEmergencyResponse()
   if (responseDialogTimer) clearTimeout(responseDialogTimer)
   responseDialogTimer = setTimeout(() => { showResponseDialog.value = true }, 800)
 }
@@ -1355,10 +1359,14 @@ function handleStartEmergencyResponse() {
   store.activateEmergencyResponse()
 }
 // 阶段4 的「调整指示方向 / 脉冲强闪 / 人员疏散动画」已在 confirmEvacuationPlan 内自动执行（fireStore.startPulseFlash）
-// 阶段6：确认滞留人员位置 → 弹出「启动应急协同救援」确认弹窗（第 3 个业务弹窗）
-function confirmStranded() {
+// 阶段6：确认滞留人员位置 → 接入 RETAINED_PERSONS → RESCUE_COORDINATION 后端指令链 + 弹出「启动应急协同救援」
+// P1.7 批次 A：原先只开弹窗不下发指令（点了后端 stage 不动）。现在复用现有 CONFIRM_RETAINED 指令链，
+// 弹窗③「启动应急协同救援」的出现/关闭行为保持不变（其点击变为幂等确认）。
+async function confirmStranded() {
   if (!store.strandedPersons.length) return
   showRescueDialog.value = true
+  // 唯一权威推进：现有 demo 指令链 CONFIRM_RETAINED（RETAINED_PERSONS → RESCUE_COORDINATION）
+  await store.confirmStrandedLocation()
 }
 // 弹窗确认：确认人员位置 → demo 模式只派发 CONFIRM_RETAINED（协同救援阶段由后端迁移）
 async function handleStartRescue() {
