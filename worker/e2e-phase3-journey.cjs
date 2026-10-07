@@ -168,15 +168,24 @@ async function collectFrontend() {
       },
       twin: (() => {
         const w = window.__dtwin
-        if (!w || !w.scene || !w.scene.renderer) return { mounted: false }
+        if (!w || !w.scene || !w.scene.renderer) return { mounted: false, handle: false }
         const pd = (w.persons && w.persons.data ? w.persons.data.filter(Boolean) : [])
+        // P1.7 批次 B-02：句柄必须指向「当前挂载着」的场景才能读 visible。
+        // 组件卸载后 window.__dtwin 若未清理（B3-04 P2-02），其 group.visible 是冻结的旧值，
+        // 直接读会误判为 3D 残留。未挂载 = 屏幕上没有 3D = 无可见残留，一律记 false。
+        const mounted = Boolean(w.scene.renderer.domElement.isConnected)
+        const vis = (layer, extra) => (layer && mounted
+          ? { visible: Boolean(layer.group.visible), ...extra }
+          : { visible: false, ...extra })
         return {
-          mounted: Boolean(w.scene.renderer.domElement.isConnected),
-          persons: pd.length,
+          mounted,
+          handle: true,
+          staleHandle: !mounted,
+          persons: mounted ? pd.length : 0,
           personSample: pd.slice(0, 3).map((d) => `${d.id}:${String(d.routeKey || '').slice(0, 18)}:${(d.pts || []).length}`),
-          route: w.route ? { visible: Boolean(w.route.group.visible), planId: w.route.currentPlanId || null, curves: (w.route.activeCurves || []).length } : null,
-          fire: w.fire ? { visible: Boolean(w.fire.group.visible), floorId: w.fire.activeFloorId || null, zone: w.fire.activeZone || null } : null,
-          rescue: w.rescue ? { visible: Boolean(w.rescue.group.visible), active: Boolean(w.rescue.active) } : null,
+          route: w.route ? vis(w.route, { planId: w.route.currentPlanId || null, curves: (w.route.activeCurves || []).length }) : null,
+          fire: w.fire ? vis(w.fire, { floorId: w.fire.activeFloorId || null, zone: w.fire.activeZone || null }) : null,
+          rescue: w.rescue ? vis(w.rescue, { active: Boolean(w.rescue.active) }) : null,
         }
       })(),
     }
@@ -375,7 +384,13 @@ function printResetChecklist(baseIdx = 0) {
     ['device modes', JSON.stringify(base.fe.devices.byMode), JSON.stringify(f.devices.byMode)],
     ['device 位置指纹', String(base.fe.deviceFP), String(f.deviceFP)],
     ['metrics', JSON.stringify(base.fe.metrics), JSON.stringify(f.metrics)],
-    ['3D fire / route 可见', 'false/false', `${f.twin && f.twin.fire ? f.twin.fire.visible : '?'}/${f.twin && f.twin.route ? f.twin.route.visible : '?'}`],
+    // P1.7 批次 B-02：3D 未挂载 = 屏幕上没有 3D = 无可见残留，记 false；
+    // 挂载时的实质残留检查见第 25 步「3D 残留检查」。
+    ['3D fire / route 可见', 'false/false', (() => {
+      const t = f.twin
+      if (!t || !t.mounted) return 'false/false'
+      return `${Boolean(t.fire && t.fire.visible)}/${Boolean(t.route && t.route.visible)}`
+    })()],
     ['operationLogs 含复位记录', 'true', String((f.logs.last || []).some((x) => x.includes('重置') || x.includes('复位') || x.includes('解除')))],
   ]
   // P1.7 第一阶段验收口径：RESET 后「干净初始状态」= WS 快照 + UI 双口径。
