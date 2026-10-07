@@ -280,6 +280,60 @@ async function sample(label, waitMs) {
   return record(label, before, null, { changed: false, newStage: before.fe.stage, waitedMs: waitMs, reason: '仅采样' }, null)
 }
 
+// ─────────────────────────── B 链（业务弹窗 / 业务按钮）───────────────────────────
+/**
+ * P1.7 第一阶段验收口径 A+B 双链：
+ *   主链（A）= 演示控制台推进六阶段；
+ *   同时在每个阶段验证 Dashboard 业务弹窗是否正确「出现 → 点击 → 关闭」，
+ *   并把「点业务弹窗不推进后端阶段」显式记为待修问题（而非静默忽略）。
+ */
+function dialogOpen(name) {
+  return page.evaluate(
+    (n) => Array.from(document.querySelectorAll('.biz-dialog-title'))
+      .some((e) => (e.textContent || '').includes(n)),
+    name,
+  )
+}
+
+async function stepDialog(label, dlgName, btnName, { expect = null, timeout = 12000, appearTimeout = 8000 } = {}) {
+  const before = await snap()
+  // ① 弹窗必须随阶段出现
+  const appeared = await waitFor(() => dialogOpen(dlgName), appearTimeout)
+  if (!appeared) {
+    console.log(`   ✗ 业务弹窗「${dlgName}」未出现（等待 ${appearTimeout}ms）`)
+    breaks.push(`${label}：Dashboard 业务弹窗「${dlgName}」未出现`)
+  }
+  const clickInfo = await clickInDialog(page, dlgName, btnName)
+  const moved = await waitStageChange(before.fe.stage, timeout)
+  const row = await record(label, before, clickInfo, moved, expect)
+  // ② 弹窗点击后必须关闭
+  await sleep(400)
+  const still = await dialogOpen(dlgName)
+  if (still) {
+    console.log(`   ✗ 业务弹窗「${dlgName}」点击后仍未关闭`)
+    breaks.push(`${label}：业务弹窗「${dlgName}」点击后未关闭`)
+  } else if (appeared) {
+    console.log(`   ✓ B 链业务弹窗「${dlgName}」出现 → 点击「${btnName}」→ 已关闭`)
+  }
+  // ③ A/B 链断裂：点业务弹窗是否推进后端阶段
+  if (!moved.changed) {
+    console.log(`   ✗ 点业务弹窗「${dlgName}」后后端阶段未推进（仍 ${before.fe.stage}）`)
+    breaks.push(`${label}：点业务弹窗不推进后端阶段（点「${btnName}」后 stage 仍为 ${before.fe.stage}）`)
+  } else {
+    console.log(`   ✓ B 链业务弹窗推进了后端阶段：${before.fe.stage} → ${moved.newStage}`)
+  }
+  return row
+}
+
+/** B 链的业务按钮（如楼层火处置面板），同样记录「点业务入口不推进后端阶段」 */
+async function stepBiz(label, action, { expect = null, timeout = 12000 } = {}) {
+  const row = await step(label, action, { expect, timeout })
+  if (!row.moved.changed) {
+    breaks.push(`${label}：点业务入口不推进后端阶段（点击后 stage 仍为 ${row.before ? row.before.stage : row.fe.stage}）`)
+  }
+  return row
+}
+
 // ─────────────────────────── J. RESET 干净态核对 ───────────────────────────
 function printResetChecklist(baseIdx = 0) {
   const r = rows[rows.length - 1]
@@ -307,11 +361,36 @@ function printResetChecklist(baseIdx = 0) {
     ['3D fire / route 可见', 'false/false', `${f.twin && f.twin.fire ? f.twin.fire.visible : '?'}/${f.twin && f.twin.route ? f.twin.route.visible : '?'}`],
     ['operationLogs 含复位记录', 'true', String((f.logs.last || []).some((x) => x.includes('重置') || x.includes('复位') || x.includes('解除')))],
   ]
+  // P1.7 第一阶段验收口径：RESET 后「干净初始状态」= WS 快照 + UI 双口径。
+  // 注意：persons 的 static、devices 的 offline、metrics 的 total 都是「初始基线固有值」
+  //（IDLE 时后台本就有 36 名静止人员、6 台离线设备、total=90），
+  // 因此这三项的判据是「回到基线」而不是「字面归零」；真正要求字面归零的只有疏散类状态。
+  const baseFe = base.fe
+  const diffKeys = (a, b) => {
+    const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})])
+    return [...keys].filter((k) => (a || {})[k] !== (b || {})[k]).map((k) => `${k}: 基线 ${(a || {})[k]} → 现 ${(b || {})[k]}`)
+  }
+  const pendingSteps = (f.ui.steps || []).filter((s) => s.endsWith(':-')).length
+  const abs = [
+    ['[绝对] persons 无 routePoints', '0', String(f.persons.withRoutePoints)],
+    ['[绝对] 无滞留人员', '0', String(f.ui.stranded)],
+    ['[绝对] 无救援任务', 'null', String(f.rescueTask)],
+    ['[绝对] UI 六步全 pending', '6/6 pending', `${pendingSteps}/${(f.ui.steps || []).length} pending  ${JSON.stringify(f.ui.steps)}`],
+    ['[回基线] persons byStatus', JSON.stringify(baseFe.persons.byStatus), JSON.stringify(f.persons.byStatus) + `  差=${JSON.stringify(diffKeys(baseFe.persons.byStatus, f.persons.byStatus))}`],
+    ['[回基线] devices byMode', JSON.stringify(baseFe.devices.byMode), JSON.stringify(f.devices.byMode) + `  差=${JSON.stringify(diffKeys(baseFe.devices.byMode, f.devices.byMode))}`],
+    ['[回基线] metrics', JSON.stringify(baseFe.metrics), JSON.stringify(f.metrics) + `  差=${JSON.stringify(diffKeys(baseFe.metrics, f.metrics))}`],
+  ]
   console.log('\n   ── J. RESET 干净初始状态核对（与本次第 00 步基线对比；观察，非断言）──')
   items.forEach(([k, exp, act]) => {
     const same = String(exp) === String(act)
     console.log(`   ${same ? '·' : '✗'} ${k.padEnd(22)} 期望=${exp}  实际=${act}`)
     if (!same) breaks.push(`RESET 残留：${k} 期望 ${exp}，实际 ${act}`)
+  })
+  console.log('   ── 验收口径：绝对项 + 回基线项 ──')
+  abs.forEach(([k, exp, act]) => {
+    const ok = String(act).startsWith(String(exp))
+    console.log(`   ${ok ? '·' : '✗'} ${k.padEnd(26)} 期望=${exp}  实际=${act}`)
+    if (!ok) breaks.push(`RESET 未回到干净初始状态：${k} 期望 ${exp}，实际 ${act}`)
   })
 }
 
@@ -324,16 +403,19 @@ async function runRound(n) {
   console.log(`  ℹ 控制台状态：${JSON.stringify(panelState)}`)
   const mark = []
   const S = async (label, action, opts) => { const r = await step(label, action, opts); mark.push({ label, ...pick(r) }); return r }
+  // B 链：业务弹窗 / 业务按钮，额外做「出现→点击→关闭」与「是否推进后端阶段」的验收
+  const SD = async (label, dlg, btn, opts) => { const r = await stepDialog(label, dlg, btn, opts); mark.push({ label, ...pick(r) }); return r }
+  const SB = async (label, action, opts) => { const r = await stepBiz(label, action, opts); mark.push({ label, ...pick(r) }); return r }
 
   await S('00 基线（进入页面后的初始状态）', null, { timeout: 1000 })
   const roundBase = rows.length - 1
   await S('01 模拟火灾', () => clickByText(page, '模拟火灾'), { expect: 'FIRE_DETECTED' })
-  await S('02 查看火情（业务弹窗①）', () => clickInDialog(page, '发现火灾', '查看火情'), { timeout: 3000 })
+  await SD('02 查看火情（业务弹窗①）', '发现火灾', '查看火情', { timeout: 3000 })
   await sleep(1000) // 「确认火情」是查看火情后 800ms 自动弹出
-  await S('03 确认火情（业务弹窗①b，任务书第 4 步）', () => clickInDialog(page, '确认火情', '确认火情'), { timeout: 3000 })
+  await SD('03 确认火情（业务弹窗①b，任务书第 4 步）', '确认火情', '确认火情', { timeout: 3000 })
   await sleep(1000) // 「是否启动应急预案」是确认火情后 800ms 自动弹出
   // P1.7.2 / P1-04：业务弹窗必须驱动后端状态机 —— 这里强制要求后端落到 EMERGENCY_RESPONSE
-  await S('04 启动应急预案（业务弹窗②）', () => clickInDialog(page, '是否启动应急预案', '启动应急预案'), { timeout: 3000, expect: 'EMERGENCY_RESPONSE' })
+  await SD('04 启动应急预案（业务弹窗②）', '是否启动应急预案', '启动应急预案', { timeout: 3000, expect: 'EMERGENCY_RESPONSE' })
   await S('05 [A链] 演示控制台推进 → 疏散路径规划', () => clickFlowButton(page), { expect: 'ROUTE_PLANNING' })
   // P0-01 验证：查看火情后「发现火灾」弹窗不得再出现（连续 10s，期间 WS 快照会持续到来）
   const dlg = await sample('06 P0-01 弹窗残留监控（10s）', 10000)
@@ -354,11 +436,11 @@ async function runRound(n) {
   await sample('13 疏散采样 t0+9s', TICK_WAIT)
   await S('14 [A链] 推进 → 滞留人员识别', () => clickFlowButton(page), { expect: 'RETAINED_PERSONS' })
   await sample('15 查看滞留人员位置', 1200)
-  await S('16 [B链] 确认人员位置（楼层火处置面板）', () => clickByText(page, '确认人员位置', null, 'button'), { timeout: 3000 })
-  await S('17 [B链] 启动应急协同救援（业务弹窗③）', () => clickInDialog(page, '启动应急协同救援', '启动应急协同救援'), { timeout: 3000, expect: 'RESCUE_COORDINATION' })
+  await SB('16 [B链] 确认人员位置（楼层火处置面板）', () => clickByText(page, '确认人员位置', null, 'button'), { timeout: 3000 })
+  await SD('17 [B链] 启动应急协同救援（业务弹窗③）', '启动应急协同救援', '启动应急协同救援', { timeout: 3000, expect: 'RESCUE_COORDINATION' })
   // P1-03 修复后：业务弹窗③本身已把后端推到 RESCUE_COORDINATION，
   // 收尾的 COMPLETE_RESCUE 同样走业务按钮（楼层火处置面板），控制台只作为备用链条保留。
-  await S('18 [B链] 启动消防救援协同（楼层火处置面板）', () => clickByText(page, '启动消防救援协同', null, 'button'), { expect: 'COMPLETED' })
+  await SB('18 [B链] 启动消防救援协同（楼层火处置面板）', () => clickByText(page, '启动消防救援协同', null, 'button'), { expect: 'COMPLETED' })
   await sample('19 救援完成后状态', 1200)
   await S('20 [A链] 兜底：已完成阶段再点推进（不得报错/不得改变阶段）', () => clickFlowButton(page), { expect: 'COMPLETED' })
   // RESET：真实用户会先试「正常状态」，无效再试「停止重置」——两种都记录下来
@@ -449,6 +531,15 @@ function pick(r) {
     console.log(`\n${'='.repeat(64)}\n  断裂点清单（观察记录，非失败判定）\n${'='.repeat(64)}`)
     if (!breaks.length) console.log('  （无）')
     else breaks.forEach((b, i) => console.log(`  ${i + 1}. ${b}`))
+
+    // ── A/B 双链验收小结 ──
+    // 同一断裂会在每一趟各记一次，这里按「步骤名 + 断裂类型」去重后呈现
+    const abAll = breaks.filter((b) => b.includes('不推进后端阶段') || b.includes('业务弹窗') || b.includes('业务入口'))
+    const ab = [...new Set(abAll.map((b) => b.replace(/^第 \d+ 趟[:：]\s*/, '')))]
+    console.log(`\n${'='.repeat(64)}\n  A+B 双链验收小结\n${'='.repeat(64)}`)
+    console.log(`  与「Dashboard 业务弹窗 / 业务入口」相关的断裂：${ab.length} 类（原始记录 ${abAll.length} 条，${ROUNDS} 趟）`)
+    ab.forEach((b, i) => console.log(`   ${i + 1}. ${b}`))
+    if (!ab.length) console.log('  （无）→ B 链业务入口与 A 链演示控制台在六阶段上完全等价')
 
     const errs = ctx.logs.filter((l) => l.startsWith('[error]') || l.startsWith('[pageerror]'))
     console.log(`\n  控制台错误 / 未捕获异常：${errs.length} 条`)
