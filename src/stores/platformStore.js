@@ -38,10 +38,14 @@ export const usePlatformStore = defineStore('platform', () => {
   })
 
   // demo 模式：后端阶段索引（0=IDLE … 6=RESCUE_COORDINATION）；mock 模式：本地 emergencyStage
+  // P1.7 批次 B-01：IDLE 时后端 stageIndex=0，语义是「流程未启动」而不是「停在第 1 步」。
+  // 旧实现把 i<=0 折叠成索引 0，导致 DemoPanel 把第 1 步渲染成 processing（RESET 后残留）。
+  // 这里改为返回 -1（无当前步），六步即全部 pending；判据仍取自后端 snapshot 派生的 demoStore.stageIndex，
+  // 不在组件里硬编码清空，RESET 后由 WS 快照驱动自动归零。
   const demoStepIndex = computed(() => {
     if (dataSource.isDemo) {
       const i = demoStore.stageIndex
-      if (i <= 0) return 0
+      if (i <= 0) return -1
       return Math.min(i - 1, 5)
     }
     const s = fireStore.emergencyStage
@@ -49,7 +53,8 @@ export const usePlatformStore = defineStore('platform', () => {
     return Math.min(s - 1, 5)
   })
 
-  const currentStep = computed(() => demoFlowSteps.value[demoStepIndex.value])
+  // demoStepIndex 可能为 -1（流程未启动），这里做安全取值
+  const currentStep = computed(() => demoFlowSteps.value[demoStepIndex.value] || null)
   const isLastStep = computed(() => demoStepIndex.value >= demoFlowSteps.value.length - 1)
   const progress = computed(() => (dataSource.isDemo ? demoStore.progress : (demoFlowActive.value ? Math.round((demoStepIndex.value / demoFlowSteps.value.length) * 100) : 0)))
 

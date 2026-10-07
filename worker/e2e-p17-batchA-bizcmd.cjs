@@ -140,12 +140,26 @@ async function t2() {
   }
 }
 
+/** 「确认人员位置」按钮由 v-if=strandedPersons.length 控制，且需停留在火警楼层面板才渲染。
+ *  后端进入 RETAINED_PERSONS 后前端可能还需要一点时间/一次导航才把它渲染出来，这里先等再点。 */
+async function ensureStrandedButton(timeout = 10000) {
+  const has = () => page.evaluate(
+    () => Array.from(document.querySelectorAll('button')).some((b) => (b.textContent || '').includes('确认人员位置')))
+  if (await waitFor(has, 4000)) return true
+  // 未渲染：先聚焦火区，把楼层火处置面板带出来（与 e2e-phase3-retention.cjs 的手动导航同思路）
+  const nav = await clickByText(page, '聚焦火区', null, 'button')
+  if (nav.ok) await settle(900)
+  return waitFor(has, timeout)
+}
+
 // ─────────────────────────── T3 确认人员位置 ───────────────────────────
 async function t3() {
   console.log('\n── T3 楼层火处置面板 → 确认人员位置 ──')
   await toRetainedPersons()
   const before = await beStage()
 
+  const ready = await ensureStrandedButton()
+  check('T3.0 「确认人员位置」业务入口已渲染', ready)
   const clickInfo = await clickByText(page, '确认人员位置', null, 'button')
   check('T3.1 找到并点击「确认人员位置」业务入口', Boolean(clickInfo && clickInfo.ok), clickInfo)
   await settle()
