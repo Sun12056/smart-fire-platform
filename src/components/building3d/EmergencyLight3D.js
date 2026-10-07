@@ -10,6 +10,10 @@ import * as THREE from 'three'
 import { COLORS, makeArrowTexture, seededRand, currentBuildingName } from './building3dUtils.js'
 // P1.7.3-B3-03：设备楼栋归属只认 canonical（buildingId），别名 building 仅在 canonical 缺失时兜底
 import { buildingIdOf, buildingNameOf } from '../../../shared/person/personRuntime.js'
+// P1.7.3-B4-03：应急灯运行态的唯一权威 = fireStore.devices[i]，本层只读 + 派生，禁止另立第二份运行态
+import {
+  deviceRuntimeState, deviceBrightnessRatio, deviceDirection, isDeviceEmergency, deviceIsOnline,
+} from '../../../shared/device/deviceRuntime.js'
 
 export class EmergencyLight3D {
   constructor(threeScene, model) {
@@ -116,7 +120,7 @@ export class EmergencyLight3D {
     spr.scale.set(0.8, 0.8, 1)
     spr.position.set(pos.x, pos.top + 0.75, pos.z)
     this.evacGroup.add(spr)
-    rec = { sprite: spr, dir, device: dev }
+    rec = { id: String(dev.id), sprite: spr, dir, device: dev }
     this.evacMap.set(dev.id, rec)
   }
 
@@ -140,37 +144,87 @@ export class EmergencyLight3D {
     const light = new THREE.PointLight(COLORS.emLight, 0.9, 4.5, 2)
     light.position.set(pos.x, pos.top + 0.55, pos.z)
     this.emGroup.add(light)
-    rec = { mesh, light, device: dev }
+    rec = { id: String(dev.id), mesh, light, device: dev }
     this.emMap.set(dev.id, rec)
   }
 
-  // ── 每帧：脉冲 / 强闪（仅 emissive 与 opacity，position 不变） ──
+  // ── 每帧：脉冲 / 强闪（仅 emissive / opacity / intensity，position 永远不变） ──
+  // P1.7.3-B4-03：视觉只由「权威设备运行态」驱动 —— 不再使用全局 store.emergencyMode。
+  // rec.device 就是 fireStore.devices 里的同一个对象（后端 WS 就地更新），
+  // 因此每帧重读即可天然收敛（direction 翻转 / brightness 变化 / emergencyFlash 都不需要重新 bind）。
   tick(t, store) {
-    const emergency = !!store.emergencyMode
+    // fireStore.devices 可能在运行中整体换数组（远端重载 / resetAll），
+    // 因此每帧按 id 重新解析「当前权威对象」，避免 rec.device 变成孤儿快照。
+    const live = new Map()
+    ;(store && store.devices ? store.devices : []).forEach((d) => {
+      if (d && d.id !== undefined && d.id !== null) live.set(String(d.id), d)
+    })
+    const resolve = (rec) => {
+      const cur = live.get(rec.id)
+      if (cur) rec.device = cur
+      return rec.device
+    }
 
+    // 疏散指示灯：箭头恒绿，方向随权威 direction，应急时脉冲
     this.evacMap.forEach((rec) => {
-      // 应急时绿色强闪 + glow；正常时绿箭头恒亮
-      if (emergency) {
+      const dev = resolve(rec)
+      if (!dev) return
+      this._syncRuntime(rec, dev)
+      const dir = deviceDirection(dev)
+      if (rec.dir !== dir) {
+        rec.sprite.material.map = dir === 'left' ? this.arrowTexL : this.arrowTexR
+        rec.sprite.material.needsUpdate = true
+        rec.dir = dir
+      }
+      if (!deviceIsOnline(dev)) {
+        rec.sprite.material.opacity = 0.25
+        return
+      }
+      if (isDeviceEmergency(dev)) {
+        // 应急：绿色脉冲（箭头恒绿，疏散方向不允许被红 / 橙 / 蓝替代）
         const pulse = 0.4 + 0.6 * Math.abs(Math.sin(t * 4))
         rec.sprite.material.opacity = 0.55 + 0.45 * pulse
       } else {
-        rec.sprite.material.opacity = 0.9
+        rec.sprite.material.opacity = 0.55 + 0.35 * deviceBrightnessRatio(dev)
       }
     })
 
+    // 应急照明灯：暖白呼吸；应急时强闪；亮度决定光强基准
     this.emMap.forEach((rec) => {
-      // 暖白呼吸 + 应急时强闪
-      const breath = 0.5 + 0.4 * Math.abs(Math.sin(t * 1.6))
-      if (emergency) {
+      const dev = resolve(rec)
+      if (!dev) return
+      this._syncRuntime(rec, dev)
+      const ratio = deviceBrightnessRatio(dev)
+      // 亮度基准：0.4~1.0（brightness=100 时与历史观感一致）
+      const base = 0.4 + 0.6 * ratio
+      if (!deviceIsOnline(dev)) {
+        rec.mesh.material.emissiveIntensity = 0
+        rec.light.intensity = 0
+        rec.mesh.material.opacity = 0.15
+        return
+      }
+      if (isDeviceEmergency(dev)) {
         const flash = 1.2 + 1.6 * Math.abs(Math.sin(t * 6))
-        rec.mesh.material.emissiveIntensity = flash
-        rec.light.intensity = 1.2 + flash * 0.8
+        rec.mesh.material.emissiveIntensity = flash * base
+        rec.light.intensity = (1.2 + flash * 0.8) * base
         rec.mesh.material.opacity = 0.85 + 0.15 * Math.abs(Math.sin(t * 6))
       } else {
-        rec.mesh.material.emissiveIntensity = 0.5 + breath * 0.5
-        rec.light.intensity = 0.7 + breath * 0.5
-        rec.mesh.material.opacity = 0.9
+        const breath = 0.5 + 0.4 * Math.abs(Math.sin(t * 1.6))
+        rec.mesh.material.emissiveIntensity = (0.5 + breath * 0.5) * base
+        rec.light.intensity = (0.7 + breath * 0.5) * base
+        rec.mesh.material.opacity = 0.55 + 0.35 * ratio
       }
     })
+  }
+
+  /**
+   * 把权威设备运行态投影到本层（唯一读取入口）。
+   * rec.runtime = 本层「实际消费到的」运行态（2D / 3D / LightingView 一致性自检用）。
+   */
+  _syncRuntime(rec, dev) {
+    const rt = deviceRuntimeState(dev)
+    if (!rec.runtime) rec.runtime = rt
+    else Object.assign(rec.runtime, rt)
+    return rt
   }
 }

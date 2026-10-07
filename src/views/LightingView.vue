@@ -1,5 +1,14 @@
 ﻿<template>
-  <div class="lighting-view">
+  <div
+    class="lighting-view"
+    :data-device-id="currentDevice?.id || ''"
+    :data-brightness="brightness"
+    :data-mode="currentDevice?.currentMode || ''"
+    :data-flash="deviceFlash"
+  >
+    <!-- 注意：本组件必须保持「单根节点」—— 注释不能放在根 div 之外，
+         否则会变成 Fragment 根，破坏 App.vue 的 <transition mode="out-in">，导致路由切换后整页空白 -->
+    <!-- P1.7.3-B4-03：data-* 即本页实际消费到的运行态（与 2D / 3D 同源，供一致性自检） -->
     <!-- 页面头部 -->
     <div class="page-header">
       <div class="header-bar"></div>
@@ -355,6 +364,8 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import * as echarts from 'echarts'
 import { useFireStore } from '../stores/fireStore'
 import { dataSource } from '../api'
+// P1.7.3-B4-03：应急灯运行态统一契约（与 2D / 3D 同源）
+import { deviceBrightness, isDeviceEmergency } from '../../shared/device/deviceRuntime.js'
 
 const store = useFireStore()
 
@@ -427,37 +438,34 @@ const currentDevice = computed(() => {
   return store.lightingDevices.find((d) => d.id === selectedDeviceId.value) || null
 })
 
-// 将选中设备同步到照明聚合状态（楼层/设备切换后亮度、模式、人员检测联动）
-// P1.7.3-B1：demo 模式下 lightingStatus / device 亮度与人员检测都属于后端业务状态，
-// 本页只能消费（DemoWorld.lighting + DemoWorld.devices → WS → store → 本页），禁止反向写入
+// P1.7.3-B4-03：本页不再持有 / 读取「第二份运行态」。
+// 亮度 / 模式 / 应急态 / 人员检测一律来自「当前选中的权威设备」= store.lightingDevices（devices 投影），
+// 与 2D（BuildingView 平面图）/ 3D（EmergencyLight3D）消费的是同一条链：
+//   Backend / WS → demoStore.devices → fireStore.devices → 本页
+// store.lightingStatus 只是本地控制面板的展示镜像（能耗 / 环境量），不再是运行态来源，禁止用它反推页面状态。
 function applyDeviceToStatus(dev) {
   if (!dev) return
+  // 只同步本地滑块的显示值，不写回任何运行态（demo 模式由 store.demoGuard 兜底）
   sliderBrightness.value = dev.brightness ?? 60
-  if (dataSource.isDemo) return
-  if (store.lightingStatus) {
-    store.lightingStatus.currentDevice = dev
-    store.lightingStatus.brightness = dev.brightness ?? 60
-    store.lightingStatus.mode = dev.currentMode || 'energy'
-    store.lightingStatus.detectedPerson = !!dev.detectedPerson
-  }
 }
 
-// 状态派生
-const brightness = computed(() => {
-  return store.lightingStatus?.brightness ?? currentDevice.value?.brightness ?? 60
-})
+// 状态派生（唯一来源 = 当前选中的权威设备）
+const brightness = computed(() => deviceBrightness(currentDevice.value))
 
 const currentMode = computed(() => {
-  const m = store.lightingStatus?.mode ?? 'energy'
+  const m = currentDevice.value?.currentMode || 'daily'
   return STORE_MODE_MAP[m] || m || 'energy'
 })
 
-const personDetected = computed(() => {
-  return store.lightingStatus?.detectedPerson ?? currentDevice.value?.detectedPerson ?? false
-})
+const deviceFlash = computed(() => isDeviceEmergency(currentDevice.value))
+
+const personDetected = computed(() => !!currentDevice.value?.detectedPerson)
 
 const ambientLabel = computed(() => {
-  return store.lightingStatus?.status === 'offline' ? '设备离线' : '正常'
+  const st = currentDevice.value?.status
+  if (st === 'offline') return '设备离线'
+  if (isDeviceEmergency(currentDevice.value)) return '应急照明'
+  return '正常'
 })
 
 const energy = computed(() => store.lightingEnergy || { today: 0, month: 0, saved: 0, savedPercent: 0 })
@@ -562,7 +570,8 @@ function onDeviceChange() {
 function handleModeChange(mode) {
   const storeMode = UI_MODE_MAP[mode] || mode
   store.switchLightingMode(storeMode)
-  sliderBrightness.value = store.lightingStatus.brightness
+  // 权威优先：切换后以选中设备的运行态为准（demo 模式下 switchLightingMode 被 guard 拦截，值不变）
+  sliderBrightness.value = brightness.value
 }
 
 function handleBrightnessChange(val) {
@@ -570,7 +579,7 @@ function handleBrightnessChange(val) {
     console.warn('[LightingView] demo 模式禁止本地调节亮度')
     return
   }
-  store.lightingStatus.brightness = val
+  // 非 demo：本地控制的唯一落点就是权威设备本身（不再写第二份 lightingStatus）
   if (currentDevice.value) {
     currentDevice.value.brightness = val
   }
@@ -587,7 +596,7 @@ function handleBrightnessChange(val) {
 
 function handleSimulatePerson() {
   store.simulatePersonEnter()
-  sliderBrightness.value = store.lightingStatus.brightness
+  sliderBrightness.value = brightness.value
   store.addNotification({
     title: '智能照明已增强',
     message: '检测到人员进入，照明亮度已自动提升至 85%',
@@ -615,11 +624,10 @@ function handleReset() {
     return
   }
   store.switchLightingMode('daily')
-  sliderBrightness.value = 30
-  store.lightingStatus.detectedPerson = false
   if (currentDevice.value) {
     currentDevice.value.detectedPerson = false
   }
+  sliderBrightness.value = brightness.value
   store.addNotification({
     title: '照明已恢复',
     message: '已恢复至日常节能模式',
@@ -689,6 +697,8 @@ function handleResize() {
 }
 
 watch(currentDevice, (dev) => applyDeviceToStatus(dev))
+// 权威亮度变化时同步本地滑块（WS 下发 / 楼栋楼层切换 / 模式切换都走这条）
+watch(brightness, (v) => { sliderBrightness.value = v })
 
 onMounted(() => {
   if (store.lightingDevices.length > 0) {

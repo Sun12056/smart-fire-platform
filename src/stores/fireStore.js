@@ -455,14 +455,25 @@ export const useFireStore = defineStore('fire', () => {
     }
     // ⑤ 照明
     if (snap.lighting) {
-      lightingStatus.value = {
-        ...lightingStatus.value,
-        brightness: snap.lighting.brightness ?? lightingStatus.value?.brightness,
-        currentMode: snap.lighting.mode === 'emergency'
-          ? (lightingModes.emergency || lightingStatus.value?.currentMode)
-          : lightingStatus.value?.currentMode,
-      }
+      // P1.7.3-B4-03：snap.lighting 只是「全局阶段标志」（整栋楼是否处于应急联动），
+      // 它不是设备运行态来源 —— brightness / currentMode / emergencyFlash 的唯一权威是 ④ 已合并的 devices。
+      // lightingStatus 降级为「选中设备的展示镜像」，避免它成为 2D / 3D / LightingView 之外的第二份运行态。
       emergencyMode.value = snap.lighting.mode === 'emergency'
+      const mirror = (lightingDevices.value || []).find(
+        (d) => d && String(d.id) === String(lightingStatus.value?.currentDevice?.id),
+      ) || (lightingDevices.value || []).find(
+        (d) => d && String(d.buildingId) === String(snap.fire?.buildingId || ''),
+      ) || lightingDevices.value[0] || null
+      if (mirror) {
+        lightingStatus.value = {
+          ...lightingStatus.value,
+          currentDevice: mirror,
+          brightness: mirror.brightness,
+          currentMode: lightingModes[mirror.currentMode] || lightingStatus.value?.currentMode,
+          mode: mirror.currentMode || 'daily',
+          status: mirror.status,
+        }
+      }
     }
     // ⑥ 疏散指标
     if (snap.metrics) {

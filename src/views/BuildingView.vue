@@ -189,6 +189,11 @@
                 <stop offset="0%" stop-color="#475569" stop-opacity="0.4"/>
                 <stop offset="100%" stop-color="#475569" stop-opacity="0"/>
               </radialGradient>
+              <!-- P1.7.3-B4-03：应急态光晕（与 3D 应急照明灯同一暖白 #F8F3E4） -->
+              <radialGradient id="device-glow-emergency">
+                <stop offset="0%" stop-color="#F8F3E4" stop-opacity="0.6"/>
+                <stop offset="100%" stop-color="#F8F3E4" stop-opacity="0"/>
+              </radialGradient>
             </defs>
             <rect width="400" height="300" fill="url(#grid-fine)" />
             <rect width="400" height="300" fill="url(#grid-coarse)" />
@@ -236,12 +241,31 @@
               <text x="45" y="275" fill="#475569" font-size="6" text-anchor="middle">楼梯</text>
             </g>
 
-            <!-- 设备点位 -->
-            <g v-for="(dev, idx) in currentFloorDevices" :key="dev.id" @click="showDevice(dev)" class="plan-device" :class="dev.status">
-              <circle :cx="getDeviceX(idx)" :cy="getDeviceY(idx)" :r="12" :fill="`url(#device-glow-${dev.status === 'abnormal' ? 'red' : dev.status === 'offline' ? 'gray' : 'green'})`" :class="{ 'alarm-pulse': dev.status === 'abnormal' }"/>
-              <circle :cx="getDeviceX(idx)" :cy="getDeviceY(idx)" :r="5" :fill="getDeviceColor(dev.status)" :class="{ 'alarm-breathe': dev.status === 'abnormal', 'offline-dot': dev.status === 'offline' }"/>
-              <circle :cx="getDeviceX(idx)" :cy="getDeviceY(idx)" :r="7" fill="none" :stroke="getDeviceColor(dev.status)" stroke-width="1" opacity="0.4"/>
-              <text :x="getDeviceX(idx)" :y="getDeviceY(idx) - 11" :fill="getDeviceColor(dev.status)" font-size="7" text-anchor="middle" font-weight="600">{{ getDeviceLabel(dev.type) }}</text>
+            <!-- 设备点位：B4-03 起消费权威设备的完整运行态（data-* 即本次渲染所用值） -->
+            <g
+              v-for="(dev, idx) in currentFloorDevices"
+              :key="dev.id"
+              @click="showDevice(dev)"
+              class="plan-device"
+              :class="[dev.status, { 'emergency-pulse': devFlash(dev) }]"
+              :data-id="dev.id"
+              :data-status="dev.status"
+              :data-mode="dev.currentMode"
+              :data-flash="devFlash(dev)"
+              :data-brightness="devBrightness(dev)"
+              :data-dir="devDir(dev)"
+            >
+              <circle :cx="getDeviceX(idx)" :cy="getDeviceY(idx)" :r="12" :fill="`url(#device-glow-${devGlowKey(dev)})`" :class="{ 'alarm-pulse': dev.status === 'abnormal' || devFlash(dev) }" :opacity="devGlowOpacity(dev)"/>
+              <circle :cx="getDeviceX(idx)" :cy="getDeviceY(idx)" :r="5" :fill="devColor(dev)" :class="{ 'alarm-breathe': dev.status === 'abnormal', 'offline-dot': dev.status === 'offline' }"/>
+              <circle :cx="getDeviceX(idx)" :cy="getDeviceY(idx)" :r="7" fill="none" :stroke="devColor(dev)" stroke-width="1" opacity="0.4"/>
+              <text :x="getDeviceX(idx)" :y="getDeviceY(idx) - 11" :fill="devColor(dev)" font-size="7" text-anchor="middle" font-weight="600">{{ getDeviceLabel(dev.type) }}</text>
+              <!-- 疏散指示方向（恒绿 #22C55E，禁止用红 / 橙 / 蓝替代） -->
+              <path
+                v-if="isEvacuationLight(dev)"
+                class="plan-device-dir"
+                :d="devDirPath(dev, idx)"
+                fill="#22C55E"
+              />
             </g>
           </svg>
         </div>
@@ -411,6 +435,10 @@ import BuildingDigitalTwin from '../components/BuildingDigitalTwin.vue'
 import {
   countPersonsInLocation, buildingIdOf, floorIdOf, zoneOf,
 } from '../../shared/person/personRuntime.js'
+// P1.7.3-B4-03：应急灯运行态统一契约（与 3D / 智能照明页同源）
+import {
+  deviceBrightness, deviceBrightnessRatio, deviceDirection, isDeviceEmergency,
+} from '../../shared/device/deviceRuntime.js'
 
 const store = useFireStore()
 const router = useRouter()
@@ -514,10 +542,40 @@ function getDeviceY(idx) {
   return positions[idx % positions.length]
 }
 
-function getDeviceColor(status) {
-  if (status === 'abnormal') return '#EF4444'
-  if (status === 'offline') return '#475569'
+/* ══════════ P1.7.3-B4-03：2D 平面图消费权威设备运行态 ══════════
+ * （取代原 getDeviceColor(status)：颜色必须同时看 status + currentMode + emergencyFlash，
+ *   只按 status 会把「应急态」染成绿色，与常态无法区分）
+ * 唯一权威 = store.devices[i] 的 status / currentMode / direction / brightness / emergencyFlash。
+ * 本页只读 + 派生，禁止维护第二份运行态，也禁止反向写入。
+ * 疏散指示方向恒用绿色；应急视觉只用「呼吸 / 脉冲 / 强闪」，设备位置不做任何改动。
+ */
+function devColor(dev) {
+  if (dev.status === 'offline') return '#475569'
+  if (devFlash(dev)) return '#F8F3E4'          // 应急态：与 3D 应急照明灯同一暖白
+  if (dev.status === 'abnormal' || dev.status === 'warning' || dev.status === 'fault') return '#EF4444'
   return '#22C55E'
+}
+function devGlowKey(dev) {
+  if (dev.status === 'offline') return 'gray'
+  if (devFlash(dev)) return 'emergency'
+  if (dev.status === 'abnormal' || dev.status === 'warning' || dev.status === 'fault') return 'red'
+  return 'green'
+}
+/** 光晕强度随权威 brightness（0.35~1），离线近乎不可见 */
+function devGlowOpacity(dev) {
+  if (dev.status === 'offline') return 0.15
+  return 0.35 + deviceBrightnessRatio(dev) * 0.65
+}
+function devFlash(dev) { return isDeviceEmergency(dev) }
+function devBrightness(dev) { return deviceBrightness(dev) }
+function devDir(dev) { return deviceDirection(dev) }
+function isEvacuationLight(dev) { return dev.type === 'evacuation_light' }
+/** 方向箭头（三角形）：位置由既有点位派生，不改动设备坐标 */
+function devDirPath(dev, idx) {
+  const x = getDeviceX(idx), y = getDeviceY(idx)
+  return deviceDirection(dev) === 'left'
+    ? `M ${x - 11} ${y - 4} L ${x - 19} ${y} L ${x - 11} ${y + 4} Z`
+    : `M ${x + 11} ${y - 4} L ${x + 19} ${y} L ${x + 11} ${y + 4} Z`
 }
 
 function getDeviceLabel(type) {
@@ -533,7 +591,11 @@ function getDeviceLabel(type) {
 }
 
 function statusLabel(status) {
-  const labels = { normal: '正常', abnormal: '异常', offline: '离线' }
+  // P1.7.3-B4-03：后端权威 status 新增 emergency（应急联动），2D 必须能表达
+  const labels = {
+    normal: '正常', abnormal: '异常', offline: '离线',
+    emergency: '应急', warning: '告警', fault: '故障',
+  }
   return labels[status] || status
 }
 
@@ -1018,6 +1080,19 @@ onMounted(() => {
 
 .offline-dot {
   opacity: 0.4;
+}
+
+/* P1.7.3-B4-03：应急态脉冲（呼吸 / 脉冲，不改变点位坐标） */
+.plan-device.emergency-pulse .plan-device-dir {
+  animation: evacDirPulse 1s ease-in-out infinite;
+}
+.plan-device.emergency-pulse circle:nth-of-type(2) {
+  animation: alarmBreathe 0.9s ease-in-out infinite;
+}
+
+@keyframes evacDirPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 
 /* ========== Floor Device List ========== */

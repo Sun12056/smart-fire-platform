@@ -23,6 +23,7 @@
     "test:e2e:b305": "node worker/e2e-p173-b305-p0p1.cjs",
     "test:e2e:b401": "node worker/e2e-p173-b401-3d-plan-watch.cjs",
     "test:e2e:b402": "node worker/e2e-p173-b402-lighting-source.cjs",
+    "test:e2e:b403": "node worker/e2e-p173-b403-runtime-unity.cjs",
     "test:demo:building": "node worker/walkthrough-building.cjs",
     "preview": "vite preview"
   },

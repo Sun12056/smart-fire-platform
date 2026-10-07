@@ -124,6 +124,68 @@ export function normalizeDeviceRuntime(raw, ctx = {}) {
   return out
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+ * P1.7.3-B4-03：应急灯运行态统一契约（2D / 3D / LightingView 唯一权威）
+ * ────────────────────────────────────────────────────────────
+ * 权威链：Backend / WS → demoStore.devices → fireStore.devices →
+ *         deviceRuntimeState(dev) → 2D(BuildingView) / 3D(EmergencyLight3D) / LightingView
+ *
+ * 铁律：
+ *   ① 五个运行态字段（status / currentMode / direction / brightness / emergencyFlash）
+ *      的唯一权威是 devices[i]，任何视图都只能「读 + 派生」，禁止另立第二份运行态；
+ *   ② 视图不得反向写入 device 运行态（demo 模式由 demoGuard 兜底）；
+ *   ③ 疏散指示方向恒为 left / right 且恒用绿色表达，禁止用红 / 橙 / 蓝替代；
+ *   ④ 应急视觉只允许「呼吸 / 脉冲 / 强闪」，不改变设备位置，不改变 B4-02 的数据源统一。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/** 应急模式值（后端下发） */
+export const EMERGENCY_MODE = 'emergency'
+/** 灯具类设备类型：应急照明灯 + 疏散指示灯 */
+export const LIGHTING_DEVICE_TYPES = Object.freeze(['emergency_light', 'evacuation_light'])
+
+export function isEmergencyLight(d) { return typeOf(d) === 'emergency_light' }
+export function isEvacuationLight(d) { return typeOf(d) === 'evacuation_light' }
+export function isLightingDevice(d) { return LIGHTING_DEVICE_TYPES.includes(typeOf(d)) }
+
+/**
+ * 设备运行态五元组（三端唯一的读取入口）。
+ * 入参必须是权威 devices[i]；输出是纯值快照（不含对象引用），避免视图持有第二份可变状态。
+ */
+export function deviceRuntimeState(d) {
+  return {
+    status: statusOf(d),
+    currentMode: currentModeOf(d),
+    direction: deviceDirection(d),
+    brightness: brightnessOf(d),
+    emergencyFlash: emergencyFlashOf(d),
+  }
+}
+
+/** 是否处于应急态：emergencyFlash 为主，currentMode / status 兜底（三端统一判定） */
+export function isDeviceEmergency(d) {
+  return emergencyFlashOf(d) || currentModeOf(d) === EMERGENCY_MODE || statusOf(d) === EMERGENCY_MODE
+}
+
+/** 权威亮度（0~100） */
+export function deviceBrightness(d) {
+  return brightnessOf(d)
+}
+
+/** 亮度归一化 0~1（三端统一的光强基准） */
+export function deviceBrightnessRatio(d) {
+  return brightnessOf(d) / 100
+}
+
+/** 疏散指示方向（恒 left / right；非法值归 'right'） */
+export function deviceDirection(d) {
+  return directionOf(d) === 'left' ? 'left' : 'right'
+}
+
+/** 是否在线（离线设备不参与应急视觉） */
+export function deviceIsOnline(d) {
+  return statusOf(d) !== 'offline'
+}
+
 /** 列表批量规范化 */
 export function toDeviceRuntimeList(list, ctx = {}) {
   return (Array.isArray(list) ? list : []).map((d) => normalizeDeviceRuntime(d, ctx))
