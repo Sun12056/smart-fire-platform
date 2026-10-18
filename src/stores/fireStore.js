@@ -49,8 +49,11 @@ import {
 } from '../../shared/evacuation/buildingEvacuationPlanner.js'
 import { EVACUATION_SCOPE, STRATEGY, zoneKeyOf } from '../../shared/evacuation/buildingEvacuationTypes.js'
 // P1.8.2 Stage 1：出口运行态统一契约层（与后端共用同一份规范化 / 可用性判定）
+// P1.8.2 Stage 1.3：出口失效的唯一权威 = applyExitInvalidation（fireStore 不再自实现判据），
+// 故不再导入 usableExitNodeIds / hasUsableExit —— 它们只在 shared 层使用，
+// 在此处使用会把「含静态补齐项」的宽口径重新引入生产（P1-1 根因）。
 import {
-  defaultExitStates, normalizeExitStates, usableExitNodeIds, hasUsableExit,
+  defaultExitStates, normalizeExitStates, applyExitInvalidation,
 } from '../../shared/evacuation/exitRuntime.js'
 // 人员运行时统一契约（P1.6.1）：后端 / 2D / 3D 同一个 id、同一个 routeId
 import {
@@ -270,6 +273,13 @@ export const useFireStore = defineStore('fire', () => {
   function applyExitRuntimeStates(raw) {
     const n = normalizeExitStates(raw)
     exitRuntimeStates.value = n.exits
+    // Stage 1.3：落盘「原始上报」与「真实上报可用集」。
+    //   · n.exits **含静态补齐项**，永远不得作为「上报是否完整」的证据；
+    //   · 唯一准入来源 = n.reportedUsableNodeIds（仅含已上报且可解析的条目）。
+    // `raw` 为空/缺失（快照无 exits 字段）时落 `[]` ⇒ normalize 判 missing ⇒ fail-closed；
+    // 与「从未收到过任何上报」的初始态 `null` 严格区分（后者不做出口判定，见 reconcile）。
+    exitRawStates.value = raw === undefined || raw === null ? [] : raw
+    exitReportedUsableNodeIds.value = n.reportedUsableNodeIds
     exitStateDegraded.value = n.degraded
     exitStateReason.value = n.reason
     if (n.degraded) {
@@ -281,41 +291,66 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   /**
+   * P1.8.2 Stage 1.3：路线状态的**唯一收口函数**（路径 A 出口 / 路径 C 火源 统一在此）。
+   *
+   * 两个维度都是当前 store 状态的纯函数 ⇒ 每一步都**全量重算**（不是增量累加）：
+   *   ① 火源维度：p.status = evaluatePlanFire(p)，DONE 跳过；且**同时作用于两个投影**
+   *   ② 出口维度：委托 applyExitInvalidation（唯一权威；内部保护 DONE、以对象展开保留历史字段）。
+   * ⇒ 幂等，且与触发顺序无关（这是本阶段要解决的路径 A/C 互相覆盖问题）。
+   *
+   * 优先级：出口失效 > 火源结果（NORMAL / WARNING / BLOCKED）> NORMAL；**DONE 永不改写**。
+   *
+   * ⚠️ 必须整体采纳 out.routePlans / out.perZone / out.activeRoutePlanId：
+   *   两投影各自成对象，部分采纳会出现「同一 id 两投影状态不一致」。
+   *
+   * ⚠️ exitRawStates === null（**从未收到过任何上报**）：不做出口维度判定 ——
+   *   既不把静态默认当作真实上报，也不做「无数据即整批阻断」的误判；
+   *   一旦收到过一次上报（即使是空数组 / 非法结构）即进入 fail-closed。
+   *
+   * @returns {number} 协调后处于 BLOCKED 的路线 id 数（去重；恒不含 DONE）
+   */
+  function reconcileRouteStatuses() {
+    // ① 火源维度：必须同时作用于 **两个投影**。
+    //   routePlans 与 perZone[].plans 在 generateRoutePlans 中是同一批对象（别名），
+    //   但在 syncLegacyRouteState / legacy 投影中是两条**独立对象链** ——
+    //   只改 routePlans 会出现「routePlans=WARNING 而 perZone 仍 NORMAL」的两投影矛盾。
+    //   evaluatePlanFire 是 store 状态的纯函数 ⇒ 重复作用幂等，别名情形无副作用。
+    const applyFireDimension = (list) => (list || []).forEach((p) => {
+      if (!p || p.status === 'DONE') return
+      p.status = evaluatePlanFire(p)
+    })
+    applyFireDimension(routePlans.value)
+    if (routeMatrix.value && routeMatrix.value.perZone) {
+      Object.values(routeMatrix.value.perZone).forEach((info) => applyFireDimension(info.plans))
+    }
+    const list = asArray(routePlans.value).filter(Boolean)
+    if (exitRawStates.value === null || exitRawStates.value === undefined) {
+      recomputeRecommendations()
+      return list.filter((p) => p.status === 'BLOCKED').length
+    }
+    const out = applyExitInvalidation({
+      exits: exitRawStates.value,
+      routePlans: routePlans.value,
+      perZone: routeMatrix.value && routeMatrix.value.perZone ? routeMatrix.value.perZone : {},
+      activeRoutePlanId: activeRoutePlanId.value,
+    })
+    routePlans.value = out.routePlans
+    if (routeMatrix.value) routeMatrix.value.perZone = out.perZone
+    activeRoutePlanId.value = out.activeRoutePlanId
+    exitStateDegraded.value = out.exitStates.degraded
+    exitStateReason.value = out.exitStates.reason
+    return (out.affectedRouteIds || []).length
+  }
+
+  /**
    * P1.8.2 Stage 1 目标 6：出口关闭后，已有路线不得继续被当作当前有效路线。
    *
-   * 只过滤「新生成的路线」是不够的 —— 前端已有的 routePlans（含后端整栋楼方案投影）
-   * 可能仍指向已关闭的出口。这里把终点为不可用出口的路线标记为 BLOCKED：
-   *   · 不删除，保持结构与旧 UI 兼容（routeMatrix.perZone 仍可展示历史）；
-   *   · 但不得再作为有效 / 推荐路线参与疏散决策与展示；
-   *   · 若当前选中项恰好被标记，主动改选到第一条仍有效的路线。
-   * @returns {number} 被标记的路线数
+   * Stage 1.3：判据不再在此自实现 —— 统一委托 reconcileRouteStatuses（单一权威）。
+   * 保留函数名与「返回被标记数量」语义，导出契约（下方 exports）不变。
+   * @returns {number} 协调后处于 BLOCKED 的路线 id 数（去重；恒不含 DONE）
    */
   function invalidateRoutesWithUnusableExit() {
-    const states = exitRuntimeStates.value
-    if (!Array.isArray(states) || !states.length) return 0
-    const list = asArray(routePlans.value).filter(Boolean)
-    if (!hasUsableExit(states)) {
-      // 全出口不可用：整批失效，绝不保留「看似有效」的外观
-      list.forEach((p) => { p.status = 'BLOCKED' })
-      return list.length
-    }
-    const ok = new Set(usableExitNodeIds(states))
-    let marked = 0
-    list.forEach((p) => {
-      // 两种路线来源的字段口径不同：
-      //   · 后端整栋楼方案投影（syncLegacyRouteState）→ exitId
-      //   · 前端本地自行寻路（buildPlanFromPath）      → exit
-      // 两者都必须纳入失效判定，否则本地生成的存量路线会漏网。
-      const ex = p.exitId || p.exit
-      if (!ex) return
-      if (!ok.has(String(ex))) { p.status = 'BLOCKED'; marked += 1 }
-    })
-    const current = list.find((p) => p.id === activeRoutePlanId.value)
-    if (current && current.status === 'BLOCKED') {
-      const next = list.find((p) => p.status !== 'BLOCKED')
-      if (next) activeRoutePlanId.value = next.id
-    }
-    return marked
+    return reconcileRouteStatuses()
   }
 
   function applyDemoPlans(snap) {
@@ -872,10 +907,24 @@ export const useFireStore = defineStore('fire', () => {
    * 绝不把「陈旧的运行态」当作可用 —— 陈旧状态可能把已关闭的出口误报为可用。
    * 本阶段不接外部状态源（D-6 = A），容量不参与任何计算（D-7 = A）。
    */
-  // 初始值 = 静态权威定义（安全基线）；degraded=true 表示「尚未收到后端权威运行态」
-  const exitRuntimeStates = ref(defaultExitStates()) // ExitRuntimeState[]（后端下发）
+  // 初始值 = 静态权威定义（安全基线）：degraded=true 表示「尚未收到后端权威运行态」
+  const exitRuntimeStates = ref(defaultExitStates()) // ExitRuntimeState[]（含静态补齐，仅供展示）
   const exitStateDegraded = ref(true) // true = 当前用的是回落默认值，非后端权威状态
   const exitStateReason = ref('missing') // 'missing' | 'invalid' | 'partial' | null
+  /**
+   * P1.8.2 Stage 1.3：策略 B 的两个输入态。
+   *
+   * · exitRawStates：**原始**上报（未经过静态补齐）。
+   *   - null ⇒ 从未收到过任何上报 ⇒ 出口维度不参与判定（既不把静态默认当真实上报，
+   *     也不做「无数据即整批阻断」的误判）；
+   *   - [] / 非法结构 / 部分 ⇒ 已收到上报但不完整 ⇒ normalize 判 missing/invalid/partial
+   *     ⇒ 有效可用集为「已上报且可解析」的子集，fail-closed。
+   *   每当收到新快照即**整体替换**，永不与上一次合并（不复用过期出口状态）。
+   * · exitReportedUsableNodeIds：真实上报可用集，是路径 A（失效）与路径 B（规划筛选）
+   *   **唯一**的准入来源；n.exits 与 usableNodeIds 含静态补齐项，一律不得用于准入。
+   */
+  const exitRawStates = ref(null) // null = 从未收到过上报
+  const exitReportedUsableNodeIds = ref([]) // 真实上报且可解析的出口 nodeId
   const routeNodes = ref([]) // 手动模式节点
   const routeEdges = ref([]) // 手动模式连线
   const routeDeviceBindings = ref([]) // 路线-设备方向绑定
@@ -2703,14 +2752,19 @@ export const useFireStore = defineStore('fire', () => {
    *
    * 替代原先的「无状态出口 id 列表」口径 —— 出口实体已有 available / status，
    * 候选目标必须与后端规划器（findPaths → isExitUsable）同一判定口径。
-   * 出口状态缺失/降级时，usableExitNodeIds 会回落到静态默认（全 OPEN），
-   * 与既有行为一致，不产生新的阻断。
+   *
+   * Stage 1.3（路径 B 与路径 A 统一口径）：
+   *   · 唯一准入来源 = exitReportedUsableNodeIds（真实上报可用集）；
+   *   · 不再读 exitRuntimeStates —— 它含静态补齐项，会把「未上报」的出口当作可用（P1-1 根因）；
+   *   · exitRawStates === null（从未收到过上报）⇒ 不做收窄，与既有行为一致（无新阻断）；
+   *     只要收到过一次上报（含空数组 / 非法结构）即按真实上报集收窄，fail-closed。
    */
   function usableExitsOf(allExitIds) {
     const ids = Array.isArray(allExitIds) ? allExitIds : []
-    const states = exitRuntimeStates.value
-    if (!Array.isArray(states) || !states.length) return ids
-    const ok = new Set(usableExitNodeIds(states).map(String))
+    if (exitRawStates.value === null || exitRawStates.value === undefined) return ids
+    const reported = exitReportedUsableNodeIds.value
+    if (!Array.isArray(reported)) return ids
+    const ok = new Set(reported.map(String))
     return ids.filter((id) => ok.has(String(id)))
   }
 
@@ -2765,6 +2819,9 @@ export const useFireStore = defineStore('fire', () => {
     // P1.7.3-B3-03：是否重规划只看 canonical buildingId（别名中文名不再参与）
     const feBid = fireEvent.value ? buildingIdOf(fireEvent.value) : ''
     if (feBid && feBid === buildingId) replanRoutesForFire()
+    // Stage 1.3：生成后统一收口 —— 新生成的路线同样必须按「真实出口上报」复核，
+    // 否则会出现「刚生成即已失效」的窗口。本行之后只有 return，故 reconcile 是最后写入者。
+    reconcileRouteStatuses()
     return routeMatrix.value
   }
 
@@ -2901,6 +2958,9 @@ export const useFireStore = defineStore('fire', () => {
       : (active.routes || [])[0]
     activeRoutePlanId.value = focus ? focus.routeId : null
     selectedZone.value = areas[0] || selectedZone.value
+    // Stage 1.3：投影刷新后统一收口。本投影的 plans 与 routePlans 是两条**独立对象链**，
+    // 必须一起由 reconcile 复核并整体采纳，否则会出现「同一 id 两投影状态不一致」。
+    reconcileRouteStatuses()
     return active
   }
 
@@ -3171,8 +3231,12 @@ export const useFireStore = defineStore('fire', () => {
     routeGraphCache = buildBuildingGraph(maxF)
     const affectedZones = new Set()
     routePlans.value.forEach((p) => {
-      p.status = evaluatePlanFire(p)
-      if (p.status === 'BLOCKED') affectedZones.add(p.startArea)
+      // Stage 1.3：状态**不再**在此直接落盘 —— 原实现的 `p.status = evaluatePlanFire(p)`
+      // 是无条件写入，会覆盖上一轮出口失效产生的 BLOCKED（实测：BLOCKED → WARNING，
+      // 且 activeRoutePlanId 仍指向该条已失效路线）。
+      // 此处只判定受影响区域，最终 status 由本函数尾部的 reconcileRouteStatuses() 统一收口。
+      if (p.status === 'DONE') return
+      if (evaluatePlanFire(p) === 'BLOCKED') affectedZones.add(p.startArea)
     })
     // P1.8.2 Stage 1（D-5 = A）：与路径 C 同一口径的合法性校验边集合
     // 任意相邻节点必须是图中合法边，禁止穿墙 / 房间直连
@@ -3211,7 +3275,10 @@ export const useFireStore = defineStore('fire', () => {
         routeMatrix.value.perZone[zone].backupId = newPlans[1] ? newPlans[1].id : null
       }
     })
-    recomputeRecommendations()
+    // Stage 1.3：由 reconcileRouteStatuses 取代 recomputeRecommendations ——
+    // 前者同时覆盖火源与出口两个维度，并用 isRouteUsable 口径过滤指针（排除 BLOCKED 与 DONE）。
+    // 本处之后只剩只读取值与通知，故 reconcile 是整条链的最后一个写入者。
+    reconcileRouteStatuses()
     const rec = currentRoutePlan.value
     if (rec) {
       addNotification({
@@ -3227,7 +3294,9 @@ export const useFireStore = defineStore('fire', () => {
   function recomputeRecommendations() {
     if (!routeMatrix.value) return
     Object.entries(routeMatrix.value.perZone).forEach(([zone, info]) => {
-      const safe = info.plans.filter((p) => p.status !== 'BLOCKED')
+      // Stage 1.3：DONE 豁免 —— 与 applyExitInvalidation 内 isRouteUsable 的白名单口径对齐，
+      // 保证即使走本函数（未收到过出口上报的窗口），指针也不会指向 DONE 路线。
+      const safe = info.plans.filter((p) => p.status !== 'BLOCKED' && p.status !== 'DONE')
       info.recommendedId = safe[0] ? safe[0].id : null
       info.backupId = safe[1] ? safe[1].id : null
     })
@@ -3356,8 +3425,8 @@ export const useFireStore = defineStore('fire', () => {
     routeFireAutoSwitch.value = false
     blockedNodeIds.value = []
     blockedEdgeKeys.value = []
-    routePlans.value.forEach((p) => (p.status = 'NORMAL'))
-    recomputeRecommendations()
+    // Stage 1.3：删除原「全量 status = 'NORMAL'」—— 它会把出口失效产生的 BLOCKED 一并抹掉
+    // （实测：r2 BLOCKED → NORMAL）。火情清空后的状态由本函数末尾的 reconcile 统一收口。
     // 消防应急灯恢复常态
     setEmergencyMode(false)
     // ---- 六阶段应急处置流程复位：停疏散动画 / 人员坐标恢复 / 阶段归零（重置演示共用） ----
@@ -3379,6 +3448,11 @@ export const useFireStore = defineStore('fire', () => {
     rescueTask.value = null
     strandedLocated.value = false
     rescueCompleted.value = false
+    // Stage 1.3：收口必须在本函数**最末尾** —— 下方 activeRoutePlanId 的清空在本行之前，
+    // 若把 reconcile 放在原 recomputeRecommendations() 的位置，它就不是最后一个写入者。
+    // 此刻：火情已清空 ⇒ 火源维度全 NORMAL；出口维度按最后一次真实上报判定；DONE 不受影响；
+    // activeRoutePlanId 此刻为 null，applyExitInvalidation 对 null 不做提升 ⇒ 保持 null。
+    reconcileRouteStatuses()
   }
 
   // -------- 手动模式（不影响自动算法，仅人工覆盖/编辑） --------
@@ -3662,6 +3736,11 @@ export const useFireStore = defineStore('fire', () => {
     exitStateReason,
     applyExitRuntimeStates,
     invalidateRoutesWithUnusableExit,
+    // ── P1.8.2 Stage 1.3：状态收口与策略 B 输入态（导出供测试与诊断读取） ──
+    reconcileRouteStatuses,
+    exitRawStates,
+    exitReportedUsableNodeIds,
+    usableExitsOf,
     // ── 整栋楼疏散（scope = BUILDING） ──
     buildingEvacuationPlans,
     activeBuildingPlanId,
