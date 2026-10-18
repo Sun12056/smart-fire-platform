@@ -48,6 +48,10 @@ import {
   resolvePlanningZone,
 } from '../../shared/evacuation/buildingEvacuationPlanner.js'
 import { EVACUATION_SCOPE, STRATEGY, zoneKeyOf } from '../../shared/evacuation/buildingEvacuationTypes.js'
+// P1.8.2 Stage 1：出口运行态统一契约层（与后端共用同一份规范化 / 可用性判定）
+import {
+  defaultExitStates, normalizeExitStates, usableExitNodeIds, hasUsableExit,
+} from '../../shared/evacuation/exitRuntime.js'
 // 人员运行时统一契约（P1.6.1）：后端 / 2D / 3D 同一个 id、同一个 routeId
 import {
   normalizePersonRuntime, assignPersonRuntime, isCanonicalPerson, pickRetainedCandidates,
@@ -256,6 +260,64 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   /** 用后端方案刷新前端路线矩阵（平面图 2D / 3D 都读这里） */
+  /**
+   * P1.8.2 Stage 1：应用后端下发的出口运行态。
+   *
+   * 缺失 / 过期 / 结构非法时：回落到**静态权威定义**并置 degraded 标志 + console 告警，
+   * **绝不静默回退为「已知不安全的可用状态」** —— 即不使用陈旧的运行态
+   * （陈旧状态可能把已关闭的出口误报为可用）。
+   */
+  function applyExitRuntimeStates(raw) {
+    const n = normalizeExitStates(raw)
+    exitRuntimeStates.value = n.exits
+    exitStateDegraded.value = n.degraded
+    exitStateReason.value = n.reason
+    if (n.degraded) {
+      console.warn(
+        `[fireStore] 出口运行态${n.reason === 'missing' ? '缺失' : n.reason === 'invalid' ? '结构非法' : '不完整'}`
+        + `，已回落到静态权威定义（全 OPEN）并告警，不作为可信运行态`,
+      )
+    }
+  }
+
+  /**
+   * P1.8.2 Stage 1 目标 6：出口关闭后，已有路线不得继续被当作当前有效路线。
+   *
+   * 只过滤「新生成的路线」是不够的 —— 前端已有的 routePlans（含后端整栋楼方案投影）
+   * 可能仍指向已关闭的出口。这里把终点为不可用出口的路线标记为 BLOCKED：
+   *   · 不删除，保持结构与旧 UI 兼容（routeMatrix.perZone 仍可展示历史）；
+   *   · 但不得再作为有效 / 推荐路线参与疏散决策与展示；
+   *   · 若当前选中项恰好被标记，主动改选到第一条仍有效的路线。
+   * @returns {number} 被标记的路线数
+   */
+  function invalidateRoutesWithUnusableExit() {
+    const states = exitRuntimeStates.value
+    if (!Array.isArray(states) || !states.length) return 0
+    const list = asArray(routePlans.value).filter(Boolean)
+    if (!hasUsableExit(states)) {
+      // 全出口不可用：整批失效，绝不保留「看似有效」的外观
+      list.forEach((p) => { p.status = 'BLOCKED' })
+      return list.length
+    }
+    const ok = new Set(usableExitNodeIds(states))
+    let marked = 0
+    list.forEach((p) => {
+      // 两种路线来源的字段口径不同：
+      //   · 后端整栋楼方案投影（syncLegacyRouteState）→ exitId
+      //   · 前端本地自行寻路（buildPlanFromPath）      → exit
+      // 两者都必须纳入失效判定，否则本地生成的存量路线会漏网。
+      const ex = p.exitId || p.exit
+      if (!ex) return
+      if (!ok.has(String(ex))) { p.status = 'BLOCKED'; marked += 1 }
+    })
+    const current = list.find((p) => p.id === activeRoutePlanId.value)
+    if (current && current.status === 'BLOCKED') {
+      const next = list.find((p) => p.status !== 'BLOCKED')
+      if (next) activeRoutePlanId.value = next.id
+    }
+    return marked
+  }
+
   function applyDemoPlans(snap) {
     // 权威：后端下发的是「整栋楼」方案（scope=BUILDING），包含每个有人区域的路线
     if (Array.isArray(snap.buildingPlans) && snap.buildingPlans.length) {
@@ -511,6 +573,10 @@ export const useFireStore = defineStore('fire', () => {
       })
       if (evacuationLogs.value.length > 200) evacuationLogs.value.length = 200
     }
+    // ⑨ 出口运行态（P1.8.2 Stage 1，D-1 = B）：后端是唯一权威来源
+    applyExitRuntimeStates(snap.exits)
+    // 目标 6：出口可用性变化后，已有路线不得继续被当作「当前有效路线」
+    invalidateRoutesWithUnusableExit()
     refreshBuildings()
     refreshStats()
     refreshPersonStats()
@@ -798,6 +864,18 @@ export const useFireStore = defineStore('fire', () => {
   const routeFloorId = ref('5F') // 规划分析的目标楼层
   const routeStartArea = ref('') // '' = 全区域自动（不再强制选择起始区域）
   const routeTargetExit = ref('') // '' = 自动选择
+  /**
+   * P1.8.2 Stage 1（D-1 = B）：出口运行态 —— 后端（Worker DO）是唯一持有方。
+   *
+   * 来源优先级：后端快照 snap.exits > 静态权威默认 EXIT_DEFS。
+   * 缺失 / 过期 / 结构非法时回落到静态默认并置 exitStateDegraded = true（**显式告警，不静默**），
+   * 绝不把「陈旧的运行态」当作可用 —— 陈旧状态可能把已关闭的出口误报为可用。
+   * 本阶段不接外部状态源（D-6 = A），容量不参与任何计算（D-7 = A）。
+   */
+  // 初始值 = 静态权威定义（安全基线）；degraded=true 表示「尚未收到后端权威运行态」
+  const exitRuntimeStates = ref(defaultExitStates()) // ExitRuntimeState[]（后端下发）
+  const exitStateDegraded = ref(true) // true = 当前用的是回落默认值，非后端权威状态
+  const exitStateReason = ref('missing') // 'missing' | 'invalid' | 'partial' | null
   const routeNodes = ref([]) // 手动模式节点
   const routeEdges = ref([]) // 手动模式连线
   const routeDeviceBindings = ref([]) // 路线-设备方向绑定
@@ -2620,6 +2698,22 @@ export const useFireStore = defineStore('fire', () => {
     unique.slice(0, 3).forEach((p) => zonePlans.push(p))
   }
 
+  /**
+   * P1.8.2 Stage 1（D-3 = A）：按当前出口运行态筛选可用出口。
+   *
+   * 替代原先的「无状态出口 id 列表」口径 —— 出口实体已有 available / status，
+   * 候选目标必须与后端规划器（findPaths → isExitUsable）同一判定口径。
+   * 出口状态缺失/降级时，usableExitNodeIds 会回落到静态默认（全 OPEN），
+   * 与既有行为一致，不产生新的阻断。
+   */
+  function usableExitsOf(allExitIds) {
+    const ids = Array.isArray(allExitIds) ? allExitIds : []
+    const states = exitRuntimeStates.value
+    if (!Array.isArray(states) || !states.length) return ids
+    const ok = new Set(usableExitNodeIds(states).map(String))
+    return ids.filter((id) => ok.has(String(id)))
+  }
+
   // 为一栋楼某楼层所有区域 × 所有出口自动生成候选路线矩阵
   function generateRoutePlans(opts = {}) {
     const buildingId = opts.buildingId || routeBuildingId.value
@@ -2630,7 +2724,8 @@ export const useFireStore = defineStore('fire', () => {
     const maxF = getBuildingFloors(buildingId)
     routeGraphCache = buildBuildingGraph(maxF)
     const areas = ROOM_AREAS
-    const exits = exitIdsOf(routeGraphCache, '1F') // shared 拓扑里的安全出口（1F 直通室外）
+    // P1.8.2 Stage 1：shared 拓扑里的安全出口（1F 直通室外）→ 再按运行态可用性筛选
+    const exits = usableExitsOf(exitIdsOf(routeGraphCache, '1F'))
     // 合法性校验用的边集合（任意相邻节点必须是图中合法边，禁止穿墙/房间直连）
     const edgeSet = new Set()
     Object.values(routeGraphCache.adj).forEach((arr) => arr.forEach((e) => edgeSet.add(e.ek)))
@@ -3079,8 +3174,13 @@ export const useFireStore = defineStore('fire', () => {
       p.status = evaluatePlanFire(p)
       if (p.status === 'BLOCKED') affectedZones.add(p.startArea)
     })
+    // P1.8.2 Stage 1（D-5 = A）：与路径 C 同一口径的合法性校验边集合
+    // 任意相邻节点必须是图中合法边，禁止穿墙 / 房间直连
+    const edgeSet = new Set()
+    Object.values(routeGraphCache.adj).forEach((arr) => arr.forEach((e) => edgeSet.add(e.ek)))
     affectedZones.forEach((zone) => {
-      const exits = exitIdsOf(routeGraphCache, '1F')
+      // P1.8.2 Stage 1：出口候选按运行态可用性筛选（与路径 C / 后端规划器同一口径）
+      const exits = usableExitsOf(exitIdsOf(routeGraphCache, '1F'))
       const startId = sharedNodeId(floc2.floorId, ZONE_NODE_KEY[zone])
       if (!routeGraphCache.nodes[startId]) return
       const newPlans = []
@@ -3095,6 +3195,9 @@ export const useFireStore = defineStore('fire', () => {
         )
         paths.forEach((p, idx) => {
           const plan = buildPlanFromPath(p, buildingId, buildingName, floc2.floorId, zone, exit, idx)
+          // P1.8.2 Stage 1：补齐路线合法性校验（此前路径 D 缺此防线，与路径 C 不一致）
+          // 关键防线：任何穿墙 / 穿房间 / 非法跳跃 / 未到出口的路线一律不写入规划结果
+          if (!validateRoute(plan.path, { edgeSet }).valid) return
           plan.status = 'NORMAL'
           newPlans.push(plan)
         })
@@ -3553,6 +3656,12 @@ export const useFireStore = defineStore('fire', () => {
     routeDeviceBindings,
     routeFireAutoSwitch,
     generateRoutePlans,
+    // ── P1.8.2 Stage 1：出口运行态（后端唯一权威；导出供 UI 展示与验证注入） ──
+    exitRuntimeStates,
+    exitStateDegraded,
+    exitStateReason,
+    applyExitRuntimeStates,
+    invalidateRoutesWithUnusableExit,
     // ── 整栋楼疏散（scope = BUILDING） ──
     buildingEvacuationPlans,
     activeBuildingPlanId,
