@@ -18,8 +18,11 @@ import {
 } from './buildingEvacuationTypes.js'
 import { RISK_LEVEL, NODE_TYPE } from './routeTypes.js'
 import {
-  buildBuildingGraph, exitIdsOf, blockedNodesForFire, floorNum, ZONE_NODE_KEY, ZONE_CORRIDOR_KEY,
+  buildBuildingGraph, exitIdsOf, blockedNodesForFire, blockedEdgesForFire,
+  floorNum, ZONE_NODE_KEY, ZONE_CORRIDOR_KEY,
 } from './routeGraph.js'
+// P1.8.1：出口成为可参与路径约束的实体（available / status / capacity）
+import { EXIT_DEFS, EXIT_STATUS, isExitUsable } from './floorTopology.js'
 import { findPaths, startNodeId } from './routePlanner.js'
 import { validateRoute } from './routeValidator.js'
 
@@ -77,9 +80,20 @@ export function groupPersonsByZone(persons = [], opts = {}) {
  * 火灾 → 动态障碍集合（只影响拓扑可达性，不改变疏散范围）
  * 火源房间封死；火源门厅对「不同门厅的区域」也封闭（火势蔓延走廊）。
  * 与火源共用同一门厅的区域（如 A区/B区 同门厅）不能被封死 —— 那是它唯一的出路。
+ *
+ * @param {Array} [baseExits] 运行态出口实体（默认 EXIT_DEFS）。
+ *       作为「基底」参与合并：本函数只在其上叠加火灾导致的 BLOCKED，
+ *       **不会**用 EXIT_DEFS 覆盖调用方已有的 available/status ——
+ *       从而保证运行态维护性关闭（CLOSED）与人工阻断（BLOCKED）不因进入本函数而丢失。
  */
-export function fireBlockSets(graph, fire, floorId, zone, startId) {
-  const empty = { blockedNodes: new Set(), fireNodeIds: new Set() }
+export function fireBlockSets(graph, fire, floorId, zone, startId, baseExits = EXIT_DEFS) {
+  const base = baseExits || EXIT_DEFS
+  const empty = {
+    blockedNodes: new Set(),
+    blockedEdges: new Set(),
+    fireNodeIds: new Set(),
+    exits: base,
+  }
   if (!fire || !fire.floorId || !fire.zone) return empty
   const fireFloor = String(fire.floorId)
   const fireKey = ZONE_NODE_KEY[fire.zone]
@@ -94,7 +108,26 @@ export function fireBlockSets(graph, fire, floorId, zone, startId) {
   })
   // 火源区人员必须从火源房间撤离 —— 起点落在火源节点时允许进入（撤离动作本身不可避免）
   if (startId && blockedNodes.has(startId)) blockedNodes.delete(startId)
-  return { blockedNodes, fireNodeIds }
+
+  // P1.8.1：阻断从「节点」显式扩展到「边」与「出口可用状态」
+  //   · blockedEdges —— 任何一端落在封锁节点上的边即视为被火灾切断（供 Dijkstra / Yen 消费）
+  //   · exits        —— **通用机制**：出口节点若出现在封锁集合中，其实体状态同步为 BLOCKED
+  //
+  // ⚠️ 重要边界（勿混淆两种语义）：
+  //   (a) 「出口节点被通用阻断机制封锁」= 上面的 if 分支，机制存在且已接通下游；
+  //   (b) 「火灾逻辑自动识别出口不可用」= **尚未实现**。
+  //   现有 blockedNodesForFire 只会产出 ZONE_NODE_KEY（房间门口）与
+  //   ZONE_CORRIDOR_KEY（门厅），从不产出出口节点 —— 因此当前火灾规则下
+  //   (a) 分支永远走不到，火灾**不会**直接导致出口不可用。
+  //   出口不可用目前只能由运行态显式传入 exits 数组（available=false / CLOSED / BLOCKED）。
+  //   若后续（P1.8.2）扩展 fireBlockSets 使其封锁出口节点，(a) 分支即自动生效，无需改下游。
+  const blockedEdges = blockedEdgesForFire(graph, blockedNodes)
+  const exits = base.map((e) => (
+    blockedNodes.has(e.nodeId)
+      ? { ...e, available: false, status: EXIT_STATUS.BLOCKED }
+      : e
+  ))
+  return { blockedNodes, blockedEdges, fireNodeIds, exits }
 }
 
 /**
@@ -103,18 +136,26 @@ export function fireBlockSets(graph, fire, floorId, zone, startId) {
 export function planZoneRoutes(opts = {}) {
   const {
     graph, floorId, zone, fire = null, personCount = 0,
-    k = 3, limit = 3, idPrefix = 'R',
+    k = 3, limit = 3, idPrefix = 'R', exits = EXIT_DEFS,
   } = opts
   const startId = startNodeId(graph, floorId, zone)
   if (!startId) {
-    return { startId: null, candidates: [], blockedNodes: [], fireNodeIds: [] }
+    return { startId: null, candidates: [], blockedNodes: [], blockedEdges: [], fireNodeIds: [] }
   }
-  const { blockedNodes, fireNodeIds } = fireBlockSets(graph, fire, floorId, zone, startId)
+  // exits 作为运行态基底传入 fireBlockSets，避免运行态出口状态被默认值覆盖
+  const { blockedNodes, blockedEdges, fireNodeIds, exits: exitStates } = fireBlockSets(graph, fire, floorId, zone, startId, exits)
   const candidates = findPaths({
-    graph, startId, blockedNodes, fireNodeIds,
+    graph, startId, blockedNodes, blockedEdges, fireNodeIds, exits: exitStates,
     congestion: personCount, k, limit, idPrefix: `${idPrefix}-${floorId}-${zone}`,
   })
-  return { startId, candidates, blockedNodes: [...blockedNodes], fireNodeIds: [...fireNodeIds] }
+  return {
+    startId,
+    candidates,
+    blockedNodes: [...blockedNodes],
+    blockedEdges: [...blockedEdges],
+    fireNodeIds: [...fireNodeIds],
+    exits: exitStates,
+  }
 }
 
 /**
@@ -214,7 +255,7 @@ export function planBuildingEvacuation(opts = {}) {
     buildingId = '', buildingName = '', strategy = STRATEGY.BALANCED,
     persons = [], fire = null, maxFloor = 6, graph = null,
     k = 3, limit = 3, idPrefix = 'PLAN', createdAt = null,
-    excludeStatuses = [],
+    excludeStatuses = [], exits = EXIT_DEFS,
   } = opts
   const g = graph || buildBuildingGraph(maxFloor)
   const meta = STRATEGY_META[strategy] || STRATEGY_META[STRATEGY.BALANCED]
@@ -227,7 +268,7 @@ export function planBuildingEvacuation(opts = {}) {
   for (const grp of groups) {
     const { candidates } = planZoneRoutes({
       graph: g, floorId: grp.floorId, zone: grp.zone, fire,
-      personCount: grp.personCount, k, limit, idPrefix,
+      personCount: grp.personCount, k, limit, idPrefix, exits,
     })
     const chosen = pickRouteByStrategy(candidates, strategy, { exitLoad })
     if (!chosen) { missingZones.push(grp.zoneKey); continue }

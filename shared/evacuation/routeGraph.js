@@ -1,196 +1,66 @@
 /**
- * 楼层拓扑 + 寻路算法（前端、Worker、3D 共用这一份）
+ * 楼层拓扑寻路 + 动态障碍（前端、Worker、3D 共用这一份）
+ *
+ * P1.8.1 变更：
+ *   · 拓扑数据（节点/边/墙体/楼梯/出口/区域）**上移到 floorTopology.js**，本文件不再自带蓝图；
+ *   · 建图改为经 topologyGraphAdapter.js 翻译，输出结构 `{ nodes, adj, ... }` 与变更前后完全一致；
+ *   · Dijkstra / Yen K 最短路函数体**未做任何修改**；
+ *   · 本文件保留全部既有导出（含蓝图常量），保证旧 import 不断。
  *
  * 设计原则：
  *   1. 先定义「节点 + 连接关系」的拓扑，再寻路 —— 不直接用像素坐标连两点；
- *   2. 火灾区域作为动态障碍从图中剔除（blockedNodes），而不是事后过滤；
+ *   2. 火灾区域作为动态障碍从图中剔除（blockedNodes / blockedEdges），而不是事后过滤；
  *   3. 所有坐标沿用建筑平面图 SVG 560×300 空间，与设备/人员/3D 模型同源。
- *
- * 楼栋结构（与 src/mock/floorPlanData.js 同源）：
- *   ┌──────────┬──────────┐
- *   │    A     │    C     │    ← 北排房间（门在 y=150）
- *   ├──────────┼──────────┤    ← 主走廊 y=150~190，中心线 y=170
- *   │    B     │    D     │    ← 南排房间（门在 y=190）
- *   └──────────┴──────────┘
- *   四角设楼梯（NW/NE/SW/SE），1F 走廊两端设西侧/东侧安全出口。
  */
 import { NODE_TYPE, ROUTE_CONST, RISK_LEVEL } from './routeTypes.js'
+import {
+  FLOOR_NODES, ZONE_DEFS, ZONE_NODE_KEY, ZONE_CORRIDOR_KEY,
+  EXIT_DEFS, STAIR_KEYS, WALLS, EDGE_TYPE,
+  FLOOR_EDGE_DEFS, EXIT_EDGE_DEFS, floorEdgeDefsOf,
+  nodeId, floorNum, edgeKey, euclid,
+} from './floorTopology.js'
+import {
+  buildFloorTopologyGraph, buildBuildingTopologyGraph, edgeListOf, validateTopology,
+} from './topologyGraphAdapter.js'
 
 const { PX_PER_M, STAIR_DESCENT_M, RISK_FAR_M, RISK_NEAR_M } = ROUTE_CONST
 
 // ══════════════════════════════════════
-// ① 节点定义
+// ① 拓扑常量（重导出，来源已收敛到 floorTopology.js）
 // ══════════════════════════════════════
 
-/**
- * 单层节点蓝本。
- * 说明：房间的疏散起点取「门口」而非房间几何中心 —— 房间只有通过门才能进入走廊，
- *      这样既符合真实通行约束，也保证路线第一段不会从房间内部穿出。
- * @type {Array<{key:string,x:number,y:number,type:import('./routeTypes.js').NodeType,zone?:string,label:string}>}
- */
-export const FLOOR_NODE_BLUEPRINTS = [
-  { key: 'A_CENTER', x: 140, y: 150, type: NODE_TYPE.ROOM, zone: 'A区', label: 'A区门口' },
-  { key: 'B_CENTER', x: 140, y: 190, type: NODE_TYPE.ROOM, zone: 'B区', label: 'B区门口' },
-  { key: 'C_CENTER', x: 415, y: 150, type: NODE_TYPE.ROOM, zone: 'C区', label: 'C区门口' },
-  { key: 'D_CENTER', x: 415, y: 190, type: NODE_TYPE.ROOM, zone: 'D区', label: 'D区门口' },
+/** 单层节点蓝本（13 个：4 房间门口 + 5 走廊 + 4 楼梯） */
+export const FLOOR_NODE_BLUEPRINTS = FLOOR_NODES
 
-  { key: 'CORRIDOR_N', x: 140, y: 170, type: NODE_TYPE.CORRIDOR, label: 'A/B 门厅' },
-  { key: 'CORRIDOR_CENTER', x: 280, y: 170, type: NODE_TYPE.CORRIDOR, label: '主走廊中心' },
-  { key: 'CORRIDOR_S', x: 415, y: 170, type: NODE_TYPE.CORRIDOR, label: 'C/D 门厅' },
-  { key: 'CORRIDOR_W', x: 72, y: 170, type: NODE_TYPE.CORRIDOR, label: '西端楼梯厅' },
-  { key: 'CORRIDOR_E', x: 477, y: 170, type: NODE_TYPE.CORRIDOR, label: '东端楼梯厅' },
+/** 安全出口蓝本（仅 1F 直通室外） */
+export const EXIT_BLUEPRINTS = EXIT_DEFS.map((e) => ({
+  key: e.key, x: e.x, y: e.y, type: e.type, label: e.label, side: e.side,
+}))
 
-  { key: 'STAIR_NW', x: 72, y: 45, type: NODE_TYPE.STAIR, label: '西北楼梯' },
-  { key: 'STAIR_NE', x: 477, y: 45, type: NODE_TYPE.STAIR, label: '东北楼梯' },
-  { key: 'STAIR_SW', x: 72, y: 272, type: NODE_TYPE.STAIR, label: '西南楼梯' },
-  { key: 'STAIR_SE', x: 477, y: 272, type: NODE_TYPE.STAIR, label: '东南楼梯' },
-]
+/** 单层连接关系（元组形式，兼容旧引用） */
+export const FLOOR_EDGE_BLUEPRINTS = FLOOR_EDGE_DEFS.map((d) => [d.from, d.to])
 
-/** 区域 → 起点节点 */
-export const ZONE_NODE_KEY = {
-  'A区': 'A_CENTER',
-  'B区': 'B_CENTER',
-  'C区': 'C_CENTER',
-  'D区': 'D_CENTER',
+/** 1F 出口连接关系（元组形式，兼容旧引用） */
+export const EXIT_EDGE_BLUEPRINTS = EXIT_EDGE_DEFS.map((d) => [d.from, d.to])
+
+export {
+  NODE_TYPE, WALLS, ZONE_DEFS, ZONE_NODE_KEY, ZONE_CORRIDOR_KEY, EDGE_TYPE, STAIR_KEYS,
+  nodeId, floorNum, edgeKey, euclid,
+  edgeListOf, validateTopology,
 }
 
-/** 房间节点 → 其接入的门厅节点（火灾影响走廊时可作为二次封锁对象） */
-export const ZONE_CORRIDOR_KEY = {
-  A_CENTER: 'CORRIDOR_N',
-  B_CENTER: 'CORRIDOR_N',
-  C_CENTER: 'CORRIDOR_S',
-  D_CENTER: 'CORRIDOR_S',
-}
-
-/** 安全出口（仅 1F 直通室外；其余楼层必须经楼梯下行到 1F） */
-export const EXIT_BLUEPRINTS = [
-  { key: 'EXIT_W', x: 32, y: 170, type: NODE_TYPE.EXIT, label: '西侧安全出口', side: 'left' },
-  { key: 'EXIT_E', x: 528, y: 170, type: NODE_TYPE.EXIT, label: '东侧安全出口', side: 'right' },
-]
-
 // ══════════════════════════════════════
-// ② 连接关系（拓扑依据）
+// ② 建图（委托给拓扑适配器，输出结构不变）
 // ══════════════════════════════════════
-
-export const FLOOR_EDGE_BLUEPRINTS = [
-  ['A_CENTER', 'CORRIDOR_N'],
-  ['B_CENTER', 'CORRIDOR_N'],
-  ['C_CENTER', 'CORRIDOR_S'],
-  ['D_CENTER', 'CORRIDOR_S'],
-
-  ['CORRIDOR_N', 'CORRIDOR_CENTER'],
-  ['CORRIDOR_S', 'CORRIDOR_CENTER'],
-  ['CORRIDOR_N', 'CORRIDOR_W'],
-  ['CORRIDOR_S', 'CORRIDOR_E'],
-
-  ['CORRIDOR_W', 'STAIR_NW'],
-  ['CORRIDOR_W', 'STAIR_SW'],
-  ['CORRIDOR_E', 'STAIR_NE'],
-  ['CORRIDOR_E', 'STAIR_SE'],
-]
-
-/** 四角楼梯在 1F 接入安全出口（四角楼梯下行后经 1F 走廊末端出楼） */
-export const EXIT_EDGE_BLUEPRINTS = [
-  ['CORRIDOR_W', 'EXIT_W'],
-  ['STAIR_NW', 'EXIT_W'],
-  ['STAIR_SW', 'EXIT_W'],
-  ['CORRIDOR_E', 'EXIT_E'],
-  ['STAIR_NE', 'EXIT_E'],
-  ['STAIR_SE', 'EXIT_E'],
-]
-
-/** 可跨层下降的楼梯 */
-export const STAIR_KEYS = ['STAIR_NW', 'STAIR_NE', 'STAIR_SW', 'STAIR_SE']
-
-// ══════════════════════════════════════
-// ③ 墙体（路线合法性校验用，禁止穿越）
-// ══════════════════════════════════════
-export const WALLS = [
-  { x: 90, y: 28, w: 105, h: 120, type: 'room' },   // A区
-  { x: 90, y: 210, w: 105, h: 70, type: 'room' },   // B区
-  { x: 375, y: 28, w: 80, h: 120, type: 'room' },   // C区
-  { x: 375, y: 210, w: 80, h: 70, type: 'room' },   // D区
-  { x: 195, y: 20, w: 6, h: 130, type: 'inner' },   // A/C 左墙
-  { x: 355, y: 20, w: 6, h: 130, type: 'inner' },   // A/C 右墙
-  { x: 195, y: 190, w: 6, h: 110, type: 'inner' },  // B/D 左墙
-  { x: 355, y: 190, w: 6, h: 110, type: 'inner' },  // B/D 右墙
-]
-
-// ══════════════════════════════════════
-// ④ 建图
-// ══════════════════════════════════════
-
-export function edgeKey(a, b) {
-  return [a, b].sort().join('|')
-}
-
-export function euclid(a, b) {
-  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2)
-}
-
-export function nodeId(floorId, key) {
-  return `${floorId}:${key}`
-}
-
-export function floorNum(floorId) {
-  return parseInt(String(floorId).replace('F', ''), 10) || 1
-}
 
 /** 单层图 */
 export function buildFloorGraph(floorId) {
-  const nodes = {}
-  const adj = {}
-  const add = (bp) => {
-    const id = nodeId(floorId, bp.key)
-    nodes[id] = {
-      id, floorId, key: bp.key, x: bp.x, y: bp.y, type: bp.type,
-      zone: bp.zone || null, label: bp.label, side: bp.side || null,
-    }
-    adj[id] = []
-    return id
-  }
-  FLOOR_NODE_BLUEPRINTS.forEach(add)
-  if (floorNum(floorId) === 1) EXIT_BLUEPRINTS.forEach(add)
-
-  const link = (ka, kb, weight) => {
-    const a = nodeId(floorId, ka)
-    const b = nodeId(floorId, kb)
-    if (!nodes[a] || !nodes[b]) return
-    const w = weight != null ? weight : Math.round((euclid(nodes[a], nodes[b]) / PX_PER_M) * 100) / 100
-    const ek = edgeKey(a, b)
-    adj[a].push({ to: b, w, ek })
-    adj[b].push({ to: a, w, ek })
-  }
-  FLOOR_EDGE_BLUEPRINTS.forEach(([a, b]) => link(a, b))
-  if (floorNum(floorId) === 1) EXIT_EDGE_BLUEPRINTS.forEach(([a, b]) => link(a, b))
-
-  return { nodes, adj, floorId }
+  return buildFloorTopologyGraph(floorId)
 }
 
 /** 完整楼栋图（含跨楼层楼梯下降边） */
 export function buildBuildingGraph(maxFloor = 6) {
-  const nodes = {}
-  const adj = {}
-  const n = floorNum(`${maxFloor}F`)
-
-  for (let f = n; f >= 1; f--) {
-    const g = buildFloorGraph(`${f}F`)
-    Object.assign(nodes, g.nodes)
-    Object.assign(adj, g.adj)
-  }
-  // 跨楼层下降（STAIR_DESCENT_M / 层）
-  STAIR_KEYS.forEach((key) => {
-    for (let f = n; f >= 2; f--) {
-      const up = nodeId(`${f}F`, key)
-      const down = nodeId(`${f - 1}F`, key)
-      if (!nodes[up] || !nodes[down]) continue
-      const ek = edgeKey(up, down)
-      adj[up].push({ to: down, w: STAIR_DESCENT_M, ek })
-      adj[down].push({ to: up, w: STAIR_DESCENT_M, ek })
-    }
-  })
-
-  return { nodes, adj, maxFloor: n }
+  return buildBuildingTopologyGraph(maxFloor)
 }
 
 /** 某楼层的安全出口节点 id 列表（真实出口在 1F） */
@@ -199,6 +69,10 @@ export function exitIdsOf(graph, floorId = '1F') {
     .filter((n) => n.type === NODE_TYPE.EXIT && n.floorId === floorId)
     .map((n) => n.id)
 }
+
+// ══════════════════════════════════════
+// ③ 火灾 → 动态障碍
+// ══════════════════════════════════════
 
 /**
  * 火灾 → 动态障碍节点。
@@ -218,8 +92,23 @@ export function blockedNodesForFire({ floorId, zone, spreadToCorridor = false, e
   return set
 }
 
+/**
+ * 火灾 → 动态障碍边（P1.8.1 新增）。
+ * 当前火灾模型按「房间/门厅节点」封锁，边阻断能力由此入口提供：
+ * 传入楼层与节点集合，凡两端**任一**落在封锁集合内的边即被切断。
+ * 无封锁节点时返回空集（不改变既有行为）。
+ */
+export function blockedEdgesForFire(graph, blockedNodes) {
+  const set = new Set()
+  if (!graph || !blockedNodes || !blockedNodes.size) return set
+  edgeListOf(graph).forEach((e) => {
+    if (blockedNodes.has(e.from) || blockedNodes.has(e.to)) set.add(e.id)
+  })
+  return set
+}
+
 // ══════════════════════════════════════
-// ⑤ 寻路算法
+// ④ 寻路算法（P1.8.1 未修改，逐字保留）
 // ══════════════════════════════════════
 
 /** Dijkstra（支持封锁节点/边） */

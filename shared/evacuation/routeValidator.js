@@ -10,7 +10,9 @@
  * 调用方（routePlanner / Demo Engine / 前端 store）都必须丢弃校验失败的路线。
  */
 import { NODE_TYPE } from './routeTypes.js'
-import { edgeKey, WALLS } from './routeGraph.js'
+// P1.8.1：墙体与 edgeKey 收敛到唯一权威拓扑 floorTopology.js（此前在 routeGraph.js）。
+// 几何判定规则（segIntersectsRect / segSeg / validateRoute）本身未做任何修改。
+import { edgeKey, WALLS } from './floorTopology.js'
 
 /** 线段与矩形（墙）是否相交 */
 export function segIntersectsRect(p1, p2, r) {

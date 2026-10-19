@@ -18,6 +18,8 @@ import {
   euclid, edgeKey, ZONE_NODE_KEY, ZONE_CORRIDOR_KEY, blockedNodesForFire,
   riskByFireDistance, floorNum,
 } from './routeGraph.js'
+// P1.8.1：出口实体参与路径约束（不可用出口不再作为疏散目标）
+import { EXIT_DEFS, isExitUsable } from './floorTopology.js'
 import { validateRoute } from './routeValidator.js'
 
 const { PX_PER_M, EVAC_SPEED, STAIR_PENALTY_S } = ROUTE_CONST
@@ -121,10 +123,13 @@ export function findPaths(opts = {}) {
   const {
     graph, startId, exitIds, blockedNodes = new Set(), blockedEdges = new Set(),
     k = 3, limit = 3, congestion = 0, idPrefix = 'PLAN', fireNodeIds = null,
+    exits = EXIT_DEFS,
   } = opts
   if (!graph || !graph.nodes[startId]) return []
 
-  const goals = exitIds && exitIds.length ? exitIds : exitIdsOf(graph, '1F')
+  // 候选出口：默认取 1F 全部安全出口，但**不可用的出口不参与规划**（P1.8.1 出口实体约束）
+  const goals = (exitIds && exitIds.length ? exitIds : exitIdsOf(graph, '1F'))
+    .filter((id) => isExitUsable(id, exits))
   const candidates = []
   const seen = new Set()
 
@@ -199,11 +204,13 @@ export function rankPlans(plans) {
  * @param {boolean} [opts.spreadToCorridor]
  * @param {number} [opts.maxFloor] 楼栋层数（默认 6）
  * @param {number} [opts.congestion]
+ * @param {Array} [opts.exits] 运行态出口实体（P1.8.2 Stage 1）。
+ *        缺省时回落到静态 EXIT_DEFS（既有兼容行为不变）；传入时按可用性过滤候选目标。
  */
 export function planEvacuationRoutes(opts = {}) {
   const {
     floorId = '5F', zone = 'A区', fireZone = zone, spreadToCorridor = zone !== fireZone,
-    maxFloor = 6, congestion = 0, limit = 3, idPrefix = 'PLAN',
+    maxFloor = 6, congestion = 0, limit = 3, idPrefix = 'PLAN', exits = null,
   } = opts
   const graph = buildBuildingGraph(maxFloor)
   const startId = startNodeId(graph, floorId, zone)
@@ -221,7 +228,11 @@ export function planEvacuationRoutes(opts = {}) {
   // 火源区人员必须从火源房间撤离 —— 火源房间作为「起点」时允许进入（撤离动作本身不可避免）
   if (blockedNodes.has(startId)) blockedNodes.delete(startId)
 
-  const plans = findPaths({ graph, startId, blockedNodes, fireNodeIds, congestion, limit, idPrefix })
+  // P1.8.2 Stage 1：出口状态透传（缺省 null → findPaths 回落到静态 EXIT_DEFS，行为不变）
+  const plans = findPaths({
+    graph, startId, blockedNodes, fireNodeIds, congestion, limit, idPrefix,
+    exits: exits || undefined,
+  })
   return { graph, plans, blockedNodes: [...blockedNodes], fireNodeIds: [...fireNodeIds], startId }
 }
 
