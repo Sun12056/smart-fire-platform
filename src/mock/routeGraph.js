@@ -10,9 +10,10 @@
  *   2. 保留旧调用签名适配（validateRoute(pathNodes, { edgeSet })）。
  * 楼层平面数据（房间/门/走廊/楼梯/出口坐标）仍来自 floorPlanData.js。
  */
+// P1.8.1（D4）：已从 floorPlanData 移除的零引用符号不再导入/导出 ——
+//   edgeKey / getFloorPlanNodes / getFloorPlanEdges / EXIT_NODES（第二套拓扑残留）
 import {
-  edgeKey, getFloorPlanNodes, getFloorPlanEdges,
-  ROOM_AREAS, EXIT_NODES, ZONE_COLORS, WALLS, DOORS, STAIRS, ROOMS, CORRIDOR,
+  ROOM_AREAS, ZONE_COLORS, WALLS, DOORS, STAIRS, ROOMS, CORRIDOR,
   FLOOR_HEIGHT_M, EVAC_SPEED, STAIR_PENALTY_S,
 } from './floorPlanData.js'
 import {
@@ -27,10 +28,9 @@ import { findPaths, planEvacuationRoutes, rankPlans, buildPlan, startNodeId } fr
 // ⚠️ buildBuildingGraph 已从这里移除：拓扑唯一数据源是 shared/evacuation，
 //    旧名会让人误以为仍在用 floorPlanData 的图（曾经的坑）。请直接 import shared。
 export {
-  edgeKey, ROOM_AREAS, EXIT_NODES,
+  ROOM_AREAS,
   ZONE_COLORS, WALLS, DOORS, STAIRS, ROOMS, CORRIDOR,
   FLOOR_HEIGHT_M, EVAC_SPEED, STAIR_PENALTY_S,
-  getFloorPlanNodes as FLOOR_NODES_FN, getFloorPlanEdges as FLOOR_EDGES_FN,
   // shared 算法（新代码请直接引用 shared/evacuation，这里仅为兼容旧 import）
   dijkstra, kShortestPaths, pathCost, euclid,
   buildSharedGraph, buildFloorGraph, exitIdsOf, blockedNodesForFire,
@@ -68,18 +68,8 @@ export function getFloorTopology(floorId = '5F') {
   return { nodes, edges }
 }
 
-// 单层相邻表
-export function floorAdjacency() {
-  const adj = {}
-  const nodes = getFloorPlanNodes('1F')
-  const edges = getFloorPlanEdges('1F')
-  nodes.forEach((n) => (adj[n.id] = []))
-  edges.forEach((e) => {
-    adj[e.from].push(e.to)
-    adj[e.to].push(e.from)
-  })
-  return adj
-}
+// P1.8.1（D4）：floorAdjacency 已删除 —— 它构造的是已被废弃的第二套拓扑的相邻表，
+//   与 shared 权威图不一致（节点 id 命名空间、走廊粒度均不同），且全仓零引用。
 
 /**
  * 旧签名适配：validateRoute(pathNodes, { edgeSet, walls, blockedNodes })

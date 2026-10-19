@@ -9,6 +9,8 @@ import {
   applyStageEffects, createWorld, resetWorld, retainedPersons, tickWorld,
   validateConfirmedBuildingPlan,
 } from '../demo/engine'
+// P1.8.2 Stage 1：出口运行态默认值（用于 DO storage 中旧 world 的字段补全）
+import { defaultExitStates } from '../../../shared/evacuation/exitRuntime.js'
 import type { DemoBaseline, DemoWorld } from '../demo/world'
 import type { DeviceRuntime, PersonRuntime } from '../demo/world'
 import { fmtSH } from '../db'
@@ -88,7 +90,16 @@ export class DemoRoom extends DurableObject<Env> {
   private async loadWorld(): Promise<DemoWorld> {
     if (this.world) return this.world
     const stored = await this.ctx.storage.get<DemoWorld>(WORLD_KEY)
-    if (stored?.sessionId) { this.world = stored; return stored }
+    if (stored?.sessionId) {
+      // P1.8.2 Stage 1（恢复机制）：exits 是本阶段新增的强制字段，
+      // DO storage 中持久化的旧 world 没有它 —— 必须补全为静态权威默认，
+      // 否则快照会下发 undefined，前端只能降级处理（违背「后端唯一权威」）。
+      if (!Array.isArray(stored.exits) || stored.exits.length === 0) {
+        stored.exits = defaultExitStates()
+      }
+      this.world = stored
+      return stored
+    }
     const baseline = await this.loadBaseline()
     const bld = await this.env.DB.prepare('SELECT name FROM buildings WHERE id = ?').bind(DEFAULT_SCENARIO.buildingId).first<{ name: string }>()
     const world = createWorld(this.ctx.id.toString(), {
@@ -588,6 +599,9 @@ export class DemoRoom extends DurableObject<Env> {
       devices: deviceDTOs(world),
       eventLog: world.eventLog.slice(0, 30),
       evacuationSettled: world.evacuationSettled,
+      // P1.8.2 Stage 1（D-1 = B）：出口运行态随快照下发（后端唯一持有方）
+      // 复用既有 snapshot 结构，仅新增一个字段，不改变 seq / 版本仲裁 / 订阅方式。
+      exits: world.exits,
       tick: world.tick,
       enteredAt: world.enteredAt,
       updatedAt: world.updatedAt,

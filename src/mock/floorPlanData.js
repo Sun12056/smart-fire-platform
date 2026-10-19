@@ -8,7 +8,12 @@
  * SVG viewBox: 560 × 300
  * 建筑外框: x 40~520, y 20~300
  * 走廊带: y 150~190, 中心线 y=170
+ *
+ * P1.8.1 边界：本文件只负责 2D 渲染几何（房间/门/走廊/楼梯/出口的画法与设备布点）。
+ *   疏散拓扑（节点/边/墙体/楼梯可用状态/出口实体）唯一定义在
+ *   shared/evacuation/floorTopology.js —— 本文件不再构建第二张图。
  */
+import { activePlanStairIdsForFloor } from '../../shared/evacuation/floorTopology.js'
 
 export const SVG_W = 560
 export const SVG_H = 300
@@ -83,6 +88,9 @@ export const DOORS = ROOM_DEFS.map(r => ({
 // 每层楼差异化定义
 // ══════════════════════════════════════
 // 每层房间用途/标签不同，设备数量不同
+// P1.8.1：楼梯「逐层可用 / 检修停用」状态已收编为唯一数据源 ——
+//   shared/evacuation/floorTopology.js 的 STAIR_ACTIVE_FLOORS（算法权威）。
+//   本文件不再各自维护 stairsActive，2D 渲染经 activeStairsForFloor() 反向取同一份状态。
 export const FLOOR_CONFIG = {
   '1F': {
     rooms: [
@@ -93,8 +101,6 @@ export const FLOOR_CONFIG = {
     ],
     deviceCount: 12,
     note: '底层大厅，设备最密集',
-    // 本层可用楼梯（其余楼梯显示为检修停用，疏散自动绕行）
-    stairsActive: ['S-A', 'S-B', 'S-C', 'S-D'],
   },
   '2F': {
     rooms: [
@@ -105,7 +111,6 @@ export const FLOOR_CONFIG = {
     ],
     deviceCount: 10,
     note: '标准办公层',
-    stairsActive: ['S-A', 'S-B', 'S-C', 'S-D'],
   },
   '3F': {
     rooms: [
@@ -115,9 +120,8 @@ export const FLOOR_CONFIG = {
       { id: 'D', name: 'D区', label: '仓库' },
     ],
     deviceCount: 14,
+    // 楼梯4(S-D) 检修停用 → 3F 人群只能走楼梯1/2/3（状态见 floorTopology.STAIR_ACTIVE_FLOORS）
     note: '实验层，设备多',
-    // 楼梯4(S-D) 检修停用 → 3F 人群只能走楼梯1/2/3
-    stairsActive: ['S-A', 'S-B', 'S-C'],
   },
   '4F': {
     rooms: [
@@ -127,9 +131,8 @@ export const FLOOR_CONFIG = {
       { id: 'D', name: 'D区', label: '杂物间' },
     ],
     deviceCount: 11,
+    // 楼梯3(S-C) 检修停用（状态见 floorTopology.STAIR_ACTIVE_FLOORS）
     note: '研发层',
-    // 楼梯3(S-C) 检修停用
-    stairsActive: ['S-A', 'S-B', 'S-D'],
   },
   '5F': {
     rooms: [
@@ -140,7 +143,6 @@ export const FLOOR_CONFIG = {
     ],
     deviceCount: 13,
     note: '火灾演示层',
-    stairsActive: ['S-A', 'S-B', 'S-C', 'S-D'],
   },
   '6F': {
     rooms: [
@@ -150,16 +152,15 @@ export const FLOOR_CONFIG = {
       { id: 'D', name: 'D区', label: '天台通道' },
     ],
     deviceCount: 12,
+    // 楼梯1(S-A) 检修停用（状态见 floorTopology.STAIR_ACTIVE_FLOORS）
     note: '顶层',
-    // 楼梯1(S-A) 检修停用
-    stairsActive: ['S-B', 'S-C', 'S-D'],
   },
 }
 
 // 本层可用楼梯（未启用 = 检修停用，不参与路网/布点/疏散）
+// P1.8.1：状态取自唯一权威拓扑，与疏散算法同一份数据（避免 2D 显示停用、算法照走）
 export function activeStairsForFloor(floorId) {
-  const cfg = FLOOR_CONFIG[floorId]
-  const ids = cfg && Array.isArray(cfg.stairsActive) ? cfg.stairsActive : STAIRS.map((s) => s.id)
+  const ids = activePlanStairIdsForFloor(floorId)
   return STAIRS.filter((s) => ids.includes(s.id))
 }
 
@@ -286,124 +287,19 @@ function pad(n, len = 2) {
   return String(n).padStart(len, '0')
 }
 
-// ══════════════════════════════════════
-// 路网节点（与设备共享坐标）
-// ══════════════════════════════════════
-
-
-export function getFloorPlanNodes(floorId) {
-  const nodes = []
-  const add = (id, x, y, type, key, label, extra) => {
-    nodes.push({ id: `${floorId}-${id}`, floorId, key, x, y, type, label: label || key, ...(extra || {}) })
-  }
-
-  // 房间门口节点 —— id 用区域名（A区/B区/C区/D区），保证与生成路线的起点 zone 精确匹配；
-  // 房间只能经门口接入走廊（门 = 真实通行连接点）
-  DOORS.forEach(d => add(d.zone, d.x, d.y, 'room', d.zone, d.zone, { doorId: d.id }))
-
-  // 走廊节点（沿中心线 y=170）
-  CORRIDOR.nodes.forEach(cx => add(`C-${cx}`, cx, 170, 'corridor', `C-${cx}`))
-
-  // 楼梯节点（仅可用楼梯；检修停用楼梯不参与疏散路网）
-  activeStairsForFloor(floorId).forEach(s => add(s.id, s.corridorX, s.corridorY, 'stair', s.id, s.name))
-
-  // 出口节点（仅 1F 直达室外；其他楼层经楼梯下行）
-  if (floorId === '1F') {
-    EXITS.forEach(e => add(e.id, e.x, e.y, 'exit', e.id, e.name))
-  }
-
-  return nodes
-}
-
-// ══════════════════════════════════════
-// 路网边（真实可通行连接）
-// ══════════════════════════════════════
-export function getFloorPlanEdges(floorId) {
-  const edges = []
-  const link = (from, to) => {
-    edges.push({ from: `${floorId}-${from}`, to: `${floorId}-${to}` })
-  }
-
-  // 走廊水平链路
-  const cn = CORRIDOR.nodes
-  for (let i = 0; i < cn.length - 1; i++) {
-    link(`C-${cn[i]}`, `C-${cn[i + 1]}`)
-  }
-
-  // 房间(门口) → 走廊
-  DOORS.forEach(d => link(d.zone, `C-${d.x}`))
-
-  // 楼梯 → 走廊（仅可用楼梯）
-  activeStairsForFloor(floorId).forEach(s => link(s.id, `C-${s.corridorX}`))
-
-  // 走廊末端 → 出口（仅 1F）
-  if (floorId === '1F') {
-    link('C-45', '出口B')
-    link('C-510', '出口A')
-  }
-
-  return edges
-}
-
-// ══════════════════════════════════════
-// 完整楼栋图（含跨楼层楼梯边）
-// ══════════════════════════════════════
-export function buildPlanGraph(maxFloor = 6) {
-  const nodes = {}
-  const adj = {}
-  const n = parseInt(String(maxFloor).replace('F', ''), 10) || 6
-
-  for (let f = n; f >= 1; f--) {
-    const fid = `${f}F`
-    const fNodes = getFloorPlanNodes(fid)
-    const fEdges = getFloorPlanEdges(fid)
-
-    fNodes.forEach(nd => {
-      nodes[nd.id] = nd
-      adj[nd.id] = []
-    })
-
-    fEdges.forEach(e => {
-      const ek = edgeKey(e.from, e.to)
-      const na = nodes[e.from], nb = nodes[e.to]
-      if (!na || !nb) return
-      const w = Math.round(Math.sqrt((na.x - nb.x) ** 2 + (na.y - nb.y) ** 2) / 10 * 100) / 100
-      adj[e.from].push({ to: e.to, w, ek })
-      adj[e.to].push({ to: e.from, w, ek })
-    })
-  }
-
-  // 跨楼层楼梯下降边（仅两端节点都存在时连接：某层楼梯检修停用则该跨层通道自动失效）
-  STAIRS.forEach(s => {
-    for (let f = n; f >= 2; f--) {
-      const up = `${f}F-${s.id}`
-      const down = `${f - 1}F-${s.id}`
-      if (!nodes[up] || !nodes[down]) continue
-      const ek = edgeKey(up, down)
-      adj[up].push({ to: down, w: 3.5, ek })
-      adj[down].push({ to: up, w: 3.5, ek })
-    }
-  })
-
-  return { nodes, adj, maxFloor: n }
-}
-
-export function edgeKey(a, b) {
-  return [a, b].sort().join('|')
-}
+// P1.8.1（D4）：原「第二套拓扑」构建函数已删除 ——
+//   getFloorPlanNodes / getFloorPlanEdges / buildPlanGraph / edgeKey 全仓零引用，
+//   且与 shared/evacuation/floorTopology.js 存在节点 id 命名空间（5F-A区 vs 5F:A_CENTER）、
+//   走廊粒度（9 vs 5）、楼梯可用状态、跨层权重（3.5 vs 6）四处冲突。
+//   疏散图唯一来源：shared/evacuation/floorTopology.js + topologyGraphAdapter.js。
 
 // ══════════════════════════════════════
 // 可疏散区域
 // ══════════════════════════════════════
 export const ROOM_AREAS = ['A区', 'B区', 'C区', 'D区']
 
-// ══════════════════════════════════════
-// 安全出口节点（路网用）
-// ══════════════════════════════════════
-export const EXIT_NODES = [
-  { id: '出口A', x: 528, y: 170, side: 'right', label: '安全出口(东侧)' },
-  { id: '出口B', x: 32, y: 170, side: 'left', label: '安全出口(西侧)' },
-]
+// P1.8.1（D4）：EXIT_NODES 已删除（全仓零引用，且与 2F~6F 无出口节点的事实矛盾）。
+//   出口的唯一权威定义在 shared/evacuation/floorTopology.js 的 EXIT_DEFS。
 
 // 区域配色
 export const ZONE_COLORS = {
@@ -423,19 +319,6 @@ export const STAIR_PENALTY_S = 5
 // ══════════════════════════════════════
 export const ROOMS = ROOM_DEFS
 
-// ══════════════════════════════════════
-// 调试拓扑（供调试层用）
-// ══════════════════════════════════════
-export function getFloorTopology(floorId = '1F') {
-  return {
-    floorId,
-    nodes: getFloorPlanNodes(floorId),
-    edges: getFloorPlanEdges(floorId),
-    walls: WALLS,
-    doors: DOORS,
-    stairs: activeStairsForFloor(floorId),
-    exits: EXITS,
-    rooms: ROOMS,
-    corridor: CORRIDOR,
-  }
-}
+// P1.8.1（D4）：floorPlanData 的 getFloorTopology 已删除（全仓零引用）。
+//   注意 src/mock/routeGraph.js 另有同名 getFloorTopology，返回的是 shared 权威图，
+//   调试层（DashboardView / RoutePlanView）用的正是那一个，不是此处这个。

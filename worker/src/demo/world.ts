@@ -183,6 +183,26 @@ export interface DemoRescue {
   task: { id: string; teams: string[]; targetZone: string; status: string; startedAt: string } | null
 }
 
+/**
+ * 出口运行态实体（P1.8.2 Stage 1）
+ *
+ * 后端（Durable Object 内存）是唯一持有方，经 WS 快照 / REST 响应下发；
+ * 前端不得自行推导或改写，只能消费。
+ *
+ * 结构对齐 shared/evacuation/floorTopology.js 的 EXIT_DEFS：
+ *   · nodeId —— 与拓扑出口节点的唯一关联键；
+ *   · available / status —— 可用性判定（与 isExitUsable 同一口径）；
+ *   · capacity —— **恒为 null**：本阶段不定义容量单位 / 计算口径 / 超载策略，无业务含义。
+ */
+export interface ExitRuntimeState {
+  id: string
+  nodeId: string
+  label?: string
+  available: boolean
+  status: 'OPEN' | 'CLOSED' | 'BLOCKED'
+  capacity: null
+}
+
 export interface DemoWorld {
   sessionId: string
   seq: number
@@ -222,6 +242,15 @@ export interface DemoWorld {
   tick: number
   /** 疏散是否自然跑完（用于提示前端可推进） */
   evacuationSettled: boolean
+  /**
+   * 权威：出口运行态（P1.8.2 Stage 1，D-1 = B：后端统一持有并下发）
+   *
+   * · 初始化默认 = 静态权威定义 EXIT_DEFS 的一份拷贝（全 OPEN）；
+   * · 本阶段只支持**内存态覆盖**（可控注入），不接门禁 / 烟感 / 外部告警（D-6 = A）；
+   * · 容量 capacity 恒为 null，不参与任何计算（D-7 = A）；
+   * · 前端收到缺失 / 过期状态时，回落到静态默认并显式告警，**不得静默当作可用**。
+   */
+  exits: ExitRuntimeState[]
   enteredAt: string
   updatedAt: string
 }

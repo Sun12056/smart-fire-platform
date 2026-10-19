@@ -13,6 +13,8 @@ import {
   planBuildingStrategies, routeOfPerson, groupPersonsByZone, resolvePlanningZone,
 } from '../../../shared/evacuation/buildingEvacuationPlanner.js'
 import { zoneKeyOf } from '../../../shared/evacuation/buildingEvacuationTypes.js'
+// P1.8.2 Stage 1（D-1 = B）：出口运行态由后端统一持有，默认取静态权威定义
+import { defaultExitStates } from '../../../shared/evacuation/exitRuntime.js'
 // P2 确定性滞留：固定候选名单与推进上限（与前端 2D/3D 共用同一份人员 id）
 import {
   pickRetainedCandidates, isRetainedCandidate, RETAINED_HOLD_PROGRESS,
@@ -75,6 +77,9 @@ export function createWorld(sessionId: string, scenario: DemoWorld['scenario'], 
     eventLog: [],
     tick: 0,
     evacuationSettled: false,
+    // P1.8.2 Stage 1：出口运行态初始化 = 静态权威定义（全 OPEN）的一份拷贝。
+    // 本阶段只支持内存态覆盖（不接外部源，D-6 = A）；容量恒为 null（D-7 = A）。
+    exits: defaultExitStates(),
     enteredAt: at,
     updatedAt: at,
   }
@@ -173,6 +178,8 @@ export function applyStageEffects(
         congestion,
         limit: 3,
         idPrefix: `PLAN-${world.sessionId}`,
+        // P1.8.2 Stage 1：路径 B 补齐出口状态透传（保留 legacyPlans 的生成/落库/兼容行为）
+        exits: world.exits,
       })
       world.legacyPlans = plans as DemoPlan[]
       // 整栋楼疏散方案（scope = BUILDING）：火灾只作为动态障碍，疏散范围始终是一栋楼
@@ -186,6 +193,8 @@ export function applyStageEffects(
         fire: { buildingId: scenario.buildingId, floorId: scenario.floorId, zone: scenario.zone },
         maxFloor: MAX_FLOOR,
         idPrefix: 'PLAN',
+        // P1.8.2 Stage 1：路径 A 显式传入出口状态（不再依赖调用方传参，避免恒用默认全 OPEN）
+        exits: world.exits,
       })
       world.buildingPlans = buildingRes.plans as unknown as BuildingEvacuationPlan[]
       world.activeBuildingPlanId = (world.buildingPlans.find((p) => p.recommended) || world.buildingPlans[0])?.id ?? null

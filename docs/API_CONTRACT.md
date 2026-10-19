@@ -164,7 +164,9 @@
 shared/evacuation ┬ routeGraph.js     楼层拓扑（节点/边/墙）+ Dijkstra + Yen K 最短路
                   ├ routePlanner.js  A/B/C 候选方案（距离/时间/风险/距火/出口）
                   ├ routeValidator.js 绝不穿墙校验（4 项检查）
-                  └ routeTypes.js    统一数据结构与常量
+                  ├ routeTypes.js    统一数据结构与常量
+                  ├ floorTopology.js 出口静态权威定义（EXIT_DEFS，只读）
+                  └ exitRuntime.js   出口运行态归一化 + 跨投影失效协调（见 3.1.5）
         ┌─────────┴─────────┐
       Vue（2D/3D）      Worker Demo Engine
 ```
@@ -266,6 +268,125 @@ person.routeId / routePoints（每人所属 floorId+zone 的路线）
 3. `plan.buildingId` 与火情楼栋一致；
 4. 所有「有人员的 floorId + zone」都必须有通过 `routeValidator` 的 route，否则 409；
 5. 禁止只确认火源区 / 只确认某楼层 / 自动从旧 `legacyPlans` 补路线。
+
+### 3.1.5 出口运行态统一契约（shared/evacuation/exitRuntime.js）
+
+**登记（P1.8.2 Stage 1.1）**：`exitRuntime.js` / `floorTopology.js` 为出口运行态的唯一权威模块，前端 store 与 Worker 共用；
+任何调用方**不得**自行实现出口可用性判定或路线失效（平行实现是历史上最大的不一致来源）。
+
+**核心入口**：`applyExitInvalidation(input)` —— 纯函数、不可变、**只做「失效」不做「重规划」**（重规划结果由权威层决定）。
+
+| 入参 | 语义 |
+|---|---|
+| `routePlans` | 兼容投影 A（当前路线列表） |
+| `perZone` | 兼容投影 B：`{ zone: { plans, recommendedId, backupId } }` |
+| `exits` | 运行态出口状态（建议传 `normalizeExitStates().exits`） |
+| `usableNodeIds` | 调用方声明的当前可用出口节点 id |
+| `exitNodeIds` | ⚠️ **DEPRECATED**：仅作为 `exitNodeIds` 输出的额外收窄条件，**不再是第二个独立来源** |
+| `blockAll` | 强制整批失效 |
+
+**出口标识**：三种合法形式 `nodeId`（`1F:EXIT_W`）/ `key`（`EXIT_W`）/ `id`，由 `resolveExitKey` 统一解析为规范 `nodeId`。
+未知标识**不得**被猜测映射为真实出口（不产生「假可用」）。
+
+**裁决契约**
+
+| 编号 | 契约 |
+|---|---|
+| **D1 保守收窄（全局策略 B）** | **`usableNodeIds` 只能收窄有效可用集，不得单独放行出口。**<br>· `reason ∈ {missing, invalid}` ⇒ exits **不可派生** ⇒ **有效可用集恒为空**（fail-closed）；此时**刻意不读取** `usableNodeIds`，即使调用方传入非空声明集也不得放行出口。<br>· `reason ∈ {unknown, duplicate, partial, null}` ⇒ exits **可派生**（派生源 = `reportedUsableNodeIds`）：已声明 ⇒ **保守取交集**（任一源判为不可用 ⇒ 不可用）；未声明 ⇒ 由 exits 派生（D4）。<br>⚠️ 该分支规则以**当前 `reason` 定义与派生守卫**为前提，`reason` 语义或优先级变更时须**重新验证**。<br>⚠️ **旧行为已废止**：此前 `missing` / `invalid` 时「退化为声明集单方」（已声明即用声明集，不取交集）与本条冲突，自本批次起废止；该旧行为**不得**推广到其余四类 —— 实测 `unknown(部分) + declared [W,E]` ⇒ `[W]`，交集确实生效 |
+| **exitsConflict 为空** | ⟺ `exitStates.reason !== null` **或** 未声明 `usableNodeIds`。仅当 `reason === null` **且**已声明时才计算对称差（计算结果可能为空）；**仅诊断，不参与裁定**，本条不扩大 D2 已限定的作用域 |
+| **D2 诊断范围收窄** | `exitsConflict` 仅在 `exitStates.reason === null`（exits 完整、无缺失 / 无重复矛盾）**且**调用方确实声明了 `usableNodeIds` 时才计算；`partial` / `missing` / `invalid` / `duplicate` / `unknown` 情形**不判定为入参冲突**，改由 `exitStates` 各标志单独表达 |
+| **D3 exitNodeIds** | 行为保留（由 `exits` 派生的收窄），**标记 deprecated**；无生产消费方，是否移除待定 |
+| **D4 + P1-1 派生与守卫** | 仅提供 `exits` 时由其派生可用集；**守卫**为 `exitStates.reason ∉ {missing, invalid}`（即「确实提供可解析条目」）。`missing`（未传 / 空 / 非数组）与 `invalid`（非空但零条可解析）**均不得派生** ⇒ 维持 fail-closed |
+| **P2-1 策略 B（已批准）** | **仅已上报且可解析的出口参与可用性判定**。派生源为 `reportedUsableNodeIds`，**不是**含静态补齐项的 `usableNodeIds`。未上报出口（`EXIT_DEFS` 中未被任何已上报条目覆盖者）一律视为**不可用**，不进入可用集、不出现在 `exits` / `exitNodeIds` 输出 |
+| **fail-closed** | 两项输入均缺失 ⇒ 空集 ⇒ 非 DONE 路线整批失效；**严禁**据静态默认回落（全 OPEN）派生可用集。<br>**扩展（策略 B）**：`reason ∈ {missing, invalid}` 时**无论是否声明 `usableNodeIds`** ⇒ 有效可用集恒为空 ⇒ 非 DONE 整批失效；`exits` / `exitNodeIds` **不得**由声明集、静态补齐或额外 `exitNodeIds` 入参恢复出口 |
+
+**`exitStates` 降级信息**（调用方须告警，**不得**当作可信运行态）
+
+| 字段 | 含义 |
+|---|---|
+| `degraded` | 是否降级 |
+| `reason` | 取值 `missing` > `invalid` > `unknown` > `duplicate` > `partial` > `null`（优先级顺序） |
+| `unknown` / `unknownRawIds` | 存在无法解析到已知出口的条目 / 其原始标识 |
+| `duplicate` | 存在重复 nodeId（按「任一不可用 ⇒ 不可用」保守合并） |
+| `partial` | 运行态未覆盖全部出口 |
+
+**`normalizeExitStates` 返回结构（`ExitStatesResult`）**
+
+| 字段 | 含义 |
+|---|---|
+| `exits` | 规范化后的完整出口状态（必然覆盖 `EXIT_DEFS` 全集，**含**静态补齐项） |
+| `usableNodeIds` | 当前可用出口节点 id（**含**静态补齐项） |
+| `reportedUsableNodeIds` | 【P2-1 策略 B】**仅已上报且可解析**条目中的可用出口节点 id（**不含**静态补齐项） |
+| `degraded` / `reason` / `duplicate` / `unknown` / `partial` / `unknownRawIds` | 见上表「`exitStates` 降级信息」 |
+
+> `applyExitInvalidation()` 仅从 `ExitStatesResult` 中取 6 个降级字段构成 `exitStates` 并透出；
+> `reportedUsableNodeIds` 是策略 B 的**派生源**，用于构造有效可用集，不作为诊断字段透出。
+
+**`applyExitInvalidation` 返回契约分层**
+
+① **公开契约**（变更须走契约登记流程）
+
+| 字段 / 行为 | 契约 |
+|---|---|
+| 不可变 | 返回新数组 / 新对象，**不就地修改入参** |
+| 只做失效 | **不做重规划**；重规划结果由权威层决定（见 `PLANNING_STATUS`） |
+| 有效可用集 | `reason ∉ {missing, invalid}` 时 = 上报集 ∩ 声明集（见 D1）；`reason ∈ {missing, invalid}` 时**恒为空集**（声明集不得放行，见 D1 / fail-closed）。<br>准入唯一来源 = `reportedUsableNodeIds` |
+| 未声明时的派生（D4） | 由 exits 派生，**派生源 = `reportedUsableNodeIds`** |
+| 两者均不可派生且未声明 | 空集 ⇒ 非 DONE 路线整批失效（fail-closed） |
+| `exits` | 规范化出口经**有效可用集**过滤后的结果，**不保证**覆盖 `EXIT_DEFS` 全集 |
+| `exitNodeIds` | 由 `exits` 派生，并受 `input.exitNodeIds` 额外收窄；**deprecated**（D3） |
+| `exitStates` | 仅 6 个降级字段，**不透出** `reportedUsableNodeIds` |
+| `exitsConflict` | 仅作**诊断告警**，不参与裁定；为空 ⟺ `reason !== null` 或未声明 `usableNodeIds` |
+| DONE 终态保护 | DONE 不改写为 `BLOCKED`、不进 `affectedRouteIds`、不参与三指针选择 |
+| 当前选中项失效后 | 改选第一条可用者，**不选回**失效路线 |
+| `routePlans` / `perZone[].plans` | 保持数组长度，`null` 元素原样返回 |
+| `affectedRouteIds` | = 最终 BLOCKED 的并集去重，**含存量 BLOCKED** |
+
+② **当前实现观察行为**（**非契约**，日后可能变更，测试不得锁死）
+
+| 字段 / 行为 | 观察 |
+|---|---|
+| 稀疏数组「空洞」（true hole）是否保留 | 未实测、无文档承诺 |
+| `perZone[zone]` 保留调用方额外键 | 由对象展开合并导致，无契约承诺 |
+| `activeRoutePlanId` 未传 / 为 `null` ⇒ 返回 `null` | 无文档承诺 |
+| 显式 `blockAll` 覆盖自动置位 | 无文档承诺 |
+| `blockedAll` 与逐条 BLOCKED 的关系 | **双重语义，仅记录不重构**：输出 `blockedAll` 与入参为同一变量 —— 显式传入则**原样回显**，否则 = `有效可用集为空` 的派生摘要；且 `blockAll` 只在 `true` 时作门控（`false` **不阻止**逐条失效）。<br>**已知行为**：`missing + 已声明 [W] + blockAll:false` ⇒ `blockedAll=false`，但非 DONE 路线**仍全部 BLOCKED**。<br>⇒ `blockedAll === false` **不蕴含**存在可用出口，也不蕴含非 DONE 未被失效 |
+| `exits` / `exitNodeIds` / `affectedRouteIds` 的**元素顺序** | 无承诺 ⇒ 断言一律用**集合语义** |
+
+③ **待决策事项**（未登记为契约，接线前须裁决）
+
+| 事项 | 说明 |
+|---|---|
+| `usableNodeIds: []`（空数组）按「已声明」处理 | 实现以数组判定 ⇒ 空声明产生空交集 ⇒ 整批失效，与「未声明」语义不同 |
+| 上表 ② 的各项是否提升为契约 | 取决于接线时调用方是否依赖 |
+| **`blockedAll` 是否拆分为两个语义字段** | 建议拆为「入参回显」与「派生摘要」两个字段，或统一为派生摘要并**禁止回显**。本轮**只记录不重构** |
+| **FC-1 接线前置条件（静态默认回灌）** | 调用方须上报**真实运行态**出口状态。**禁止**把 `defaultExitStates()` 或已补齐的 `normalizeExitStates(...).exits` 当作 `exits` 入参回灌 —— 静态补齐项会被识别为「已上报条目」，策略 B 的「已上报 vs 补齐」区分当场失效。本阶段**未**处理该旁路，**不得**据此宣称全系统已满足策略 B |
+
+**`usableNodeIds` 与 `reportedUsableNodeIds` 的差异**
+
+- `reportedUsableNodeIds` **始终是** `usableNodeIds` 的**子集**。
+- **两者恒等当且仅当 `partial === false`**；`partial === true` 时两者**存在差异**。
+  差异来源：未上报出口被静态补齐后进入 `usableNodeIds`，但不进入 `reportedUsableNodeIds`。
+  `missing` 与 `invalid` 均伴随 `partial === true`，属上述差异情形。
+- ⚠️ **不得使用 `reason` 判断两集合是否恒等**。`reason` 是单值优先级编码（优先级见上表），
+  **无法完整反映同时成立的状态标志**：
+  · `reason === 'duplicate'` 时仍可同时成立 `partial === true` ⇒ 两集合可以不恒等；
+  · `reason === 'unknown'` 时也可同时成立 `partial === true` ⇒ 两集合可以不恒等；
+  · 反之，`reason === 'duplicate'` 且 `partial === false` 时，两集合**恒等**。
+- **适用前提**：上述子集关系与恒等判定依赖**当前实现**中 `partial` 标志的定义，以及下列三条
+  不变式：
+  · ① 出口解析结果必然属于 `EXIT_DEFS`；
+  · ② `EXIT_DEFS` 中各出口 `nodeId` 唯一；
+  · ③ **未上报出口的静态默认判定为可用**（`EXIT_DEFS` / `defaultExitStates()` 当前全
+    `available: true` + `OPEN`）。若静态默认改为不可用，则 `partial === true` 时未上报出口
+    **既不进入** `usableNodeIds`、**也不进入** `reportedUsableNodeIds` ⇒ 两集合**仍恒等**，
+    「恒等 ⇔ `partial === false`」随之失效。
+  三者任一发生变化时，须**重新验证**该子集关系与恒等判定。
+
+**`exitsConflict` 消费方**：仅用于**诊断告警**（未来 fireStore / Worker 快照层），**不用于**自动裁定或改写 `status`。当前无生产消费方。
+
+**DONE 终态保护**（任何入参组合下均成立）：`DONE` 路线不被改写为 `BLOCKED`、不进入 `affectedRouteIds`、
+不参与 `recommendedId` / `backupId` / `activeRoutePlanId` 选择；判定顺序中 DONE **严格先于** `blockAll`。
 
 ## 3.2 Demo 六阶段状态机（唯一定义）
 
