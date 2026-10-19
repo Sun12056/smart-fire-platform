@@ -461,6 +461,93 @@ console.log('=== 六、K-1 手动路线（已知限制，锁定现状行为）==
 }
 
 console.log('')
+console.log('=== 七、K-2：DONE 不得进入 recommendedId / backupId / activeRoutePlanId ===')
+{
+  // 前置说明：本组用例在**未加 DONE 拦截前必然失败**（先红），修正 selectEvacuationPlan /
+  // setCurrentRoutePlan 后转绿。同时用对照用例证明 NORMAL / WARNING 路线原有行为不变。
+  const PARTIAL = [{ nodeId: W, available: true, status: OPEN }]
+
+  // K2-1 手动选择 DONE
+  {
+    const s = run({ raw: PARTIAL })
+    store.activeRoutePlanId = 'pw'
+    const okSel = store.selectEvacuationPlan('pd')
+    check('K2-1 selectEvacuationPlan(DONE) 返回 false', okSel === false, okSel)
+    check('K2-1 selectEvacuationPlan(DONE) 不改写 activeRoutePlanId',
+      store.activeRoutePlanId === 'pw', store.activeRoutePlanId)
+    const pd = s.byId.get('pd')
+    check('K2-1 DONE 的 status/completedAt/assignedTo/history 未被改写',
+      pd.status === 'DONE' && pd.completedAt === 1700000000 && pd.assignedTo === 'u1'
+      && JSON.stringify(pd.history) === JSON.stringify([{ t: 1, a: 'DONE' }]),
+      [pd.status, pd.completedAt, pd.assignedTo, pd.history])
+  }
+
+  // K2-2 自动推荐：三种失败态 + reconcile 后三指针均不得指向 DONE
+  const failStates = [
+    ['missing', []],
+    ['partial', PARTIAL],
+    ['duplicate', [{ nodeId: W, available: true, status: OPEN },
+      { nodeId: W, available: false, status: OPEN }]],
+  ]
+  failStates.forEach(([label, raw]) => {
+    run({ raw })
+    store.activeRoutePlanId = 'pd'
+    store.invalidateRoutesWithUnusableExit()
+    const s = snap()
+    const ptrs = [s.rec('A区'), s.bac('A区'), s.rec('B区'), s.bac('B区'),
+      s.rec('C区'), s.bac('C区'), s.active]
+    check(`K2-2 ${label}：recommendedId/backupId/activeRoutePlanId 均不为 DONE`,
+      ptrs.every((v) => v !== 'pd'), ptrs)
+  })
+
+  // K2-3 出口失效后手动把 DONE 设为当前路线
+  {
+    run({ raw: [] })
+    const before = snap().rec('C区')
+    const okSet = store.setCurrentRoutePlan('C区', 'pd')
+    check('K2-3 出口失效后 setCurrentRoutePlan(C区, DONE) 返回 false', okSet === false, okSet)
+    check('K2-3 出口失效后 recommendedId 未被改写为 DONE',
+      snap().rec('C区') !== 'pd', { before, after: snap().rec('C区') })
+  }
+
+  // K2-4 重复 reconcile 后仍拒绝，且 DONE 双侧历史字段不变
+  {
+    const s0 = run({ raw: PARTIAL })
+    store.activeRoutePlanId = 'pw'
+    for (let i = 0; i < 3; i += 1) store.invalidateRoutesWithUnusableExit()
+    check('K2-4 重复 reconcile 3 次后 selectEvacuationPlan(DONE) 仍返回 false',
+      store.selectEvacuationPlan('pd') === false)
+    check('K2-4 重复 reconcile 3 次后 setCurrentRoutePlan(C区, DONE) 仍返回 false',
+      store.setCurrentRoutePlan('C区', 'pd') === false)
+    const s = snap()
+    check('K2-4 重复 reconcile 3 次后 activeRoutePlanId 仍非 DONE',
+      s.active !== 'pd', s.active)
+    expectDoneIntact('K2-4 重复 reconcile 3 次后', s)
+    check('K2-4 重复 reconcile 3 次后 DONE 未进入 affected（且 s0 侧同样未变）',
+      !blockedIds(s).includes('pd') && s0.st('pd') === 'DONE',
+      [blockedIds(s), s0.st('pd')])
+  }
+
+  // K2-5 对照：NORMAL / WARNING 路线原有选择行为不变（证明未扩大规则、未误伤）
+  {
+    run({ raw: PARTIAL })
+    check('K2-5 对照：NORMAL 路线可被 selectEvacuationPlan 选中',
+      store.selectEvacuationPlan('pw') === true && store.activeRoutePlanId === 'pw',
+      store.activeRoutePlanId)
+    check('K2-5 对照：NORMAL 路线可被 setCurrentRoutePlan 选中',
+      store.setCurrentRoutePlan('A区', 'pw') === true && snap().rec('A区') === 'pw',
+      snap().rec('A区'))
+    const s2 = run({ raw: PARTIAL, fire: FIRE })
+    check('K2-5 对照：WARNING 路线（出口已准入）仍可被 selectEvacuationPlan 选中',
+      s2.st('pw') === 'WARNING' && store.selectEvacuationPlan('pw') === true,
+      [s2.st('pw'), store.activeRoutePlanId])
+    check('K2-5 对照：WARNING 路线仍可被 setCurrentRoutePlan 选中',
+      store.setCurrentRoutePlan('A区', 'pw') === true && snap().rec('A区') === 'pw',
+      snap().rec('A区'))
+  }
+}
+
+console.log('')
 console.log(`=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 await server.close()
 process.exit(fail ? 1 : 0)

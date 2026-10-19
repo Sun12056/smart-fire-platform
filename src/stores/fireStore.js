@@ -1373,7 +1373,9 @@ export const useFireStore = defineStore('fire', () => {
       return true
     }
     // ⚠️ LEGACY：非整栋楼方案（旧单区域结构）仅本地预览，不改变权威方案
-    if (plan.status === 'BLOCKED') return false
+    // Stage 1.3 K-2：DONE 是终态，永不作为活动路线；此处为**只读**状态判定，
+    // 不改写 DONE 的 status / completedAt / assignedTo / history 等历史字段。
+    if (plan.status === 'BLOCKED' || plan.status === 'DONE') return false
     activeRoutePlanId.value = planId
     applyRouteToDevices(plan)
     return true
@@ -3337,6 +3339,9 @@ export const useFireStore = defineStore('fire', () => {
     if (!routeMatrix.value) return false
     const info = routeMatrix.value.perZone[zone || selectedZone.value]
     if (!info) return false
+    // Stage 1.3 K-2：DONE 是终态，不得被选为推荐路线；只读判定，不触碰其历史字段。
+    // 注意：本行**只**新增 DONE 拦截，沿用既有 BLOCKED 处理规则，不扩大状态规则。
+    if (plan && plan.status === 'DONE') return false
     info.recommendedId = planId
     addNotification({
       title: '当前路线已设定',
