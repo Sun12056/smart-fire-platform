@@ -265,9 +265,9 @@
               <polyline
                 v-if="zr.segment.length"
                 :points="zr.segment.map(p => p.x + ',' + p.y).join(' ')"
-                :class="recStatusMap[zr.zone] === 'BLOCKED' ? 'route-fire' : 'route-active'"
+                :class="recStatusMap[zr.zone] === 'BLOCKED' ? 'route-fire' : (recStatusMap[zr.zone] === 'UNKNOWN' ? 'route-unknown' : 'route-active')"
                 :style="{
-                  stroke: recStatusMap[zr.zone] === 'BLOCKED' ? '#EF4444' : zr.color,
+                  stroke: recStatusMap[zr.zone] === 'BLOCKED' ? '#EF4444' : (recStatusMap[zr.zone] === 'UNKNOWN' ? '#94A3B8' : zr.color),
                   opacity: store.selectedZone === zr.zone ? 1 : 0.5,
                   filter: store.selectedZone === zr.zone ? 'drop-shadow(0 0 4px ' + zr.color + ')' : 'none'
                 }"
@@ -521,8 +521,8 @@
                       <polyline
                         v-if="zr.segment.length"
                         :points="zr.segment.map(p => p.x + ',' + p.y).join(' ')"
-                        :class="recStatusMap[zr.zone] === 'BLOCKED' ? 'route-fire' : 'route-backup'"
-                        :style="{ stroke: recStatusMap[zr.zone] === 'BLOCKED' ? '#EF4444' : zr.color, opacity: store.selectedZone === zr.zone ? 1 : 0.35 }"
+                        :class="recStatusMap[zr.zone] === 'BLOCKED' ? 'route-fire' : (recStatusMap[zr.zone] === 'UNKNOWN' ? 'route-unknown' : 'route-backup')"
+                        :style="{ stroke: recStatusMap[zr.zone] === 'BLOCKED' ? '#EF4444' : (recStatusMap[zr.zone] === 'UNKNOWN' ? '#94A3B8' : zr.color), opacity: store.selectedZone === zr.zone ? 1 : 0.35 }"
                       />
                     </template>
                   </g>
@@ -1710,6 +1710,13 @@ const recStatusMap = computed(() => {
   const map = {}
   // P1.7.3-B3：按 canonical zone 标记火源区路线
   if (fe) map[zoneOf(fe)] = 'BLOCKED'
+  // P1.8.2 K-4：出口/火源失效使路线运行时 BLOCKED 的区域同样标红（与权威投影 routePlans 一致）
+  // 三态语义：投影未命中 / 状态缺失 ⇒ 'UNKNOWN'（灰点线），既不渲染成正常也不误判为阻断
+  store.getAllZoneRoutes().forEach((zr) => {
+    if (!zr || !zr.plan || map[zr.zone] === 'BLOCKED') return
+    if (zr.plan.status === 'BLOCKED') map[zr.zone] = 'BLOCKED'
+    else if (zr.plan.status === null || zr.plan.status === undefined) map[zr.zone] = 'UNKNOWN'
+  })
   return map
 })
 
@@ -2864,6 +2871,16 @@ watch(expandedFloor, () => {
   stroke-linecap: round;
   stroke-linejoin: round;
   animation: route-blink 1s infinite;
+}
+/* P1.8.2 K-4：状态未知（投影未命中 / 状态缺失）—— 灰点线，区别于红色阻断与常态实线 */
+.route-unknown {
+  fill: none;
+  stroke: #94A3B8;
+  stroke-width: 2;
+  stroke-dasharray: 2 6;
+  opacity: 0.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 @keyframes route-blink { 0%,100% { opacity:0.4; } 50% { opacity:0.9; } }
 .route-start { fill: #22C55E; stroke: #fff; stroke-width: 1.5; }

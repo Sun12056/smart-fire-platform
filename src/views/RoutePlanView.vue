@@ -177,7 +177,7 @@
         <div
           v-for="z in zonePlanCards"
           :key="z.zone"
-          :class="['zone-card', { active: store.selectedZone===z.zone, blocked: z.blocked }]"
+          :class="['zone-card', { active: store.selectedZone===z.zone, blocked: z.blocked, unknown: z.unknown }]"
           @click="store.setSelectedZone(z.zone)"
         >
           <div class="zone-head">
@@ -185,6 +185,7 @@
             <span class="zone-name">{{ routeFloorId }} {{ z.zone }}</span>
             <span class="zone-persons">👤 {{ z.personCount }} 人</span>
             <span v-if="z.blocked" class="tag blk">❌ 无安全路线</span>
+            <span v-else-if="z.unknown" class="tag unk">⚠️ 状态未知</span>
           </div>
           <div class="zone-rec">
             <span class="rec-label">出口</span>
@@ -393,17 +394,25 @@ const zonePlanCards = computed(() => {
   const floorId = routeFloorId.value
   return bp.routes
     .filter((r) => r && r.floorId === floorId)
-    .map((r) => ({
-      zone: r.zone,
-      color: ZONE_COLOR_MAP[r.zone] || '#4361EE',
-      routeId: r.routeId,
-      exitLabel: r.exitLabel || r.exitId,
-      distance: Math.round(r.distance || 0),
-      estimatedTime: r.estimatedTime,
-      riskLevel: RISK_CN[r.riskLevel] || '低',
-      personCount: r.personCount || 0,
-      blocked: !r.valid,
-    }))
+    .map((r) => {
+      // P1.8.2 K-4：运行时状态一律取自权威投影 routePlans（经 reconcileRouteStatuses 协调）
+      const proj = store.getRoutePlanById(r.routeId)
+      const status = proj ? proj.status : null
+      const blocked = !r.valid || status === 'BLOCKED'
+      return {
+        zone: r.zone,
+        color: ZONE_COLOR_MAP[r.zone] || '#4361EE',
+        routeId: r.routeId,
+        exitLabel: r.exitLabel || r.exitId,
+        distance: Math.round(r.distance || 0),
+        estimatedTime: r.estimatedTime,
+        riskLevel: RISK_CN[r.riskLevel] || '低',
+        personCount: r.personCount || 0,
+        blocked,
+        // 三态语义：投影未命中 / 状态缺失 ⇒ 未知（既不判「正常」也不判「阻断」）
+        unknown: !blocked && (status === null || status === undefined),
+      }
+    })
 })
 
 // P1.7.3-B3：canonical 火源判定（buildingId / floorId / zone），别名不再参与
@@ -713,12 +722,15 @@ onMounted(() => {
 .zone-card:hover { border-color: var(--fire-blue); box-shadow: 0 2px 12px rgba(67,97,238,0.15); }
 .zone-card.active { border-color: var(--fire-blue); border-width: 2px; }
 .zone-card.blocked { opacity: 0.8; border-color: rgba(239,68,68,0.4); background: rgba(239,68,68,0.03); }
+/* P1.8.2 K-4：状态未知（投影未命中 / 状态缺失）—— 视觉上区别于阻断与正常 */
+.zone-card.unknown { border-color: rgba(148,163,184,0.4); border-style: dashed; background: rgba(148,163,184,0.04); }
 .zone-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 .zone-dot { width: 10px; height: 10px; border-radius: 50%; }
 .zone-name { font-size: var(--fs-md, 14px); font-weight: 700; color: var(--text-primary); }
 .zone-persons { font-size: var(--fs-tiny, 10px); color: var(--text-tertiary); margin-left: auto; }
 .tag { font-size: var(--fs-tiny, 10px); padding: 1px 6px; border-radius: 3px; }
 .tag.blk { background: rgba(239,68,68,0.15); color: #EF4444; }
+.tag.unk { background: rgba(148,163,184,0.15); color: #94A3B8; }
 .zone-rec, .zone-bak { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs, 11px); margin-top: 4px; flex-wrap: wrap; }
 .rec-label, .bak-label { background: rgba(67,97,238,0.12); color: var(--fire-blue); padding: 1px 6px; border-radius: 3px; font-weight: 600; }
 .bak-label { background: rgba(148,163,184,0.15); color: #64748B; }
