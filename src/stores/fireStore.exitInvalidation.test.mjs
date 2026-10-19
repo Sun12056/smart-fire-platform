@@ -162,6 +162,75 @@ const expectDoneIntact = (label, s) => {
     s.zoneKeys('C区'))
 }
 
+console.log('=== 〇、D1-A：初始化窗口（raw = null）与「已收到但缺失」必须严格区分 ===')
+console.log('  ⚠️ 本组必须位于文件最前：exitRawStates 初始为 null，而唯一写入点会把它永久改写为非 null。')
+console.log('  ⚠️ 本组**不断言** mock 模式已实现严格 fail-closed —— 恰恰相反：mock / 离线模式下')
+console.log('     applyDemoSnapshot 从不被调用 ⇒ raw 恒为 null ⇒ 出口维度全时段不参与判定（兼容行为）。')
+{
+  check('N-1 初始态：exitRawStates === null（从未收到过任何出口运行态数据）',
+    store.exitRawStates === null, store.exitRawStates)
+  check('N-1 初始态：exitStateDegraded === true / exitStateReason === "missing"',
+    store.exitStateDegraded === true && store.exitStateReason === 'missing',
+    [store.exitStateDegraded, store.exitStateReason])
+  check('N-1 初始态：exitReportedUsableNodeIds 为空（无真实上报可用集）',
+    (store.exitReportedUsableNodeIds || []).length === 0, store.exitReportedUsableNodeIds)
+
+  // N-2 兼容行为：null 窗口下出口维度完全不参与判定
+  const nullPlans = () => [
+    { id: 'pw', exitId: W, exit: W, status: 'NORMAL', floorsPassed: ['5F'], path: [] },
+    { id: 'pe', exitId: E, exit: E, status: 'NORMAL', floorsPassed: ['5F'], path: [] },
+  ]
+  store.routePlans = nullPlans()
+  store.routeMatrix = { buildingId: 'B003', floorId: '5F', areas: ['A区', 'B区'], perZone: {
+    'A区': { plans: [{ ...store.routePlans[0] }], recommendedId: 'pw', backupId: null },
+    'B区': { plans: [{ ...store.routePlans[1] }], recommendedId: 'pe', backupId: null },
+  } }
+  store.activeRoutePlanId = 'pw'
+  const markedNull = store.invalidateRoutesWithUnusableExit()
+  check('N-2 null 窗口：reconcile 不产生出口失效（marked === 0）', markedNull === 0, markedNull)
+  check('N-2 null 窗口：路线保持 NORMAL（沿用 Stage 1.3 之前的兼容行为）',
+    store.routePlans.every((p) => p.status === 'NORMAL'),
+    store.routePlans.map((p) => p.status))
+  check('N-2 null 窗口：activeRoutePlanId 不被出口维度改写',
+    store.activeRoutePlanId === 'pw', store.activeRoutePlanId)
+
+  // N-3 路径 B 不收窄，且不因静态默认额外准入出口
+  check('N-3 null 窗口：usableExitsOf 不收窄候选出口',
+    JSON.stringify(store.usableExitsOf([W, E])) === JSON.stringify([W, E]),
+    store.usableExitsOf([W, E]))
+  check('N-3 null 窗口：候选集合恰好等于输入（无静态补齐扩张）',
+    JSON.stringify(store.usableExitsOf([W])) === JSON.stringify([W]),
+    store.usableExitsOf([W]))
+
+  // N-4 已收到但缺失 ⇒ Policy B fail-closed（与 null 窗口行为相反）
+  store.applyExitRuntimeStates([])
+  check('N-4 applyExitRuntimeStates([]) ⇒ exitRawStates 变为 []（**不是** null）',
+    Array.isArray(store.exitRawStates) && store.exitRawStates.length === 0,
+    store.exitRawStates)
+  check('N-4 已收到但缺失 ⇒ reason === "missing" 且 marked === 2（fail-closed）',
+    store.exitStateReason === 'missing' && store.invalidateRoutesWithUnusableExit() === 2,
+    [store.exitStateReason, store.routePlans.map((p) => p.status)])
+  check('N-4 已收到但缺失 ⇒ 非 DONE 整批 BLOCKED',
+    store.routePlans.every((p) => p.status === 'BLOCKED'),
+    store.routePlans.map((p) => p.status))
+
+  // N-5 快照缺 exits 字段（undefined）同样按「已收到但缺失」处理
+  store.routePlans = nullPlans()
+  store.applyExitRuntimeStates(undefined)
+  check('N-5 applyExitRuntimeStates(undefined) ⇒ exitRawStates 归一为 []（不回到 null）',
+    Array.isArray(store.exitRawStates) && store.exitRawStates.length === 0,
+    store.exitRawStates)
+  check('N-5 undefined ⇒ fail-closed，非 DONE 整批 BLOCKED',
+    store.invalidateRoutesWithUnusableExit() === 2
+    && store.routePlans.every((p) => p.status === 'BLOCKED'),
+    store.routePlans.map((p) => p.status))
+
+  // N-6 单调性：null 只能单向离开，永不回头
+  store.applyExitRuntimeStates(null)
+  check('N-6 applyExitRuntimeStates(null) ⇒ 仍归一为 []（null 单向不可逆）',
+    Array.isArray(store.exitRawStates), store.exitRawStates)
+}
+
 console.log('=== 一、出口准入（路径 A：真实调用链 applyExitRuntimeStates → invalidate）===')
 {
   const s = expectCommon('T-1 missing', run({ raw: [] }))

@@ -276,8 +276,20 @@ export const useFireStore = defineStore('fire', () => {
     // Stage 1.3：落盘「原始上报」与「真实上报可用集」。
     //   · n.exits **含静态补齐项**，永远不得作为「上报是否完整」的证据；
     //   · 唯一准入来源 = n.reportedUsableNodeIds（仅含已上报且可解析的条目）。
-    // `raw` 为空/缺失（快照无 exits 字段）时落 `[]` ⇒ normalize 判 missing ⇒ fail-closed；
-    // 与「从未收到过任何上报」的初始态 `null` 严格区分（后者不做出口判定，见 reconcile）。
+    //
+    // 【D1-A 语义约定（已裁决，禁止擅自扩大）】两种输入必须严格区分：
+    //   ① raw = null ⇒ **从未收到过任何出口运行态数据**。
+    //      mock（离线）模式下 applyDemoSnapshot 从不被调用，该状态是**永久态**而非瞬时窗口；
+    //      此时沿用 Stage 1.3 之前的兼容行为：出口维度不参与判定、usableExitsOf 不收窄。
+    //      这是「无数据源」，**不是**「把缺失输入当成完整上报」，也**不得**据此宣称
+    //      mock 模式已实现严格 fail-closed。
+    //   ② raw = [] / undefined / 非数组 / 结构非法 / 条目不可解析 ⇒ **已收到但缺失或无效**，
+    //      按既定 Policy B 处理：归一化为 missing/invalid，有效可用集取「已上报且可解析」的
+    //      子集（可能为空）⇒ fail-closed。
+    //   因此本行把 undefined/null 一律落为 `[]`，使 ② 与 ① 在数据层不再混淆。
+    //   ⚠️ 已知不一致（登记在案、不在本阶段修复）：① 状态下诊断位
+    //      exitStateDegraded = true / exitStateReason = 'missing'（来自 ref 初始值），
+    //      但行为是 fail-open；读取诊断位时不得反推「已 fail-closed」。
     exitRawStates.value = raw === undefined || raw === null ? [] : raw
     exitReportedUsableNodeIds.value = n.reportedUsableNodeIds
     exitStateDegraded.value = n.degraded
@@ -303,9 +315,14 @@ export const useFireStore = defineStore('fire', () => {
    * ⚠️ 必须整体采纳 out.routePlans / out.perZone / out.activeRoutePlanId：
    *   两投影各自成对象，部分采纳会出现「同一 id 两投影状态不一致」。
    *
-   * ⚠️ exitRawStates === null（**从未收到过任何上报**）：不做出口维度判定 ——
-   *   既不把静态默认当作真实上报，也不做「无数据即整批阻断」的误判；
-   *   一旦收到过一次上报（即使是空数组 / 非法结构）即进入 fail-closed。
+   * ⚠️ exitRawStates === null（**从未收到过任何出口运行态数据**）：不做出口维度判定 ——
+   *   既不把静态默认当作真实上报，也不做「无数据即整批阻断」的误判。
+   *   【D1-A】这是「初始化前 / 无数据源」的兼容行为：mock（离线）模式下
+   *   applyDemoSnapshot 从不被调用，该状态为**永久态**（非瞬时窗口），
+   *   因此 mock 模式**不实现**严格 fail-closed，不得反向宣称。
+   *   一旦收到过任何一次上报（即使是空数组 / 非法结构）即进入 fail-closed。
+   *   ⚠️ 该状态下诊断位 exitStateDegraded=true / exitStateReason='missing' 与
+   *   fail-open 行为并存（已知不一致，登记在案，不在本阶段修复）。
    *
    * @returns {number} 协调后处于 BLOCKED 的路线 id 数（去重；恒不含 DONE）
    */
@@ -916,9 +933,12 @@ export const useFireStore = defineStore('fire', () => {
    *
    * · exitRawStates：**原始**上报（未经过静态补齐）。
    *   - null ⇒ 从未收到过任何上报 ⇒ 出口维度不参与判定（既不把静态默认当真实上报，
-   *     也不做「无数据即整批阻断」的误判）；
-   *   - [] / 非法结构 / 部分 ⇒ 已收到上报但不完整 ⇒ normalize 判 missing/invalid/partial
-   *     ⇒ 有效可用集为「已上报且可解析」的子集，fail-closed。
+   *     也不做「无数据即整批阻断」的误判）。
+   *     【D1-A】applyExitRuntimeStates 的唯一调用源是 applyDemoSnapshot（= demoStore），
+   *     因此 **mock / 离线模式下该状态为永久态**，属「初始化前的兼容行为」，
+   *     不得宣称 mock 模式已实现严格 fail-closed。
+   *   - [] / undefined / 非法结构 / 部分 ⇒ 已收到上报但不完整 ⇒ normalize 判
+   *     missing/invalid/partial ⇒ 有效可用集为「已上报且可解析」的子集，fail-closed。
    *   每当收到新快照即**整体替换**，永不与上一次合并（不复用过期出口状态）。
    * · exitReportedUsableNodeIds：真实上报可用集，是路径 A（失效）与路径 B（规划筛选）
    *   **唯一**的准入来源；n.exits 与 usableNodeIds 含静态补齐项，一律不得用于准入。
@@ -2756,7 +2776,9 @@ export const useFireStore = defineStore('fire', () => {
    * Stage 1.3（路径 B 与路径 A 统一口径）：
    *   · 唯一准入来源 = exitReportedUsableNodeIds（真实上报可用集）；
    *   · 不再读 exitRuntimeStates —— 它含静态补齐项，会把「未上报」的出口当作可用（P1-1 根因）；
-   *   · exitRawStates === null（从未收到过上报）⇒ 不做收窄，与既有行为一致（无新阻断）；
+   *   · exitRawStates === null（从未收到过上报）⇒ 不做收窄，与既有行为一致（无新阻断）。
+   *     【D1-A】mock（离线）模式下该状态为永久态 ⇒ mock 模式不实现严格 fail-closed，
+   *     不得反向宣称；
    *     只要收到过一次上报（含空数组 / 非法结构）即按真实上报集收窄，fail-closed。
    */
   function usableExitsOf(allExitIds) {
