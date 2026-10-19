@@ -325,6 +325,16 @@ export const useFireStore = defineStore('fire', () => {
    *   fail-open 行为并存（已知不一致，登记在案，不在本阶段修复）。
    *
    * @returns {number} 协调后处于 BLOCKED 的路线 id 数（去重；恒不含 DONE）
+   *
+   * ⚠️【P1.8.2 Stage 2-A / K-4 · 状态权威源边界】本函数**只**写 routePlans 与
+   *    routeMatrix.perZone 两个投影，**从不写** activeBuildingPlan.routes ——
+   *    EvacuationRoute 无 status 字段，且 buildingEvacuationPlans 直接持有后端快照对象
+   *    （applyBuildingPlans 不克隆；buildingPlanCache 为浅拷贝；routesByZone 与 routes
+   *    互为别名），前端改写即污染后端数据。⇒ 展示层（getAllZoneRoutes / currentRoutePlan）
+   *    必须经 reconciledRouteView() 从 routePlans 取状态；bp.routes 只提供几何与规划元数据。
+   *    ⚠️ 本函数**不覆盖全部业务行为**：startEvacuationRun(:1479) 与
+   *    applyRouteToDevices(:1339/:1407/:3095) 仍各自直接 routeToRenderable(bp, route)，
+   *    其状态门禁问题属**独立遗留项**，不因 K-4 上线而被视为已修复。
    */
   function reconcileRouteStatuses() {
     // ① 火源维度：必须同时作用于 **两个投影**。
@@ -2642,13 +2652,22 @@ export const useFireStore = defineStore('fire', () => {
   /**
    * 当前查看区域在当前整栋楼方案里的那条路线（只读展示用）
    * ⚠️ 不读 routeMatrix.perZone —— perZone 只是兼容投影；权威来源是 activeBuildingPlan。
+   *
+   * P1.8.2 Stage 2-A（K-4）：返回对象的**字段结构与 routeToRenderable 完全一致**
+   *    （命中与未命中两条路径都由 routeToRenderable 构造 ⇒ 几何 / 楼层 / 出口标识 /
+   *    方案归属等字段逐一对齐，**不存在字段差异**，也不会因 routePlans 未生成 /
+   *    正在替换而返回结构不完整的对象）；唯一差别是 `status`：
+   *      · 命中权威投影 ⇒ 与 getRoutePlanById(id) **同一对象**（状态与对象身份一致）；
+   *      · 未命中 ⇒ status === null（状态未知），**不是** NORMAL；
+   *        调用方不得据此判定路线可用 / 不可用。
+   *    本函数只读，不写 bp.routes / routesByZone / 后端快照对象。
    */
   const currentRoutePlan = computed(() => {
     const bp = activeBuildingPlan.value
     if (bp && bp.routes && bp.routes.length) {
       const route = bp.routes.find((r) => r.zone === selectedZone.value)
         || buildingRouteOfPerson(bp, { floorId: routeFloorId.value, zone: selectedZone.value })
-      if (route) return routeToRenderable(bp, route)
+      if (route) return reconciledRouteView(bp, route)
       return null
     }
     // ⚠️ LEGACY：无整栋楼方案时的旧投影（只读）
@@ -2863,8 +2882,19 @@ export const useFireStore = defineStore('fire', () => {
         : /^CORRIDOR/.test(key) ? 'corridor' : 'room'
   }
 
-  /** 整栋楼方案中的一条路线 → 2D/3D 现有渲染结构（字段与 toRenderablePlan 对齐） */
-  function routeToRenderable(bp, route) {
+  /**
+   * 整栋楼方案中的一条路线 → 2D/3D 现有渲染结构（字段与 toRenderablePlan 对齐）
+   *
+   * P1.8.2 Stage 2-A（K-4）：`status` 改为**由调用方显式传入**，不再无条件写死 'NORMAL'。
+   *   · 投影种子（syncLegacyRouteState:2945 / :2958）用默认值 'NORMAL' —— 紧随其后的
+   *     reconcileRouteStatuses() 会以出口 / 火源维度整体覆盖，种子值不对外可见；
+   *   · 展示兜底（reconciledRouteView 未命中权威投影）传 null ——
+   *     `status === null` ⟺ **状态未知**（未取得权威投影），语义上**严格区别于**
+   *     'NORMAL'（正常可用）；调用方**不得**把 null 当作可用 / 不可用判据；
+   *   · 其余调用点（设备联动 :1339/:1407/:3095、本地疏散模拟 :1475）不读 status，
+   *     沿用默认值，行为与 K-4 之前完全一致。
+   */
+  function routeToRenderable(bp, route, status = 'NORMAL') {
     const path = (route.points || []).map((pt, i) => {
       const id = (route.nodes || [])[i] || ''
       const [floorId, key] = String(id).split(':')
@@ -2888,7 +2918,7 @@ export const useFireStore = defineStore('fire', () => {
       floorsPassed: route.floorsPassed || [route.floorId],
       riskLevel: RISK_CN[route.riskLevel] || '低',
       type: 'auto',
-      status: 'NORMAL',
+      status,
       recommended: Boolean(bp.recommended),
       score: 0,
       distance: route.distance,
@@ -2902,6 +2932,46 @@ export const useFireStore = defineStore('fire', () => {
       strategy: bp.strategy,
       scope: bp.scope,
     }
+  }
+
+  /**
+   * P1.8.2 Stage 2-A（K-4）：展示层路线状态的**唯一权威源**解析。
+   *
+   * 背景：reconcileRouteStatuses 只协调 routePlans / routeMatrix.perZone 两个投影，
+   * **从不写** activeBuildingPlan.routes —— EvacuationRoute 没有 status 字段
+   * （shared/evacuation/buildingEvacuationTypes.js: emptyRoute），且 buildingEvacuationPlans
+   * 直接持有后端快照对象（applyBuildingPlans 不克隆，buildingPlanCache 为浅拷贝，
+   * routesByZone 与 routes 互为别名），前端不得改写。
+   * ⇒ 展示层若直接 routeToRenderable(bp, route) 只会拿到种子 / 兜底状态，
+   * 会把出口 / 火源失效结果静默抹掉；故状态必须从 routePlans 取。
+   *
+   * 契约（调用方必须遵守）：
+   *   · **命中**：返回 routePlans 中**同一对象**（与 getRoutePlanById(id) 同一引用），
+   *     其 status 已由 reconcileRouteStatuses 协调；几何 / 楼层 / 出口 / 方案归属
+   *     与 bp.routes 同源（同一条 route 经 routeToRenderable 派生，字段结构一致）。
+   *   · **未命中**（routePlans 尚未生成 / 正在替换 / 该路线不在投影中 / 方案归属不符）：
+   *     返回 routeToRenderable(bp, route, null) —— **几何照常可用于绘制**，
+   *     但 status === null ⟺ **状态未知**；
+   *     ⚠️ 调用方**不得**把该对象当作「已协调完成的路线状态」使用，
+   *        也不得把 null 解释为「正常可用」（严禁静默降级为 NORMAL）。
+   *   · 本函数只做**状态寻源**，不写 bp.routes / routesByZone / 后端快照对象。
+   *
+   * ⚠️ 覆盖边界（遗留项，不在 K-4 范围）：本函数只服务展示层
+   *    （getAllZoneRoutes / currentRoutePlan）。startEvacuationRun(:1479) 与
+   *    applyRouteToDevices(:1339/:1407/:3095) 仍各自直接 routeToRenderable(bp, route)，
+   *    其状态门禁问题须作为**独立任务**处理，不得因本函数上线而被视为已修复。
+   *
+   * @param {object} bp    当前整栋楼方案（activeBuildingPlan）
+   * @param {object} route bp.routes 中的一条路线
+   * @returns {object|null} 渲染对象；bp / route 无效时返回 null
+   */
+  function reconciledRouteView(bp, route) {
+    if (!bp || !route) return null
+    const routeId = String(route.routeId || '')
+    // 命中判据 = 路线 id 一致 **且** 方案归属一致（防止跨方案 / 跨楼栋误配）
+    const hit = routeId ? getRoutePlanById(routeId) : null
+    if (hit && hit.buildingPlanId === bp.id) return hit
+    return routeToRenderable(bp, route, null)
   }
 
   /** 火灾上下文：只描述位置，不含疏散范围（P1.7.3-B3：canonical 唯一权威） */
@@ -3351,8 +3421,11 @@ export const useFireStore = defineStore('fire', () => {
     })
     return true
   }
+  // P1.8.2 Stage 2-A（K-4）：applyExitInvalidation 明确保留数组长度、null 元素原样返回
+  // （shared/evacuation/exitRuntime.js 的「保持数组长度」契约），故谓词必须 null 安全，
+  // 否则路由表含 null 时本函数与 reconciledRouteView 会抛 TypeError。
   function getRoutePlanById(id) {
-    return asArray(routePlans.value).find((p) => p.id === id) || null
+    return asArray(routePlans.value).find((p) => p && p.id === id) || null
   }
 
   // 取方案在指定楼层的绘制线段
@@ -3365,6 +3438,11 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   // 取当前规划楼层所有区域的推荐路线（用于首页平面图同时显示多区域）
+  // P1.8.2 Stage 2-A（K-4）：本函数只改**状态寻源**，几何仍直接取 bp.routes：
+  //   · 遍历 / 过滤 / segment 仍用 bp.routes（与 3D RouteLayer3D 的 r.nodes / r.points 同源）；
+  //   · plan.status 经 reconciledRouteView 从 routePlans 取（权威投影），
+  //     未命中时为 null（状态未知），**不**回退 NORMAL；
+  //   · 返回结构 { zone, color, plan, routeId, segment } 与之前逐字段一致。
   function getAllZoneRoutes() {
     // 整栋楼方案优先：直接取当前方案中「本楼层各区域」的路线（2D 与 3D 同源）
     const bp = activeBuildingPlan.value
@@ -3373,7 +3451,7 @@ export const useFireStore = defineStore('fire', () => {
       return bp.routes
         .filter((r) => r.floorId === floorId)
         .map((r) => {
-          const plan = routeToRenderable(bp, r)
+          const plan = reconciledRouteView(bp, r)
           return {
             zone: r.zone,
             color: ZONE_COLORS[r.zone] || '#4361EE',

@@ -16,6 +16,7 @@
  *   · K-2（selectEvacuationPlan / setCurrentRoutePlan 未拦截 DONE）属潜在项，本套件不覆盖。
  */
 import { createPinia, setActivePinia } from 'pinia'
+import { toRaw } from 'vue'
 import { createServer } from 'vite'
 import { EXIT_DEFS, EXIT_STATUS } from '../../shared/evacuation/floorTopology.js'
 import { applyExitInvalidation } from '../../shared/evacuation/exitRuntime.js'
@@ -544,6 +545,269 @@ console.log('=== 七、K-2：DONE 不得进入 recommendedId / backupId / active
     check('K2-5 对照：WARNING 路线仍可被 setCurrentRoutePlan 选中',
       store.setCurrentRoutePlan('A区', 'pw') === true && snap().rec('A区') === 'pw',
       snap().rec('A区'))
+  }
+}
+
+console.log('')
+console.log('=== 八、K-4：展示层路线状态唯一权威源（reconciledRouteView）===')
+console.log('  ⚠️ 走真实生产链：applyBuildingPlans → syncLegacyRouteState（routePlans/perZone + reconcile）')
+console.log('  ⚠️ 覆盖 T1-T8：出口 partial/missing、raw-null 兼容、火源维度、DONE 保护、')
+console.log('     2D/3D 同源、对象替换、兜底健壮性；并验证**不写** bp.routes / routesByZone / 后端快照对象。')
+console.log('  ⚠️ 本组不覆盖 startEvacuationRun(:1479) 与 applyRouteToDevices 的状态门禁（独立遗留项）。')
+{
+  // ── 夹具：一条整栋楼方案 + 两条路线（W / E），几何含 5F 两节点 + 1F 出口节点 ──
+  const mkRoute = (routeId, floorId, zone, exitId, exitLabel, corridorNode) => ({
+    routeId, floorId, zone,
+    startNode: `${floorId}:A_CENTER`,
+    exitId, exitLabel,
+    nodes: [`${floorId}:A_CENTER`, corridorNode, exitId],
+    points: [{ x: 140, y: 150 }, { x: 140, y: 170 }, { x: 32, y: 170 }],
+    distance: 120, estimatedTime: 90, riskLevel: 'low', valid: true, reasons: [],
+    floorsPassed: [floorId, '1F'], fireDistance: 10, escapeDistance: 40, exitDistance: 5,
+    personCount: 3, sourcePlanId: 'cand-1',
+  })
+  const mkBuildingPlan = () => {
+    const routes = [
+      mkRoute('PLAN-A:5F:A区', '5F', 'A区', W, '西侧安全出口', '5F:CORRIDOR_N'),
+      mkRoute('PLAN-A:5F:B区', '5F', 'B区', E, '东侧安全出口', '5F:CORRIDOR_S'),
+    ]
+    return {
+      id: 'PLAN-A', name: '策略A', buildingId: 'B003', buildingName: '3号楼',
+      scope: 'BUILDING', strategy: 'balanced', strategyLabel: 'A', recommended: true,
+      fire: null, summary: { zoneCount: 2, personCount: 6, exits: {}, floors: ['5F'] },
+      routes, routesByZone: { '5F:A区': routes[0], '5F:B区': routes[1] },
+      status: 'NORMAL', valid: true, reasons: [], createdAt: null,
+    }
+  }
+  const RID_W = 'PLAN-A:5F:A区'
+  const RID_E = 'PLAN-A:5F:B区'
+  const zoneRoute = (zone) => (store.getAllZoneRoutes() || []).find((z) => z.zone === zone) || null
+  const hasStatus = (o) => Object.prototype.hasOwnProperty.call(o, 'status')
+
+  const BP = mkBuildingPlan()
+  store.routeFloorId = '5F'
+  store.selectedZone = 'A区'
+  store.blockedNodeIds = []
+  store.blockedEdgeKeys = []
+  store.fireEvent = null
+  store.applyBuildingPlans({ buildingPlans: [BP], activeBuildingPlanId: 'PLAN-A' })
+
+  // ── K4-0 结构契约：命中路径字段完整，且绝不写 bp.routes / 后端快照对象 ──
+  {
+    const zr = zoneRoute('A区')
+    check('K4-0：getAllZoneRoutes 命中权威投影 ⇒ 与 getRoutePlanById 同一对象',
+      !!zr && zr.plan === store.getRoutePlanById(RID_W), zr && zr.plan && zr.plan.id)
+    check('K4-0：plan 字段结构完整（几何/楼层/出口/方案归属均在）',
+      !!zr && zr.plan.path.length === 3 && zr.plan.startFloor === '5F' && zr.plan.startArea === 'A区'
+      && zr.plan.exit === W && zr.plan.exitLabel === '西侧安全出口'
+      && zr.plan.buildingPlanId === 'PLAN-A' && zr.plan.strategy === 'balanced'
+      && zr.plan.scope === 'BUILDING' && zr.plan.floorsPassed.join(',') === '5F,1F',
+      zr && zr.plan && { id: zr.plan.id, startFloor: zr.plan.startFloor, exit: zr.plan.exit })
+    check('K4-0：不写 bp.routes（EvacuationRoute 仍无 status 字段）',
+      !hasStatus(BP.routes[0]) && !hasStatus(BP.routes[1]),
+      BP.routes.map((r) => Object.keys(r).filter((k) => k === 'status')))
+    check('K4-0：bp.routes 几何与规划元数据未被改动',
+      JSON.stringify(BP.routes[0].nodes) === JSON.stringify(['5F:A_CENTER', '5F:CORRIDOR_N', W])
+      && BP.routes[0].points.length === 3 && BP.routes[0].personCount === 3
+      && BP.routes[0].valid === true && BP.routes[0].sourcePlanId === 'cand-1')
+    check('K4-0：routesByZone 与 routes 仍互为别名（未被替换）',
+      BP.routesByZone['5F:A区'] === BP.routes[0] && BP.routesByZone['5F:B区'] === BP.routes[1])
+    // ⚠️ store 侧读取经过 Vue 响应式代理，须用 toRaw 穿透后才能与原始快照对象比较身份
+    const rawPlans = toRaw(store.buildingEvacuationPlans)
+    check('K4-0：后端快照对象身份未被替换（buildingEvacuationPlans 持有原对象，未经克隆）',
+      rawPlans[0] === BP && rawPlans[0].routes[0] === BP.routes[0],
+      [rawPlans[0] === BP, rawPlans[0].routes[0] === BP.routes[0]])
+  }
+
+  // ── T1 出口 partial：仅 W 可用 ⇒ E 路线 BLOCKED，且三处状态一致 ──
+  {
+    store.selectedZone = 'B区'
+    store.applyExitRuntimeStates([{ nodeId: W, available: true, status: OPEN }])
+    const marked = store.invalidateRoutesWithUnusableExit()
+    const zrE = zoneRoute('B区')
+    check('T1 partial：routePlans 中 E 路线为 BLOCKED',
+      store.getRoutePlanById(RID_E).status === 'BLOCKED', store.getRoutePlanById(RID_E).status)
+    check('T1 partial：getAllZoneRoutes 的 plan.status === BLOCKED（不再静默 NORMAL）',
+      !!zrE && zrE.plan.status === 'BLOCKED', zrE && zrE.plan.status)
+    check('T1 partial：currentRoutePlan.status === BLOCKED 且与投影同一对象',
+      !!store.currentRoutePlan && store.currentRoutePlan.status === 'BLOCKED'
+      && store.currentRoutePlan === store.getRoutePlanById(RID_E),
+      store.currentRoutePlan && store.currentRoutePlan.status)
+    check('T1 partial：W 路线仍为 NORMAL（未误判）',
+      zoneRoute('A区').plan.status === 'NORMAL', zoneRoute('A区').plan.status)
+    check('T1 partial：affected 计数 == 1（仅 E 失效）', marked === 1, marked)
+    check('T1 partial：bp.routes 仍未获得 status', !hasStatus(BP.routes[1]))
+  }
+
+  // ── T2 出口 missing：非 DONE 整批 BLOCKED ──
+  {
+    store.applyExitRuntimeStates([])
+    store.invalidateRoutesWithUnusableExit()
+    check('T2 missing：两条路线在 getAllZoneRoutes 中均为 BLOCKED',
+      ['A区', 'B区'].every((z) => zoneRoute(z).plan.status === 'BLOCKED'),
+      ['A区', 'B区'].map((z) => zoneRoute(z).plan.status))
+    check('T2 missing：currentRoutePlan 亦为 BLOCKED（未静默降级）',
+      store.currentRoutePlan.status === 'BLOCKED', store.currentRoutePlan.status)
+    check('T2 missing：routePlans 侧同样 BLOCKED（两处一致）',
+      store.getRoutePlanById(RID_W).status === 'BLOCKED' && store.getRoutePlanById(RID_E).status === 'BLOCKED')
+    check('T2 missing：bp.routes 仍无 status', !hasStatus(BP.routes[0]) && !hasStatus(BP.routes[1]))
+  }
+
+  // ── T3 raw-null 兼容窗口：状态与 routePlans 一致（D1-A 行为锁定，不得宣称 fail-closed） ──
+  {
+    // 直接复位 ref 以重建「从未收到」窗口：applyExitRuntimeStates(null) 会归一为 []
+    // （属「已收到但缺失」，见 D1-A ②），与 null（①）语义不同，故此处不复用该入口。
+    store.exitRawStates = null
+    store.reconcileRouteStatuses()
+    check('T3 raw-null：reconcile 不产生出口失效 ⇒ 两条路线 NORMAL',
+      store.getRoutePlanById(RID_W).status === 'NORMAL' && store.getRoutePlanById(RID_E).status === 'NORMAL',
+      [store.getRoutePlanById(RID_W).status, store.getRoutePlanById(RID_E).status])
+    check('T3 raw-null：getAllZoneRoutes / currentRoutePlan 与 routePlans 状态一致',
+      zoneRoute('A区').plan.status === 'NORMAL' && store.currentRoutePlan.status === 'NORMAL',
+      [zoneRoute('A区').plan.status, store.currentRoutePlan.status])
+    check('T3 raw-null：仍不写 bp.routes', !hasStatus(BP.routes[0]))
+  }
+
+  // ── T4 火源维度：WARNING / BLOCKED 传导至展示层，清理后可逆 ──
+  {
+    store.fireEvent = FIRE
+    store.blockedNodeIds = ['5F:CORRIDOR_N'] // W 路线途经被封节点 ⇒ BLOCKED
+    store.selectedZone = 'A区'
+    store.reconcileRouteStatuses()
+    check('T4 火源：W 路线（途经封堵节点）BLOCKED 并传导至 getAllZoneRoutes',
+      store.getRoutePlanById(RID_W).status === 'BLOCKED' && zoneRoute('A区').plan.status === 'BLOCKED',
+      [store.getRoutePlanById(RID_W).status, zoneRoute('A区').plan.status])
+    check('T4 火源：E 路线为 WARNING（楼栋/楼层命中但未途经封堵）',
+      store.getRoutePlanById(RID_E).status === 'WARNING' && zoneRoute('B区').plan.status === 'WARNING',
+      [store.getRoutePlanById(RID_E).status, zoneRoute('B区').plan.status])
+    check('T4 火源：currentRoutePlan 与投影同一对象且状态为 BLOCKED',
+      store.currentRoutePlan === store.getRoutePlanById(RID_W) && store.currentRoutePlan.status === 'BLOCKED')
+    // 清理火源并恢复出口维度
+    store.fireEvent = null
+    store.blockedNodeIds = []
+    store.applyExitRuntimeStates([
+      { nodeId: W, available: true, status: OPEN },
+      { nodeId: E, available: true, status: OPEN },
+    ])
+    store.invalidateRoutesWithUnusableExit()
+    check('T4 火源清理后：两条路线恢复 NORMAL（状态可逆、不残留）',
+      store.getRoutePlanById(RID_W).status === 'NORMAL' && store.getRoutePlanById(RID_E).status === 'NORMAL',
+      [store.getRoutePlanById(RID_W).status, store.getRoutePlanById(RID_E).status])
+  }
+
+  // ── T5 DONE 保护 ──
+  // ⚠️ 路线级 DONE 当前**无生产生产者**（shared/evacuation/exitRuntime.js 已登记
+  //    PLAN_STATUS.DONE/CONFIRMED/EXECUTING 均无使用点）；本组以夹具方式在**两个投影**中
+  //    预置 DONE（与既有 makePlans/makeMatrix 同口径），验证展示层不改写、不误判。
+  {
+    store.selectedZone = 'A区'
+    const markDone = (id) => {
+      const copies = [store.getRoutePlanById(id)]
+        .concat((store.routeMatrix.perZone['A区'].plans || []).filter((p) => p && p.id === id))
+      copies.filter(Boolean).forEach((p) => {
+        p.status = 'DONE'; p.completedAt = 1700000000; p.assignedTo = 'u1'; p.history = [{ t: 1, a: 'DONE' }]
+      })
+    }
+    markDone(RID_W)
+    // 前置态：出口上报缺失（fail-closed）⇒ 非 DONE 路线应整批 BLOCKED，
+    // 以此验证 DONE 不被改写、且不计入 affected。
+    store.applyExitRuntimeStates([])
+    const marked = store.invalidateRoutesWithUnusableExit()
+    const donePlan = store.getRoutePlanById(RID_W)
+    check('T5 DONE：routePlans 侧保持 DONE 且历史字段不变',
+      donePlan.status === 'DONE' && donePlan.completedAt === 1700000000 && donePlan.assignedTo === 'u1'
+      && JSON.stringify(donePlan.history) === JSON.stringify([{ t: 1, a: 'DONE' }]),
+      { status: donePlan.status, completedAt: donePlan.completedAt, history: donePlan.history })
+    check('T5 DONE：getAllZoneRoutes 呈现 DONE（不是 BLOCKED、也不是 NORMAL）',
+      zoneRoute('A区').plan.status === 'DONE', zoneRoute('A区').plan.status)
+    check('T5 DONE：currentRoutePlan 呈现 DONE 且与投影同一对象',
+      store.currentRoutePlan.status === 'DONE' && store.currentRoutePlan === donePlan)
+    check('T5 DONE：affected 计数不含 DONE（仅 E 失效）', marked === 1, marked)
+    check('T5 DONE：perZone 推荐/备用指针不指向 DONE',
+      (() => {
+        const pz = store.routeMatrix.perZone
+        return Object.keys(pz).every((z) => pz[z].recommendedId !== RID_W && pz[z].backupId !== RID_W)
+      })(),
+      Object.keys(store.routeMatrix.perZone).map((z) => [z, store.routeMatrix.perZone[z].recommendedId]))
+    check('T5 DONE：bp.routes 仍无 status', !hasStatus(BP.routes[0]))
+  }
+
+  // ── T7 2D/3D 同源：routeId / 几何与 bp.routes 一致（3D 消费 r.nodes/r.points 不受影响） ──
+  {
+    const zrW = zoneRoute('A区')
+    check('T7 2D/3D 同源：routeId 与 bp.routes 完全一致',
+      zrW.routeId === BP.routes[0].routeId && zrW.routeId === RID_W, zrW.routeId)
+    check('T7 2D/3D 同源：plan.path 与 bp.routes.nodes 一一对应（几何未被替换）',
+      JSON.stringify(zrW.plan.path.map((n) => n.id)) === JSON.stringify(BP.routes[0].nodes))
+    check('T7 2D/3D 同源：segment 取自同一几何（5F 两个节点坐标与 points 相同）',
+      zrW.segment.length === 2
+      && zrW.segment[0].x === BP.routes[0].points[0].x && zrW.segment[0].y === BP.routes[0].points[0].y
+      && zrW.segment[1].x === BP.routes[0].points[1].x && zrW.segment[1].y === BP.routes[0].points[1].y,
+      zrW.segment)
+    check('T7 2D/3D 同源：返回结构 { zone, color, plan, routeId, segment } 字段齐全',
+      ['zone', 'color', 'plan', 'routeId', 'segment'].every((k) => k in zrW), Object.keys(zrW))
+  }
+
+  // ── T6 路线对象替换：二次快照后返回新投影对象，旧对象不再被返回 ──
+  {
+    const BP2 = JSON.parse(JSON.stringify(BP))
+    BP2.routes[0].nodes = ['5F:A_CENTER', '1F:EXIT_W'] // 几何变更（少一个节点）
+    BP2.routes[0].points = [{ x: 140, y: 150 }, { x: 32, y: 170 }]
+    BP2.routesByZone['5F:A区'] = BP2.routes[0]
+    const oldPlan = store.getRoutePlanById(RID_W)
+    store.applyBuildingPlans({ buildingPlans: [BP2], activeBuildingPlanId: 'PLAN-A' })
+    const zr = zoneRoute('A区')
+    check('T6 替换：getAllZoneRoutes 返回新投影对象（旧对象不再被返回）',
+      !!zr && zr.plan !== oldPlan && zr.plan === store.getRoutePlanById(RID_W))
+    check('T6 替换：几何随新 bp.routes 更新（path 与新 nodes 一致）',
+      zr.plan.path.length === 2
+      && JSON.stringify(zr.plan.path.map((n) => n.id)) === JSON.stringify(BP2.routes[0].nodes))
+    check('T6 替换：buildingEvacuationPlans 持有 BP2 原对象（未克隆、未写后端对象）',
+      toRaw(store.buildingEvacuationPlans)[0] === BP2 && !hasStatus(BP2.routes[0]))
+    check('T6 替换：currentRoutePlan 同样切到新投影对象',
+      store.currentRoutePlan === store.getRoutePlanById(RID_W))
+  }
+
+  // ── T8 兜底健壮性：状态缺失必须表现为「未知」，严禁静默降级为 NORMAL ──
+  {
+    const bareMatrix = { buildingId: 'B003', buildingName: '3号楼', floorId: '5F', areas: ['A区'], exits: [], perZone: {} }
+    const stub = () => {
+      const zr = zoneRoute('A区')
+      return { ...zr.plan, buildingPlanId: 'PLAN-A' }
+    }
+
+    // 8-A 投影尚未生成（routePlans 为空）
+    store.routePlans = []
+    store.routeMatrix = bareMatrix
+    const zrA = zoneRoute('A区')
+    check('T8-A 投影缺失：不抛异常且返回几何兜底对象',
+      !!zrA && Array.isArray(zrA.plan.path) && zrA.plan.path.length > 0, zrA && zrA.plan.path.length)
+    check('T8-A 投影缺失：status === null（状态未知）且**不是** NORMAL',
+      zrA.plan.status === null && zrA.plan.status !== 'NORMAL', zrA.plan.status)
+    check('T8-A 投影缺失：currentRoutePlan 同样为状态未知（调用方不得误判可用）',
+      !!store.currentRoutePlan && store.currentRoutePlan.status === null,
+      store.currentRoutePlan && store.currentRoutePlan.status)
+    check('T8-A 投影缺失：几何仍可用于绘制（segment 非空）', zrA.segment.length > 0, zrA.segment.length)
+
+    // 8-B 方案归属不符（同 routeId 但 buildingPlanId 不同）⇒ 不得采用
+    store.routePlans = [{ ...stub(), id: RID_W, buildingPlanId: 'PLAN-B', status: 'NORMAL' }]
+    check('T8-B 方案归属不符：不采用该投影 ⇒ status === null（未知，而非 NORMAL）',
+      zoneRoute('A区').plan.status === null, zoneRoute('A区').plan.status)
+    check('T8-B 方案归属不符：getRoutePlanById 仍按 id 命中（纯 id 查找，不含归属判据）',
+      store.getRoutePlanById(RID_W).buildingPlanId === 'PLAN-B')
+
+    // 8-C 投影含 null 元素 ⇒ 不抛异常，合法条目仍可命中
+    store.routePlans = [null, { ...stub(), id: RID_W, status: 'BLOCKED' }, null]
+    check('T8-C 含 null 元素：不抛异常且命中合法条目（status === BLOCKED）',
+      zoneRoute('A区').plan.status === 'BLOCKED', zoneRoute('A区').plan.status)
+
+    // 8-D 路线 id 不在投影中（路线集合已变更）⇒ 未知，且不得把 BLOCKED 误读为 NORMAL
+    store.routePlans = [{ ...stub(), id: 'PLAN-A:5F:Z区', status: 'BLOCKED' }]
+    const zrD = zoneRoute('A区')
+    check('T8-D 路线 id 缺失：status === null（未知），非 NORMAL 也非 BLOCKED',
+      zrD.plan.status === null && zrD.plan.status !== 'NORMAL' && zrD.plan.status !== 'BLOCKED',
+      zrD.plan.status)
+    check('T8-D 路线 id 缺失：不抛异常且几何兜底可用', zrD.plan.path.length > 0, zrD.plan.path.length)
   }
 }
 
