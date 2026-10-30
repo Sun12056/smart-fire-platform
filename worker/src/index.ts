@@ -20,8 +20,16 @@ export { DemoRoom } from './durable/DemoRoom'
 
 const app = new Hono<{ Bindings: Env }>()
 
-// 开发期允许本地 Vite dev server 跨域；生产建议收紧为 Pages 域名
-app.use('*', cors())
+// CORS：生产只放行 Pages 正式域名；本地开发通过 ALLOWED_ORIGINS（逗号分隔）追加来源，
+// 不默认放行任意来源。origin 回调返回空串时 Hono 不下发 Access-Control-Allow-Origin，浏览器端即被拦截。
+const PROD_ORIGIN = 'https://smart-fire-platform.pages.dev'
+app.use('*', cors({
+  origin: (origin, c) => {
+    const extra = (c.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean)
+    const allowed = [PROD_ORIGIN, ...extra]
+    return allowed.includes(origin) ? origin : ''
+  },
+}))
 
 app.get('/healthz', (c) => c.json({ ok: true, service: 'smart-fire-api', version: 'v1' }))
 

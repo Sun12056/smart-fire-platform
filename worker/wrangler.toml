@@ -2,13 +2,20 @@ name = "smart-fire-api"
 main = "src/index.ts"
 compatibility_date = "2026-09-20"
 
-# D1 数据库：首次部署前执行
-#   npx wrangler d1 create smart-fire-db
-# 并将返回的 database_id 填到下方
+# D1 数据库
+# 本地开发 / E2E：无需真实 database_id —— wrangler dev 与 d1 execute --local
+# 依据 binding + database_name 在 .wrangler/state 下创建本地 SQLite，不校验 database_id。
+#
+# 生产部署前（唯一需要真实 ID 的时机）：
+#   1) 执行 `npx wrangler d1 create smart-fire-db`
+#   2) 将返回的 database_id 替换下方占位符
+# 正式部署请用 `npm run deploy`：它先运行 scripts/check-d1-config.mjs，
+# 占位符未替换时在调用 wrangler deploy 之前直接失败退出（fail-closed）。
+# 本地开发（wrangler dev）与构建检查（npm run deploy:dry-run）不经过该守卫。
 [[d1_databases]]
 binding = "DB"
 database_name = "smart-fire-db"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "<REPLACE_WITH_D1_DATABASE_ID>"
 
 # Durable Objects：DemoRoom 负责六阶段状态机的实时协调与 WebSocket 广播
 [[durable_objects.bindings]]
@@ -20,6 +27,9 @@ script_name = "smart-fire-api"
 tag = "v1"
 new_sqlite_classes = ["DemoRoom"]
 
-# 种子数据保护令牌（生产环境务必设置；本地 dev 留空即可免校验）
+# 种子数据保护令牌（生产环境务必设置；缺失时种子接口 fail-closed，直接 501 禁用）
+# ⚠️ 生产环境请勿写入本文件：应使用 `wrangler secret put SEED_TOKEN` 管理，
+#   避免真实令牌进入源码 / wrangler.toml / Git。
+# 本地开发需测试 seed 时，可临时 `wrangler dev --var SEED_TOKEN:xxx` 注入。
 # [vars]
 # SEED_TOKEN = "change-me"

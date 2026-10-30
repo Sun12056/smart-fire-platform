@@ -5,6 +5,8 @@ export interface Env {
   /** Demo Simulation Engine 的实时状态协调器（Durable Object） */
   DEMO_ROOM: DurableObjectNamespace
   SEED_TOKEN?: string
+  /** CORS 追加允许的来源（逗号分隔，仅本地开发用；生产默认仅放行 Pages 域名） */
+  ALLOWED_ORIGINS?: string
 }
 
 // ── Building ──
