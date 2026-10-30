@@ -19,7 +19,7 @@
     "test:zone-attribution": "node shared/evacuation/zoneAttribution.test.mjs",
     "test:person": "node shared/person/personRuntime.test.mjs",
     "test:device": "node shared/device/deviceRuntime.test.mjs",
-    "test:unit": "node shared/evacuation/route.test.mjs && node shared/evacuation/topology.test.mjs && node shared/evacuation/exitRuntime.test.mjs && node shared/evacuation/exitConsistency.test.mjs && node shared/evacuation/buildingEvacuation.test.mjs && node shared/evacuation/zoneExitAssignment.test.mjs && node shared/evacuation/zoneAttribution.test.mjs && node shared/person/personRuntime.test.mjs && node shared/device/deviceRuntime.test.mjs && node src/stores/fireStore.exitInvalidation.test.mjs",
+    "test:unit": "node shared/evacuation/route.test.mjs && node shared/evacuation/topology.test.mjs && node shared/evacuation/exitRuntime.test.mjs && node shared/evacuation/exitConsistency.test.mjs && node shared/evacuation/buildingEvacuation.test.mjs && node shared/evacuation/zoneExitAssignment.test.mjs && node shared/evacuation/zoneAttribution.test.mjs && node shared/person/personRuntime.test.mjs && node shared/device/deviceRuntime.test.mjs && node src/stores/fireStore.exitInvalidation.test.mjs && node shared/evacuation/deviceDirection.test.mjs && node src/stores/fireStore.deviceDirection.test.mjs && node src/stores/fireStore.executionGate.test.mjs && node src/stores/fireStore.manualRoute.test.mjs && node src/stores/fireStore.restoreSanitize.test.mjs && node src/views/DashboardView.direction.test.mjs",
     "test:e2e": "node worker/e2e-phase2.cjs",
     "test:e2e:browser": "node worker/e2e-phase2-browser.cjs",
     "test:e2e:consistency": "node worker/e2e-phase2-consistency.cjs",

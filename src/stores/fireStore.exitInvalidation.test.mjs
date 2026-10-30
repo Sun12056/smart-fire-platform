@@ -546,6 +546,46 @@ console.log('=== 七、K-2：DONE 不得进入 recommendedId / backupId / active
       store.setCurrentRoutePlan('A区', 'pw') === true && snap().rec('A区') === 'pw',
       snap().rec('A区'))
   }
+
+  // K2-6 R1：setCurrentRoutePlan 路线级门禁先于分支判定（BLOCKED/DONE/null/未知/投影未命中）
+  {
+    // ① BLOCKED：PARTIAL 只上报 W ⇒ 通往 E 的 pe 被**权威协调链**判为 BLOCKED（非手动设字段）
+    const s = run({ raw: PARTIAL })
+    check('K2-6 前置：pe 已被权威协调为 BLOCKED', s.st('pe') === 'BLOCKED', s.st('pe'))
+    const recBefore = snap().rec('B区')
+    const activeBefore = store.activeRoutePlanId
+    const okBlocked = store.setCurrentRoutePlan('B区', 'pe')
+    check('K2-6 setCurrentRoutePlan(BLOCKED) 返回 false', okBlocked === false, okBlocked)
+    check('K2-6 拒绝 BLOCKED 后 perZone.recommendedId 不变',
+      snap().rec('B区') === recBefore, { before: recBefore, after: snap().rec('B区') })
+    check('K2-6 拒绝 BLOCKED 后 activeRoutePlanId 不变',
+      store.activeRoutePlanId === activeBefore,
+      { before: activeBefore, after: store.activeRoutePlanId })
+
+    // ② 未知状态：投影中植入一条非法状态路线（注入，明确标注）
+    run({ raw: PARTIAL })
+    store.routePlans = store.routePlans.concat([
+      { ...s.byId.get('pe'), id: 'pweird', status: 'WEIRD' },
+    ])
+    const recB2 = snap().rec('B区')
+    const okWeird = store.setCurrentRoutePlan('B区', 'pweird')
+    check('K2-6 setCurrentRoutePlan(未知状态 WEIRD) 返回 false', okWeird === false, okWeird)
+    check('K2-6 拒绝未知状态后 recommendedId 不变',
+      snap().rec('B区') === recB2, { before: recB2, after: snap().rec('B区') })
+
+    // ③ 投影未命中（plan = null）：修复前会把未知 id 写入 recommendedId
+    run({ raw: PARTIAL })
+    const recB3 = snap().rec('B区')
+    const okGhost = store.setCurrentRoutePlan('B区', 'pghost')
+    check('K2-6 setCurrentRoutePlan(投影未命中 id) 返回 false', okGhost === false, okGhost)
+    check('K2-6 拒绝未命中 id 后 recommendedId 不被改写',
+      snap().rec('B区') === recB3, { before: recB3, after: snap().rec('B区') })
+
+    // ④ DONE 仍拒绝（白名单覆盖，与 K2-3 同口径）
+    run({ raw: PARTIAL })
+    check('K2-6 setCurrentRoutePlan(DONE) 仍返回 false',
+      store.setCurrentRoutePlan('C区', 'pd') === false)
+  }
 }
 
 console.log('')

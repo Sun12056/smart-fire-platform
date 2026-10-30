@@ -96,6 +96,12 @@
           </span>
           <button class="debug-btn" :class="{ active: store.routeDebug }" @click="store.toggleRouteDebug()">🛰 路网调试 {{ store.routeDebug ? '开' : '关' }}</button>
         </div>
+        <!-- RW-3（方案 B）：刷新后仅存整栋楼路线投影、无当前方案上下文 —— 地图所画为历史路线 -->
+        <div
+          v-if="store.hasStaleRoutesWithoutActivePlan"
+          class="rp-stale-tip"
+          title="地图所示为本轮刷新前保存的路线，非当前有效方案"
+        >⚠️ 历史路线，请重新规划</div>
         <!-- 整栋楼疏散：火灾只描述位置，疏散范围覆盖全部有人的楼层+区域 -->
         <div v-if="buildingSummary" class="rp-building-tip">
           <span class="bp-scope">疏散范围：整栋楼</span>
@@ -205,30 +211,62 @@
 
     <!-- ============ 手动规划 ============ -->
     <div v-else class="rp-manual">
+      <!-- 左：权威图选点（可执行路线） -->
       <div class="rp-config fire-card">
-        <div class="panel-title-bar"><span class="panel-title">手动编辑说明</span></div>
-        <p class="tip-text">在平面图上<strong>点击空白处</strong>添加路线节点；<strong>点击节点</strong>可连接到上一个节点；选中节点后可设为<strong>起点 / 终点</strong>。</p>
+        <div class="panel-title-bar"><span class="panel-title">权威图选点 · 可执行路线</span></div>
         <div class="form-row">
           <label>楼栋</label>
           <select v-model="selBuilding" @change="onBuildingChange">
             <option v-for="b in buildingOptions" :key="b.id" :value="b.id">{{ b.name }}</option>
           </select>
         </div>
-        <div class="form-row">
-          <label>楼层</label>
-          <select v-model="selFloor">
+        <p v-if="!authGraph" class="tip-text auth-fail">⚠️ 当前楼栋无法识别或权威图构建失败，已禁止选点。</p>
+        <template v-else>
+          <div class="panel-title-bar"><span class="panel-title">1. 选择起点（房间 / 门）</span></div>
+          <div class="auth-node-list">
+            <button
+              v-for="n in authStartNodes" :key="n.id"
+              class="auth-node-chip" :class="{ active: isPathStart(n.id), locked: authPath.length }"
+              :disabled="authPath.length > 0"
+              @click="pickStart(n.id)"
+            >{{ n.floorId }} · {{ n.label }}</button>
+          </div>
+
+          <div class="panel-title-bar"><span class="panel-title">当前路径（{{ authPath.length }} 节点）</span></div>
+          <div class="auth-path">
+            <template v-if="authPath.length">
+              <span v-for="(id, i) in authPath" :key="id" class="auth-path-chip">
+                <i>{{ authNodeLabel(id) }}</i><span v-if="i < authPath.length - 1" class="auth-arrow">→</span>
+              </span>
+            </template>
+            <span v-else class="tip-text">尚未选择起点</span>
+          </div>
+
+          <div v-if="authPath.length && !isPathComplete" class="panel-title-bar"><span class="panel-title">2. 下一步可选（真实邻接）</span></div>
+          <div v-if="authPath.length && !isPathComplete" class="auth-node-list">
+            <button v-for="n in authNextNodes" :key="n.id" class="auth-node-chip next" @click="appendNode(n.id)">
+              {{ n.floorId }} · {{ n.label }}<span class="auth-type">{{ typeLabel(n.type) }}</span>
+            </button>
+          </div>
+          <div v-if="isPathComplete" class="auth-done-tip">✓ 已达规范出口，可保存。</div>
+
+          <div class="auth-actions">
+            <button class="ghost-btn" :disabled="authPath.length <= 1" @click="undoStep">撤销上一步</button>
+            <button class="ghost-btn" @click="cancelEdit">取消编辑</button>
+            <button class="primary-btn" :disabled="!isPathComplete" @click="saveAuth">保存为可执行路线</button>
+          </div>
+          <p v-if="authGraphDraftId" class="tip-text">正在编辑 {{ authGraphDraftId }}（保存将按 ID 替换）</p>
+        </template>
+      </div>
+
+      <!-- 中：地图（权威图 + 选点路径 + 自由绘制草稿叠加） -->
+      <div class="rp-map fire-card" style="flex: 1;">
+        <div class="panel-title-bar">
+          <span class="panel-title">{{ currentBuildingName }} · {{ selFloor }} 手动编辑</span>
+          <select v-model="selFloor" class="floor-mini">
             <option v-for="f in floorOptions" :key="f" :value="f">{{ f }}</option>
           </select>
         </div>
-        <button class="primary-btn" @click="setStart" :disabled="!selectedNodeId">设为起点</button>
-        <button class="primary-btn" @click="setExit" :disabled="!selectedNodeId">设为终点</button>
-        <button class="ghost-btn" @click="connectNodes" :disabled="!selectedNodeId">连接节点</button>
-        <button class="primary-btn" @click="saveManual">保存路线</button>
-        <button class="danger-btn" @click="clearManual">清空</button>
-      </div>
-
-      <div class="rp-map fire-card" style="flex: 1;">
-        <div class="panel-title-bar"><span class="panel-title">{{ currentBuildingName }} · {{ routeFloorId }} 手动路线编辑</span></div>
         <svg class="floor-svg" viewBox="0 0 560 300" preserveAspectRatio="xMidYMid meet" @click="onSvgClick">
           <rect x="60" y="150" width="440" height="40" fill="rgba(67,97,238,0.05)" stroke="rgba(67,97,238,0.2)"/>
           <g class="rooms">
@@ -237,12 +275,15 @@
             <rect x="375" y="28" width="80" height="120" rx="2" class="room"/>
             <rect x="375" y="210" width="80" height="70" rx="2" class="room"/>
           </g>
-          <g class="stairs">
-            <rect x="462" y="28" width="30" height="34" rx="2" class="stair"/>
-            <rect x="57" y="28" width="30" height="34" rx="2" class="stair"/>
-            <rect x="57" y="252" width="30" height="34" rx="2" class="stair"/>
-            <rect x="462" y="252" width="30" height="34" rx="2" class="stair"/>
+          <!-- 权威图（当前楼层）节点与边 -->
+          <g class="auth-net">
+            <line v-for="(e, i) in authGraphFloorEdges" :key="'ae' + i" :x1="e.x1" :y1="e.y1" :x2="e.x2" :y2="e.y2" class="auth-edge" />
+            <circle v-for="n in authGraphFloorNodes" :key="'an' + n.id" :cx="n.x" :cy="n.y" r="4" :fill="nodeTypeColor(n.type)" stroke="#fff" stroke-width="0.5" />
           </g>
+          <!-- 权威图已选路径（当前楼层） -->
+          <polyline v-if="authPathOnFloor.length" :points="authPathOnFloor.map(p=>p.x+','+p.y).join(' ')" class="auth-path-line" />
+          <circle v-for="n in authPathOnFloor" :key="'ap' + n.id" :cx="n.x" :cy="n.y" r="7" class="auth-path-node" />
+          <!-- 自由绘制草稿 -->
           <line
             v-for="(edge, i) in store.routeEdges"
             :key="'e' + i"
@@ -259,12 +300,71 @@
               {{ n.isStart ? '起' : n.isExit ? '终' : '' }}
             </text>
           </g>
-          <g v-if="network" class="net-debug">
-            <rect v-for="(w, i) in network.walls" :key="'mw' + i" :x="w.x" :y="w.y" :width="w.w" :height="w.h" fill="rgba(239,68,68,0.06)" stroke="rgba(239,68,68,0.65)" stroke-width="1" stroke-dasharray="4 3" />
-            <line v-for="(e, i) in networkEdges" :key="'mne' + i" :x1="e.x1" :y1="e.y1" :x2="e.x2" :y2="e.y2" stroke="rgba(34,197,94,0.55)" stroke-width="1" />
-            <circle v-for="(n, i) in network.nodes" :key="'mnn' + i" :cx="n.x" :cy="n.y" r="3" :fill="nodeTypeColor(n.type)" stroke="#fff" stroke-width="0.5" />
-          </g>
         </svg>
+      </div>
+
+      <!-- 右：自由绘制草稿 + 已保存可执行路线 -->
+      <div class="rp-manual-side">
+        <div class="fire-card side-card">
+          <div class="panel-title-bar"><span class="panel-title">自由绘制（草稿）</span></div>
+          <p class="tip-text">点击空白处添加节点；点击节点连线。仅生成草稿，不进入可执行路线。</p>
+          <button class="primary-btn" @click="saveManual">保存草稿</button>
+          <button class="danger-btn" @click="clearManual">清空画布</button>
+          <div v-if="store.manualRouteDrafts.length" class="side-list">
+            <div v-for="d in store.manualRouteDrafts" :key="d.id" class="side-row">
+              <span class="side-name">{{ d.name }} · {{ d.startFloor }}</span>
+              <button class="mini-btn" @click="store.deleteManualRouteDraft(d.id)">删除</button>
+            </div>
+          </div>
+        </div>
+        <div class="fire-card side-card">
+          <div class="panel-title-bar"><span class="panel-title">已保存可执行路线（{{ store.manualExecutableRoutes.length }}）</span></div>
+          <!-- K-1B.5：状态筛选（只读，AND 组合）+ JSON 导出 -->
+          <div class="route-filter">
+            <select v-model="filterTopology" class="filter-select">
+              <option value="">拓扑：全部</option>
+              <option value="VALID">拓扑：有效</option>
+              <option value="INVALID">拓扑：无效</option>
+              <option value="BUILDING_UNAVAILABLE">拓扑：无法验证楼栋</option>
+            </select>
+            <select v-model="filterExit" class="filter-select">
+              <option value="">出口：全部</option>
+              <option value="AVAILABLE">出口：可用</option>
+              <option value="UNAVAILABLE">出口：不可用</option>
+              <option value="UNKNOWN">出口：未知</option>
+            </select>
+            <button class="mini-btn primary" :disabled="filteredRoutes.length === 0" @click="exportRoutes">
+              导出 JSON（{{ filteredRoutes.length }} 条）
+            </button>
+          </div>
+          <div v-if="!store.manualExecutableRoutes.length" class="empty-tip">暂无手动可执行路线</div>
+          <div v-else-if="!filteredRoutes.length" class="empty-tip">无符合筛选条件的路线</div>
+          <div v-for="r in filteredRoutes" :key="r.id" class="side-list">
+            <div class="side-row">
+              <span class="side-name">{{ r.id }}</span>
+              <span class="side-meta">{{ r.nodes.length }} 节点 · 出口 {{ r.exitId }}</span>
+            </div>
+            <!-- K-1B.4：只读状态展示（消费 manualRouteStatusView，不回写路线对象） -->
+            <div class="route-status">
+              <span class="status-badge" :class="topologyBadge(statusOf(r.id).topologyStatus)">
+                拓扑：{{ topologyText(statusOf(r.id).topologyStatus) }}
+              </span>
+              <span class="status-badge" :class="exitBadge(statusOf(r.id).exitStatus)">
+                出口：{{ exitText(statusOf(r.id).exitStatus) }}
+              </span>
+            </div>
+            <div v-if="statusOf(r.id).topologyReason" class="status-reason">
+              拓扑原因：{{ reasonText(statusOf(r.id).topologyReason) }}
+            </div>
+            <div v-if="statusOf(r.id).exitReason" class="status-reason">
+              出口原因：{{ reasonText(statusOf(r.id).exitReason) }}
+            </div>
+            <div class="side-actions">
+              <button class="mini-btn" @click="editRoute(r.id)">编辑</button>
+              <button class="mini-btn danger" @click="store.deleteManualExecutableRoute(r.id)">删除</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -443,6 +543,9 @@ function personCount(zone) {
 function onBuildingChange() {
   selFloor.value = floorOptions.value[0]
   fireFloor.value = floorOptions.value[0]
+  // K-1B.2.1：权威图跟随「当前选定楼栋」；选点编辑态的重置统一由 store 内
+  // watch(routeBuildingId) 负责，此处只同步当前楼栋，不再各自实现清理逻辑。
+  store.routeBuildingId = selBuilding.value
 }
 function generate() {
   // 整栋楼疏散：一次规划覆盖该楼全部「有人员的 floorId + zone」，A/B/C = 三种整栋楼策略
@@ -538,6 +641,209 @@ function clearManual() {
   pendingNodeId.value = null
 }
 
+// ════════════════════════════════════════════════════════════════
+// K-1B.2：权威图选点（沿真实邻接逐节点选点）
+// ════════════════════════════════════════════════════════════════
+const authGraph = computed(() => store.authoritativeRouteGraph)
+const authPath = computed(() => store.authGraphPath || [])
+const authGraphDraftId = computed(() => store.authGraphDraftId)
+
+// 起点候选：权威图中 type 为 ROOM 或 DOOR 的节点（按楼层 + key 排序）
+const authStartNodes = computed(() => {
+  const g = authGraph.value
+  if (!g || !g.nodes) return []
+  return Object.values(g.nodes)
+    .filter((n) => store.isAuthStartNode(n.id))
+    .sort((a, b) => a.floorId.localeCompare(b.floorId) || a.key.localeCompare(b.key))
+})
+
+// 当前节点真实邻接（graph.adj[currentNodeId]），供「继续选点」
+const authNextNodes = computed(() => {
+  const g = authGraph.value
+  const path = authPath.value
+  if (!g || !path.length) return []
+  const last = path[path.length - 1]
+  return store.authAdjacentNodeIds(last)
+    .map((id) => g.nodes[id])
+    .filter(Boolean)
+    .sort((a, b) => a.floorId.localeCompare(b.floorId) || a.key.localeCompare(b.key))
+})
+
+// 终点是否已落在规范出口节点集合
+const isPathComplete = computed(() => {
+  const path = authPath.value
+  return path.length >= 2 && store.isAuthExitNode(path[path.length - 1])
+})
+
+// 当前楼层权威图（仅渲染 selFloor 的节点与同层边）
+const authGraphFloorNodes = computed(() => {
+  const g = authGraph.value
+  if (!g || !g.nodes) return []
+  return Object.values(g.nodes).filter((n) => n.floorId === selFloor.value)
+})
+const authGraphFloorEdges = computed(() => {
+  const g = authGraph.value
+  if (!g || !g.adj) return []
+  const onFloor = new Set(authGraphFloorNodes.value.map((n) => n.id))
+  const seen = new Set()
+  const out = []
+  Object.entries(g.adj).forEach(([from, arr]) => {
+    if (!onFloor.has(from)) return
+    arr.forEach((e) => {
+      if (!onFloor.has(e.to)) return
+      const ek = [from, e.to].sort().join('|')
+      if (seen.has(ek)) return
+      seen.add(ek)
+      out.push({ x1: g.nodes[from].x, y1: g.nodes[from].y, x2: g.nodes[e.to].x, y2: g.nodes[e.to].y })
+    })
+  })
+  return out
+})
+// 权威图已选路径中落在当前楼层的节点（用于可视化）
+const authPathOnFloor = computed(() => {
+  const g = authGraph.value
+  return authPath.value.map((id) => (g && g.nodes ? g.nodes[id] : null)).filter((n) => n && n.floorId === selFloor.value)
+})
+
+function authNodeLabel(id) {
+  const g = authGraph.value
+  const n = g && g.nodes ? g.nodes[id] : null
+  return n ? `${n.floorId}·${n.label || n.key}` : id
+}
+function typeLabel(t) {
+  return { room: '门', door: '门', corridor: '廊', stair: '梯', exit: '出' }[t] || t
+}
+function isPathStart(id) {
+  return authPath.value[0] === id
+}
+function pickStart(id) {
+  if (authPath.value.length) return
+  if (!store.pickAuthGraphStart(id)) {
+    showNotice('无法选择起点', '仅允许选择房间 / 门节点作为起点', 'warning')
+  }
+}
+function appendNode(id) {
+  const ok = store.appendAuthGraphNode(id)
+  if (!ok) {
+    showNotice('无法选点', '目标节点与当前节点不邻接（或不存在合法下降边）', 'warning')
+  }
+}
+function undoStep() {
+  store.undoAuthGraphStep()
+}
+function cancelEdit() {
+  store.cancelAuthGraphSelection()
+}
+function saveAuth() {
+  const res = store.saveAuthGraphRoute()
+  if (!res.ok) {
+    showNotice('保存失败', authErrText(res.reason), 'danger')
+  } else {
+    showNotice('已保存', '手动可执行路线已保存', 'success')
+  }
+}
+function editRoute(id) {
+  store.loadAuthGraphRouteForEdit(id)
+}
+function authErrText(reason) {
+  return {
+    AUTH_GRAPH_UNAVAILABLE: '当前楼栋无法识别或权威图构建失败',
+    PATH_TOO_SHORT: '路径节点不足',
+    INVALID_START_TYPE: '起点必须是房间或门节点',
+    NOT_ADJACENT: '存在不邻接的节点（非法跨层或跳跃）',
+    INVALID_EXIT: '终点必须属于规范出口节点',
+    UNKNOWN_NODE: '存在未知节点',
+    DUPLICATE_ID: '路线 ID 重复',
+    REPLACE_NOT_FOUND: '未找到待替换的路线',
+  }[reason] || reason
+}
+
+// ════════════════════════════════════════════════════════════════
+// K-1B.4：只读状态展示（消费 store.manualRouteStatusView，绝不回写路线）
+// ════════════════════════════════════════════════════════════════
+const routeStatusMap = computed(() => {
+  const m = {}
+  ;(store.manualRouteStatusView || []).forEach((s) => { if (s && s.id) m[s.id] = s })
+  return m
+})
+function statusOf(id) {
+  return routeStatusMap.value[id]
+    || { topologyStatus: null, topologyReason: null, exitStatus: null, exitReason: null }
+}
+// 两个独立维度，不合并为单一布尔/「可执行」结论
+const TOPOLOGY_TEXT = { VALID: '有效', INVALID: '无效', BUILDING_UNAVAILABLE: '无法验证楼栋' }
+const EXIT_TEXT = { AVAILABLE: '可用', UNAVAILABLE: '不可用', UNKNOWN: '未知/尚无上报' }
+const REASON_TEXT = {
+  NO_EXIT_RUNTIME: '尚无出口上报', NO_EXIT_ID: '缺少出口 ID', EXIT_NOT_REPORTED_USABLE: '出口未上报为可用',
+  BUILDING_MISSING: '缺少所属楼栋', BUILDING_NOT_FOUND: '所属楼栋不存在',
+  BUILDING_FLOORS_INVALID: '楼栋层数非法', BUILDING_GRAPH_FAILED: '楼栋图构建失败',
+  PATH_TOO_SHORT: '路径节点不足', INVALID_START_TYPE: '起点类型非法', UNKNOWN_NODE: '存在未知节点',
+  NOT_ADJACENT: '存在不邻接节点', INVALID_EXIT: '终点非规范出口',
+  EXIT_ID_MISMATCH: '出口 ID 与终点不一致', INVALID_ROUTE_OBJECT: '路线对象非法',
+}
+function topologyText(s) { return TOPOLOGY_TEXT[s] || '状态未知' }
+function exitText(s) { return EXIT_TEXT[s] || '状态未知' }
+function topologyBadge(s) { return { VALID: 'ok', INVALID: 'bad', BUILDING_UNAVAILABLE: 'warn' }[s] || 'unknown' }
+function exitBadge(s) { return { AVAILABLE: 'ok', UNAVAILABLE: 'bad', UNKNOWN: 'unknown' }[s] || 'unknown' }
+function reasonText(r) { return (r && REASON_TEXT[r]) || r || '' }
+
+// ════════════════════════════════════════════════════════════════
+// K-1B.5：状态筛选（只读，AND 组合）+ JSON 导出
+// ════════════════════════════════════════════════════════════════
+const filterTopology = ref('') // '' = 全部
+const filterExit = ref('')     // '' = 全部
+const filteredRoutes = computed(() => {
+  return store.manualExecutableRoutes.filter((r) => {
+    const s = statusOf(r.id)
+    if (filterTopology.value && s.topologyStatus !== filterTopology.value) return false
+    if (filterExit.value && s.exitStatus !== filterExit.value) return false
+    return true
+  })
+})
+/** 构建导出载荷：原始字段来自 manualExecutableRoutes，状态字段来自 manualRouteStatusView（按 id 关联） */
+function buildExportPayload() {
+  const routes = filteredRoutes.value.map((r) => {
+    const s = statusOf(r.id)
+    const item = {
+      id: r.id,
+      buildingId: r.buildingId,
+      startNode: r.startNode,
+      exitId: r.exitId,
+      nodes: Array.isArray(r.nodes) ? r.nodes.slice() : [],
+      topologyStatus: s.topologyStatus ?? null,
+      topologyReason: s.topologyReason ?? null,
+      exitStatus: s.exitStatus ?? null,
+      exitReason: s.exitReason ?? null,
+    }
+    // 仅当真实存在时间字段时才导出，不臆造字段名
+    if (r.createdAt !== undefined && r.createdAt !== null) item.routeCreatedAt = r.createdAt
+    if (r.updatedAt !== undefined && r.updatedAt !== null) item.routeUpdatedAt = r.updatedAt
+    return item
+  })
+  return {
+    exportedAt: new Date().toISOString(),
+    scope: 'filtered',
+    totalRoutes: routes.length,
+    filter: { topologyStatus: filterTopology.value || null, exitStatus: filterExit.value || null },
+    routes,
+  }
+}
+/** 浏览器原生下载 JSON；不新增依赖，不写回路线/store/持久化 */
+function exportRoutes() {
+  if (!filteredRoutes.value.length) return
+  const json = JSON.stringify(buildExportPayload(), null, 2)
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `manual-routes-${new Date().toISOString().slice(0, 10)}.json`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  // 延迟释放对象 URL，避免过早回收导致下载失败
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 onMounted(() => {
   // 整栋楼方案是唯一权威数据源（routeMatrix 只是兼容投影）
   if (!store.buildingEvacuationPlans.length) generate()
@@ -590,7 +896,7 @@ onMounted(() => {
 
 .rp-auto, .rp-manual { flex: 1; display: grid; gap: 12px; min-height: 0; }
 .rp-auto { grid-template-columns: 260px 1fr 340px; }
-.rp-manual { grid-template-columns: 260px 1fr; }
+.rp-manual { grid-template-columns: 280px 1fr 320px; }
 
 .rp-config { padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .form-row { display: flex; align-items: center; gap: 8px; }
@@ -711,6 +1017,12 @@ onMounted(() => {
 .empty-tip { color: var(--text-tertiary); font-size: var(--fs-sm, 13px); text-align: center; padding: 30px 0; }
 .rp-plan-scope { margin-left: auto; font-size: var(--fs-xs, 11px); color: var(--text-secondary); opacity: 0.85; }
 .rp-building-tip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: var(--fs-xs, 11px); color: var(--text-secondary); }
+/* RW-3（方案 B）：历史路线提示 —— 纯展示态，不参与任何门禁 */
+.rp-stale-tip {
+  padding: 5px 10px; border: 1px solid rgba(245,158,11,0.45); border-radius: 6px;
+  background: rgba(245,158,11,0.10); color: #F59E0B;
+  font-size: var(--fs-xs, 11px); font-weight: 700;
+}
 .rp-building-tip .bp-scope { color: #4ADE80; font-weight: 700; }
 .rp-building-tip .bp-stat { opacity: 0.8; }
 .bp-chips { display: flex; gap: 4px; margin-left: auto; }
@@ -740,5 +1052,66 @@ onMounted(() => {
 .zone-actions { display: flex; gap: 6px; margin-top: 8px; }
 .mini-btn { flex: 1; padding: 6px; border-radius: 5px; font-size: var(--fs-xs, 11px); border: 1px solid rgba(76, 201, 240, 0.25); background: rgba(20, 30, 50, 0.55); color: var(--text-secondary); cursor: pointer; }
 .mini-btn.primary { background: var(--fire-blue); color: #fff; border-color: var(--fire-blue); }
+.mini-btn.danger { color: #F87171; border-color: rgba(239, 68, 68, 0.45); }
 .mini-btn:hover { filter: brightness(1.05); }
+.mini-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.mini-btn:disabled:hover { filter: none; }
+
+/* ══════ K-1B.5 状态筛选 ══════ */
+.route-filter { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.filter-select {
+  flex: 1; min-width: 0; padding: 5px 6px; border-radius: 5px; font-size: var(--fs-tiny, 10px);
+  border: 1px solid rgba(76, 201, 240, 0.25); background: rgba(10, 14, 26, 0.85); color: var(--text-primary); outline: none;
+}
+.filter-select option { background: #111827; color: var(--text-primary); }
+
+/* ══════════ K-1B.2 权威图选点 ══════════ */
+.auth-fail { color: #F87171; }
+.auth-node-list { display: flex; flex-wrap: wrap; gap: 5px; max-height: 168px; overflow-y: auto; }
+.auth-node-chip {
+  padding: 4px 8px; border-radius: 5px; font-size: var(--fs-xs, 11px); cursor: pointer;
+  border: 1px solid rgba(76, 201, 240, 0.25); background: rgba(20, 30, 50, 0.55); color: var(--text-secondary);
+  transition: all 0.15s; text-align: left;
+}
+.auth-node-chip:hover:not(:disabled) { border-color: var(--fire-blue); color: var(--text-primary); }
+.auth-node-chip:disabled { opacity: 0.4; cursor: not-allowed; }
+.auth-node-chip.active { border-color: var(--fire-blue); background: rgba(67,97,238,0.16); color: var(--text-primary); }
+.auth-node-chip.next { border-color: rgba(34,197,94,0.45); color: #4ADE80; }
+.auth-node-chip .auth-type { margin-left: 4px; opacity: 0.7; font-size: var(--fs-tiny, 10px); }
+.auth-path { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.auth-path-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border-radius: 5px;
+  background: rgba(67,97,238,0.12); color: var(--fire-blue); font-size: var(--fs-xs, 11px); font-weight: 600;
+}
+.auth-arrow { color: var(--text-tertiary); }
+.auth-done-tip { color: #4ADE80; font-size: var(--fs-xs, 11px); font-weight: 600; }
+.auth-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.auth-actions .ghost-btn, .auth-actions .primary-btn { flex: 1; }
+.auth-net { pointer-events: none; }
+.auth-edge { stroke: rgba(34,197,94,0.28); stroke-width: 1; }
+.auth-path-line { fill: none; stroke: #F59E0B; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; filter: drop-shadow(0 0 4px rgba(245,158,11,0.5)); }
+.auth-path-node { fill: #F59E0B; stroke: #fff; stroke-width: 1.5; }
+.floor-mini {
+  padding: 4px 8px; border: 1px solid rgba(76, 201, 240, 0.25); border-radius: 5px;
+  background: rgba(10, 14, 26, 0.85); color: var(--text-primary); font-size: var(--fs-xs, 11px); outline: none;
+}
+.rp-manual-side { padding: 0; display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
+.side-card { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.side-list { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid rgba(76,201,240,0.1); padding-top: 6px; }
+.side-row { display: flex; align-items: center; gap: 8px; }
+.side-name { font-size: var(--fs-xs, 11px); color: var(--text-primary); font-weight: 600; word-break: break-all; }
+.side-meta { font-size: var(--fs-tiny, 10px); color: var(--text-tertiary); }
+.side-actions { display: flex; gap: 6px; margin-top: 2px; }
+
+/* ══════ K-1B.4 只读状态展示 ══════ */
+.route-status { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.status-badge {
+  padding: 2px 7px; border-radius: 4px; font-size: var(--fs-tiny, 10px); font-weight: 600;
+  border: 1px solid rgba(148, 163, 184, 0.35); color: var(--text-secondary);
+}
+.status-badge.ok { border-color: rgba(34, 197, 94, 0.45); color: #4ADE80; background: rgba(34, 197, 94, 0.08); }
+.status-badge.bad { border-color: rgba(239, 68, 68, 0.5); color: #F87171; background: rgba(239, 68, 68, 0.08); }
+.status-badge.warn { border-color: rgba(245, 158, 11, 0.5); color: #FBBF24; background: rgba(245, 158, 11, 0.08); }
+.status-badge.unknown { border-color: rgba(148, 163, 184, 0.4); color: #94A3B8; border-style: dashed; }
+.status-reason { font-size: var(--fs-tiny, 10px); color: var(--text-tertiary); line-height: 1.5; }
 </style>

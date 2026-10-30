@@ -40,8 +40,10 @@ import {
 // ⚠️ mock/routeGraph.js 只是旧签名兼容层，不要再从中取拓扑
 import {
   buildBuildingGraph, kShortestPaths, dijkstra, edgeKey, nodeId as sharedNodeId,
-  exitIdsOf, ZONE_NODE_KEY,
+  exitIdsOf, ZONE_NODE_KEY, NODE_TYPE, floorNum,
 } from '../../shared/evacuation/routeGraph.js'
+// K-1B.2：规范出口节点集合（唯一权威 = floorTopology.EXIT_NODE_IDS）
+import { EXIT_NODE_IDS } from '../../shared/evacuation/floorTopology.js'
 // 整栋楼疏散（scope = BUILDING）：一次火灾 = 一栋楼的一次整体疏散任务
 import {
   planBuildingStrategies, routeOfPerson as buildingRouteOfPerson, validateBuildingEvacuationPlan,
@@ -54,7 +56,12 @@ import { EVACUATION_SCOPE, STRATEGY, zoneKeyOf } from '../../shared/evacuation/b
 // 在此处使用会把「含静态补齐项」的宽口径重新引入生产（P1-1 根因）。
 import {
   defaultExitStates, normalizeExitStates, applyExitInvalidation,
+  // Stage 2-A：路线「可执行状态」白名单 —— 与 isRouteUsable / shouldInvalidateByExits
+  // 同一来源，避免执行入口另立一套状态口径（BLOCKED/DONE/null/未知一律不在白名单 ⇒ fail-closed）
+  USABLE_ROUTE_STATUSES,
 } from '../../shared/evacuation/exitRuntime.js'
+// 路线状态枚举唯一来源（RW-2 恢复清洗用于识别合法状态：缺失/未知一律归一为 null，绝不放行）
+import { PLAN_STATUS } from '../../shared/evacuation/routeTypes.js'
 // 人员运行时统一契约（P1.6.1）：后端 / 2D / 3D 同一个 id、同一个 routeId
 import {
   normalizePersonRuntime, assignPersonRuntime, isCanonicalPerson, pickRetainedCandidates,
@@ -77,6 +84,9 @@ import {
 } from '../mock/routeGraph'
 import { generateFloorDevices, FLOOR_CONFIG, ROOMS as PLAN_ROOMS, STAIRS as PLAN_STAIRS, DOORS as PLAN_DOORS } from '../mock/floorPlanData'
 import { buildSeedDevices } from '../mock/deviceSeed'
+// P1.8.2：疏散灯方向按「路线路径几何 + 设备位置」逐台裁决（取代整层统一的 exitSide）
+// P1.8.2 第一阶段：裁决结果状态词汇（resolved / conflict / undetermined / unlinked）
+import { resolveDeviceDirections, DIRECTION_VERDICT } from '../../shared/evacuation/deviceDirection.js'
 // 双数据源（mock / api）与 Service 层 —— 见 docs/API_CONTRACT.md
 import { dataSource } from '../api'
 import { buildingService } from '../services/buildingService'
@@ -250,6 +260,9 @@ export const useFireStore = defineStore('fire', () => {
     routePlans.value = []
     routeMatrix.value = null
     routeDeviceBindings.value = []
+    // P1.8.2 第一阶段：复位时清除本轮裁决状态，避免上一轮结论残留
+    routeDirectionVerdicts.value = []
+    routeNoPathRouteIds.value = []
     routeFireAutoSwitch.value = false
     routeDecisionConfirmed.value = false
     evacRun.value = false
@@ -958,6 +971,16 @@ export const useFireStore = defineStore('fire', () => {
   const routeNodes = ref([]) // 手动模式节点
   const routeEdges = ref([]) // 手动模式连线
   const routeDeviceBindings = ref([]) // 路线-设备方向绑定
+  /**
+   * P1.8.2 第一阶段：**本轮路线裁决结果**（按设备），是「本轮方向是否有效」的唯一依据。
+   *
+   * ⚠️ 不得再用设备旧有的 `direction` 字段反推本轮结果：未产出绑定时设备保持旧值，
+   *    旧值只代表上一次写入，**不是**本轮路线指引。
+   * 元素形状：{deviceId, state, routeId?, direction?, distance?, dx?, candidates?, reason?}
+   */
+  const routeDirectionVerdicts = ref([])
+  /** 本轮因缺少 path 几何而未参与裁决的路线（典型：手动路线），非空时 UI 须明示「未联动」 */
+  const routeNoPathRouteIds = ref([])
   const routeFireAutoSwitch = ref(false) // 火灾是否触发过自动重规划
   /**
    * ⚠️ COMPAT ONLY
@@ -986,6 +1009,486 @@ export const useFireStore = defineStore('fire', () => {
   const blockedEdgeKeys = ref([]) // 火灾封堵边 key
   let routeGraphCache = null // 最近一次构建的整栋楼路网（供火灾封堵计算）
 
+  // ════════════════════════════════════════════════════════════════════
+  // K-1B.2：权威图统一暴露 + 独立手动可执行路线（沿权威图逐节点选点）
+  // ════════════════════════════════════════════════════════════════════
+  // 独立数据源：不并入 routePlans / routeMatrix.perZone / activeBuildingPlan.routes。
+  const manualExecutableRoutes = ref([]) // 手动可执行路线（仅含权威图选出的路线）
+  const manualRouteDrafts = ref([])      // 自由绘制草稿（不可执行，仅草稿）
+  // 权威图选点编辑态（区别于自由绘制草稿的 routeNodes/routeEdges）
+  const authGraphPath = ref([])          // 已选节点 id 序列（权威图节点 id）
+  const authGraphDraftId = ref(null)     // null=新建；否则=正在替换的既有路线 id
+  const authGraphError = ref(null)       // 最近一次选点/保存失败原因（可诊断）
+  // 恢复时的结构损坏剔除诊断（仅记录，不删除拓扑失效路线）
+  const manualRoutesRestoreReport = ref([])
+
+  /** 当前路线规划楼栋（可靠识别；识别失败返回 null，禁止静默回退到其它楼栋） */
+  function currentManualBuilding() {
+    const bid = String(routeBuildingId.value || '')
+    if (!bid) return null
+    return asArray(buildings.value).find((x) => x && String(x.id) === bid) || null
+  }
+
+  /**
+   * 权威图：UI 选点与后续校验共享同一构建规则（buildBuildingGraph + 真实现有 getBuildingFloors）。
+   * 当前楼栋无法可靠识别 / 层数非法 / 建图异常时返回 null（明确失败），绝不静默回退。
+   */
+  const authoritativeRouteGraph = computed(() => {
+    const b = currentManualBuilding()
+    if (!b) return null
+    const floors = Number(getBuildingFloors(String(b.id)))
+    if (!Number.isFinite(floors) || floors <= 0) return null
+    try {
+      return buildBuildingGraph(floors)
+    } catch (_) {
+      return null
+    }
+  })
+
+  /** 稳定且唯一的 RP-MANUAL-… 前缀 ID */
+  function genManualRouteId() {
+    return `RP-MANUAL-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  }
+
+  /** 权威图中的节点实体（不存在返回 null） */
+  function authGraphNode(nodeId) {
+    const g = authoritativeRouteGraph.value
+    return g && g.nodes ? g.nodes[nodeId] || null : null
+  }
+
+  /** 起点约束：仅 type 为 ROOM 或 DOOR */
+  function isAuthStartNode(nodeId) {
+    const n = authGraphNode(nodeId)
+    return !!n && (n.type === NODE_TYPE.ROOM || n.type === NODE_TYPE.DOOR)
+  }
+
+  /** 当前节点的真实邻接节点 id 列表（graph.adj[currentNodeId]；跨层仅保留下降方向） */
+  function authAdjacentNodeIds(nodeId) {
+    const g = authoritativeRouteGraph.value
+    if (!g || !g.adj || !g.adj[nodeId] || !g.nodes) return []
+    const cur = g.nodes[nodeId]
+    if (!cur) return []
+    return g.adj[nodeId]
+      .map((e) => e.to)
+      .filter((to) => {
+        const n = g.nodes[to]
+        if (!n) return false
+        if (cur.floorId !== n.floorId) return floorNum(cur.floorId) > floorNum(n.floorId)
+        return true
+      })
+  }
+
+  /** 任意图上：只能沿真实邻接边步进（含跨层下降边；上升边/不存在的边均不可选） */
+  function canStepInGraph(graph, fromId, toId) {
+    if (!graph || !graph.adj || !graph.nodes) return false
+    if (!(graph.adj[fromId] || []).some((e) => e.to === toId)) return false
+    const a = graph.nodes[fromId]
+    const b = graph.nodes[toId]
+    if (!a || !b) return false
+    // 跨层只允许沿下降方向（更高楼层 → 更低楼层）；同层无方向约束
+    if (a.floorId !== b.floorId) return floorNum(a.floorId) > floorNum(b.floorId)
+    return true
+  }
+  /** 只能沿真实邻接边步进（当前权威图；含跨层下降边；上升边/不存在的边均不可选） */
+  function canAuthStep(fromId, toId) {
+    return canStepInGraph(authoritativeRouteGraph.value, fromId, toId)
+  }
+
+  /** 终点约束：必须属于规范出口节点集合 EXIT_NODE_IDS */
+  function isAuthExitNode(nodeId) {
+    return EXIT_NODE_IDS.includes(nodeId)
+  }
+
+  /**
+   * 纯函数：对任意图校验节点序列的拓扑合法性（不依赖当前 UI 选点状态）。
+   * 校验项：结构 / 起点类型 / 节点存在 / 逐段真实邻接 + 下降 / 终点为规范出口。
+   * 返回 { ok, reason, [node/from/to/exitId] } 或 { ok:true, ids }。
+   */
+  function validateManualRouteNodes(nodes, graph) {
+    if (!graph || !graph.nodes) return { ok: false, reason: 'AUTH_GRAPH_UNAVAILABLE' }
+    const ids = Array.isArray(nodes) ? nodes.filter((x) => typeof x === 'string' && x) : []
+    if (ids.length < 2) return { ok: false, reason: 'PATH_TOO_SHORT' }
+    const start = graph.nodes[ids[0]]
+    if (!start || (start.type !== NODE_TYPE.ROOM && start.type !== NODE_TYPE.DOOR)) {
+      return { ok: false, reason: 'INVALID_START_TYPE' }
+    }
+    for (let i = 1; i < ids.length; i++) {
+      const a = ids[i - 1]
+      const b = ids[i]
+      if (!graph.nodes[b]) return { ok: false, reason: 'UNKNOWN_NODE', node: b }
+      if (!canStepInGraph(graph, a, b)) return { ok: false, reason: 'NOT_ADJACENT', from: a, to: b }
+    }
+    const exitId = ids[ids.length - 1]
+    if (!EXIT_NODE_IDS.includes(exitId)) return { ok: false, reason: 'INVALID_EXIT', exitId }
+    return { ok: true, ids }
+  }
+
+  /**
+   * 由权威图节点 id 序列构建手动可执行路线（校验 + 派生 points/floorsPassed）。
+   * points / floorsPassed 只从当前权威图节点数据推导，绝不接受用户自由填写。
+   */
+  function buildManualExecutableRoute(pathIds, editId = null) {
+    const g = authoritativeRouteGraph.value
+    const v = validateManualRouteNodes(pathIds, g)
+    if (!v.ok) return v
+    const ids = v.ids
+    const b = currentManualBuilding()
+    const buildingId = b ? String(b.id) : ''
+    const points = ids.map((id) => {
+      const n = g.nodes[id]
+      return { id, x: n.x, y: n.y, floorId: n.floorId }
+    })
+    const floorsPassed = []
+    ids.forEach((id) => {
+      const fid = g.nodes[id].floorId
+      if (floorsPassed[floorsPassed.length - 1] !== fid) floorsPassed.push(fid)
+    })
+    const now = Date.now()
+    return {
+      ok: true,
+      route: {
+        id: editId || genManualRouteId(),
+        type: 'manual-executable',
+        buildingId,
+        startNode: ids[0],
+        exitId: ids[ids.length - 1],
+        nodes: ids.slice(),
+        points,
+        floorsPassed,
+        createdAt: now,
+        updatedAt: now,
+      },
+    }
+  }
+
+  /**
+   * 恢复数据清洗：**结构损坏**与**拓扑失效**严格分开。
+   *   · 结构损坏（非对象 / id 缺失 / nodes 类型错 / exitId 类型错）→ 剔除并记录可诊断结果；
+   *   · 结构完整但可能因拓扑变化不再合法 → **保留**（不可执行的历史/待编辑路线），
+   *     绝不因校验失败静默删除（后续由 K-1B.3 / K-1B.4 决定展示与重验证）。
+   */
+  function sanitizeManualExecutableRoutes(value) {
+    const src = Array.isArray(value) ? value : []
+    const clean = []
+    const dropped = []
+    src.forEach((r, i) => {
+      if (!r || typeof r !== 'object' || Array.isArray(r)) {
+        dropped.push({ index: i, reason: 'NOT_OBJECT' })
+        return
+      }
+      if (typeof r.id !== 'string' || !r.id) {
+        dropped.push({ index: i, reason: 'MISSING_ID' })
+        return
+      }
+      if (!Array.isArray(r.nodes) || r.nodes.some((n) => typeof n !== 'string')) {
+        dropped.push({ index: i, id: r.id, reason: 'INVALID_NODES' })
+        return
+      }
+      if (typeof r.exitId !== 'string' || !r.exitId) {
+        dropped.push({ index: i, id: r.id, reason: 'INVALID_EXIT_ID' })
+        return
+      }
+      clean.push(r)
+    })
+    return { clean, dropped }
+  }
+
+  // ── RW-2：持久化恢复时的路线投影数据清洗（routePlans / routeMatrix） ──
+  // 模式对齐 sanitizeManualExecutableRoutes：区分「结构损坏（剔除）」与「状态未知
+  // （保留几何、status 归一为 null）」。归一目标**是 null 而不是 NORMAL** —— 未知状态
+  // 路线保留可展示几何，但执行门禁（USABLE_ROUTE_STATUSES 白名单）继续拒绝，fail-closed。
+  // ⚠️ 不触碰 DONE 及其 completedAt / assignedTo / history（合法状态原样保留）；
+  // ⚠️ 不改 exitRawStates（D1-A 语义不变）、不改任何门禁判据、不做历史格式迁移猜测；
+  // ⚠️ 局部容错：单条坏路线不波及有效路线与无关业务状态（fireEvent / persons / 阶段等）。
+  const routeProjectionRestoreReport = ref(null)
+
+  function sanitizeRouteEntry(entry) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { ok: false, reason: 'NOT_OBJECT' }
+    }
+    if (typeof entry.id !== 'string' || !entry.id) {
+      return { ok: false, reason: 'MISSING_ID' }
+    }
+    // path 是 2D/3D 展示与 getRouteSegmentForFloor 的必需字段：缺失即结构损坏（剔除）
+    if (!Array.isArray(entry.path)) {
+      return { ok: false, reason: 'MISSING_PATH' }
+    }
+    if (typeof entry.status === 'string' && Object.values(PLAN_STATUS).includes(entry.status)) {
+      return { ok: true, entry } // 合法状态原样保留（含 BLOCKED / DONE 及历史字段）
+    }
+    // 缺失 / 非字符串 / 未知枚举值 ⇒ 归一为 null（状态未知），**绝不归一为 NORMAL**
+    return { ok: true, entry: { ...entry, status: null } }
+  }
+
+  /**
+   * 恢复后的路线投影清洗（仅在 restorePersistSnapshot 赋值之后调用一次）：
+   *   · routePlans：结构损坏剔除并记录 {index,id,reason}；未知 status 归一 null；
+   *   · routeMatrix：缺 perZone / areas 时有界兜底；perZone.plans 同样清洗；
+   *     recommendedId / backupId 悬空（既不在 routePlans、也不在该区 candidates 中）⇒ null；
+   *   · activeRoutePlanId 悬空 ⇒ null；
+   *   · 有效路线与无关业务状态原样保留（局部容错，不整体丢弃快照）。
+   * @returns {{plans:Array, matrix:object|null, dropped:Array}}
+   */
+  function sanitizeRouteProjection() {
+    const dropped = []
+    const plans = []
+    asArray(routePlans.value).forEach((p, i) => {
+      const r = sanitizeRouteEntry(p)
+      if (r.ok) {
+        plans.push(r.entry)
+      } else {
+        dropped.push({ index: i, id: p && typeof p.id === 'string' ? p.id : null, reason: r.reason })
+      }
+    })
+    routePlans.value = plans
+    const planIds = new Set(plans.map((p) => p.id))
+
+    let matrix = routeMatrix.value
+    if (matrix && typeof matrix === 'object' && !Array.isArray(matrix)) {
+      const perZoneIn = (matrix.perZone && typeof matrix.perZone === 'object' && !Array.isArray(matrix.perZone))
+        ? matrix.perZone
+        : {}
+      const perZone = {}
+      Object.keys(perZoneIn).forEach((zone) => {
+        const info = perZoneIn[zone]
+        if (!info || typeof info !== 'object' || Array.isArray(info)) return
+        const zonePlans = []
+        asArray(info.plans).forEach((p, i) => {
+          const r = sanitizeRouteEntry(p)
+          if (r.ok) zonePlans.push(r.entry)
+          else dropped.push({ zone, index: i, id: p && typeof p.id === 'string' ? p.id : null, reason: r.reason })
+        })
+        const zoneIds = new Set(zonePlans.map((p) => p.id))
+        // 指针合法 = 指向 routePlans 中的路线，或该区 candidates 中的路线
+        // （整栋楼模式下 perZone.plans 含非当前方案的候选，属合法形态，不得误清）
+        const validPtr = (v) => {
+          if (v === null || v === undefined) return null
+          return planIds.has(v) || zoneIds.has(v) ? v : null
+        }
+        perZone[zone] = {
+          ...info,
+          plans: zonePlans,
+          recommendedId: validPtr(info.recommendedId),
+          backupId: validPtr(info.backupId),
+        }
+      })
+      const areas = Array.isArray(matrix.areas) && matrix.areas.length ? matrix.areas : Object.keys(perZone)
+      matrix = { ...matrix, areas, perZone }
+    } else {
+      matrix = null
+    }
+    routeMatrix.value = matrix
+
+    const active = activeRoutePlanId.value
+    if (active !== null && active !== undefined && !planIds.has(active)) {
+      activeRoutePlanId.value = null
+      dropped.push({ id: active, reason: 'ACTIVE_POINTER_DANGLING' })
+    }
+    return { plans, matrix, dropped }
+  }
+
+  // ── 权威图选点交互（继续 / 撤销 / 取消 / 重新选点 / 更换终点） ──
+  function resetAuthGraphSelection(draftId = null) {
+    authGraphPath.value = []
+    authGraphDraftId.value = draftId || null
+    authGraphError.value = null
+  }
+  function pickAuthGraphStart(nodeId) {
+    if (!authoritativeRouteGraph.value) {
+      authGraphError.value = 'AUTH_GRAPH_UNAVAILABLE'
+      return false
+    }
+    if (!isAuthStartNode(nodeId)) {
+      authGraphError.value = 'INVALID_START_TYPE'
+      return false
+    }
+    authGraphPath.value = [nodeId]
+    authGraphError.value = null
+    return true
+  }
+  /** 追加下一节点：只能来自当前节点真实邻接列表（含合法下降边） */
+  function appendAuthGraphNode(nodeId) {
+    if (!authoritativeRouteGraph.value) {
+      authGraphError.value = 'AUTH_GRAPH_UNAVAILABLE'
+      return false
+    }
+    const path = authGraphPath.value
+    if (!path.length) return pickAuthGraphStart(nodeId)
+    const last = path[path.length - 1]
+    if (!canAuthStep(last, nodeId)) {
+      authGraphError.value = 'NOT_ADJACENT'
+      return false
+    }
+    authGraphPath.value = [...path, nodeId]
+    authGraphError.value = null
+    return true
+  }
+  /** 撤销上一步（至少保留起点） */
+  function undoAuthGraphStep() {
+    if (authGraphPath.value.length <= 1) return false
+    authGraphPath.value = authGraphPath.value.slice(0, -1)
+    authGraphError.value = null
+    return true
+  }
+  /** 取消当前编辑 */
+  function cancelAuthGraphSelection() {
+    resetAuthGraphSelection(null)
+  }
+  /** 载入既有路线到编辑态（替换模式） */
+  function loadAuthGraphRouteForEdit(routeId) {
+    const r = manualExecutableRoutes.value.find((x) => x && x.id === routeId)
+    if (!r) return false
+    authGraphDraftId.value = r.id
+    authGraphPath.value = Array.isArray(r.nodes) ? r.nodes.slice() : []
+    authGraphError.value = null
+    return true
+  }
+  /** 保存：新建（防重复 ID）或按 ID 替换 */
+  function saveAuthGraphRoute() {
+    const built = buildManualExecutableRoute(authGraphPath.value, authGraphDraftId.value)
+    if (!built.ok) {
+      authGraphError.value = built.reason
+      return { ok: false, reason: built.reason }
+    }
+    if (authGraphDraftId.value) {
+      const replaced = replaceManualExecutableRoute(authGraphDraftId.value, built.route)
+      if (!replaced) return { ok: false, reason: 'REPLACE_NOT_FOUND' }
+    } else {
+      const created = createManualExecutableRoute(built.route)
+      if (!created.ok) return created
+    }
+    resetAuthGraphSelection(null)
+    return { ok: true, route: built.route }
+  }
+
+  /**
+   * 创建：新增时防止重复 ID，并**强制基于当前权威图重新校验 + 重新派生**路线字段。
+   * 只信任受控输入（route.nodes 节点序列 + 可选 route.id）；调用方传入的
+   * points / floorsPassed / exitId / buildingId / validated / reachable / status 等
+   * 派生字段或运行时结论一律忽略，由 buildManualExecutableRoute 重新生成。
+   */
+  function createManualExecutableRoute(route) {
+    if (!route || typeof route !== 'object') return { ok: false, reason: 'INVALID_ROUTE' }
+    const requestedId = typeof route.id === 'string' && route.id ? route.id : null
+    // 校验对象 = 待写入路线的 nodes（而非当前 UI 选点状态），并重新派生全部可信字段
+    const built = buildManualExecutableRoute(route.nodes, requestedId)
+    if (!built.ok) return built
+    const routeId = built.route.id
+    const exists = manualExecutableRoutes.value.some((x) => x && x.id === routeId)
+    if (exists) return { ok: false, reason: 'DUPLICATE_ID', id: routeId }
+    manualExecutableRoutes.value.push(built.route)
+    return { ok: true, route: built.route }
+  }
+  /** 替换：按 ID 替换；同样基于权威图重新校验 + 重新派生，保留原 id / buildingId / createdAt。 */
+  function replaceManualExecutableRoute(routeId, route) {
+    const idx = manualExecutableRoutes.value.findIndex((x) => x && x.id === routeId)
+    if (idx < 0) return false
+    const prev = manualExecutableRoutes.value[idx]
+    const built = buildManualExecutableRoute(route && route.nodes, routeId)
+    if (!built.ok) return false
+    manualExecutableRoutes.value[idx] = {
+      ...built.route,
+      buildingId: prev && prev.buildingId ? prev.buildingId : built.route.buildingId,
+      createdAt: prev && prev.createdAt != null ? prev.createdAt : built.route.createdAt,
+      updatedAt: Date.now(),
+    }
+    return true
+  }
+  /** 删除：显式按 ID 移除 */
+  function deleteManualExecutableRoute(routeId) {
+    const before = manualExecutableRoutes.value.length
+    manualExecutableRoutes.value = manualExecutableRoutes.value.filter((x) => !x || x.id !== routeId)
+    return manualExecutableRoutes.value.length < before
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // K-1B.3：安全准入（拓扑）+ 只读状态投影
+  //  · 拓扑有效性独立于出口运行时可用性，二者不合并为单一布尔；
+  //  · 投影是 computed 只读派生，不回写路线对象、不持久化、不删除路线；
+  //  · 执行状态 / 设备下发不属于本阶段结论，投影不表达「可执行」。
+  // ════════════════════════════════════════════════════════════════════
+
+  /** 按指定楼栋建图（非当前 UI 楼栋）；楼栋缺失/层数非法/建图失败给出明确原因 */
+  function graphForBuilding(buildingId) {
+    const bid = String(buildingId || '')
+    if (!bid) return { ok: false, graph: null, reason: 'BUILDING_MISSING' }
+    const b = asArray(buildings.value).find((x) => x && String(x.id) === bid)
+    if (!b) return { ok: false, graph: null, reason: 'BUILDING_NOT_FOUND' }
+    const floors = Number(getBuildingFloors(bid))
+    if (!Number.isFinite(floors) || floors <= 0) return { ok: false, graph: null, reason: 'BUILDING_FLOORS_INVALID' }
+    try {
+      return { ok: true, graph: buildBuildingGraph(floors), reason: null }
+    } catch (_) {
+      return { ok: false, graph: null, reason: 'BUILDING_GRAPH_FAILED' }
+    }
+  }
+
+  /**
+   * 拓扑安全准入：对已保存路线用**其所属楼栋**的权威图重新验证（非当前 UI 楼栋）。
+   * 返回 { status: 'VALID' | 'INVALID' | 'BUILDING_UNAVAILABLE', reason }。
+   * 不得因出口运行时数据缺失而判 INVALID（出口可用性是独立维度）。
+   */
+  function validateManualRouteTopology(route) {
+    if (!route || typeof route !== 'object') return { status: 'INVALID', reason: 'INVALID_ROUTE_OBJECT' }
+    const res = graphForBuilding(route.buildingId)
+    if (!res.ok) return { status: 'BUILDING_UNAVAILABLE', reason: res.reason }
+    const v = validateManualRouteNodes(route.nodes, res.graph)
+    if (!v.ok) return { status: 'INVALID', reason: v.reason }
+    if (String(route.exitId) !== v.ids[v.ids.length - 1]) {
+      return { status: 'INVALID', reason: 'EXIT_ID_MISMATCH' }
+    }
+    return { status: 'VALID', reason: null }
+  }
+
+  /**
+   * 出口运行时可用性（独立于拓扑）：基于真实上报可用集。
+   *  · exitRawStates === null（从未收到上报）⇒ UNKNOWN（无法得出可用性结论）；
+   *  · 否则按 exitReportedUsableNodeIds 判 AVAILABLE / UNAVAILABLE。
+   */
+  function manualRouteExitVerdict(route) {
+    const exitId = route && typeof route.exitId === 'string' ? route.exitId : ''
+    if (!exitId) return { status: 'UNKNOWN', reason: 'NO_EXIT_ID' }
+    if (exitRawStates.value === null || exitRawStates.value === undefined) {
+      return { status: 'UNKNOWN', reason: 'NO_EXIT_RUNTIME' }
+    }
+    const reported = exitReportedUsableNodeIds.value
+    if (!Array.isArray(reported)) return { status: 'UNKNOWN', reason: 'NO_EXIT_RUNTIME' }
+    return reported.some((id) => String(id) === exitId)
+      ? { status: 'AVAILABLE', reason: null }
+      : { status: 'UNAVAILABLE', reason: 'EXIT_NOT_REPORTED_USABLE' }
+  }
+
+  /**
+   * 只读状态投影：为每条手动路线派生「拓扑准入」与「出口可用性」两个独立维度。
+   * 不写回 manualExecutableRoutes / 路线对象，不持久化。
+   */
+  const manualRouteStatusView = computed(() => {
+    return manualExecutableRoutes.value
+      .filter((r) => r && typeof r === 'object')
+      .map((route) => {
+        const topo = validateManualRouteTopology(route)
+        const exit = manualRouteExitVerdict(route)
+        return {
+          id: route.id,
+          topologyStatus: topo.status,
+          topologyReason: topo.reason,
+          exitStatus: exit.status,
+          exitReason: exit.reason,
+        }
+      })
+  })
+
+  // ── F2：楼栋上下文变化时，统一重置权威图选点编辑态 ──
+  // routeBuildingId 是「当前路线规划楼栋」的唯一权威；所有切换路径（RoutePlanView 下拉、
+  // generateRoutePlans、activateBuildingPlansFor 等）最终都改写 routeBuildingId，
+  // 因此在此统一 watch 即可覆盖全部入口，避免各入口各自实现不一致的清理逻辑。
+  // flush:'sync'：切换楼栋后立即清空旧选点态，杜绝「旧路径 + 新楼栋 buildingId」的窗口。
+  // 仅在实际变化时重置（同值重赋值不重置）；初始化/恢复快照时的赋值不会误清（编辑态本为空）。
+  watch(routeBuildingId, (next, prev) => {
+    if (next === prev) return
+    resetAuthGraphSelection(null)
+  }, { flush: 'sync' })
+
   // 批量切换疏散方向
   // filters: { building, floors: [], areas: [], deviceTypes: [] }
   function batchSwitchEvacuationDirection(filters, newDirection, reason = '管理员批量切换') {
@@ -1010,6 +1513,8 @@ export const useFireStore = defineStore('fire', () => {
     devs.forEach((d) => {
       d.direction = newDirection
       d.recommendedDirection = newDirection
+      // 问题 C：批量手动覆盖同样作废上一轮的路线裁决结论
+      markDirectionOverridden(d.id, newDirection, 'manual')
       updatedIds.push(d.id)
     })
 
@@ -1080,6 +1585,10 @@ export const useFireStore = defineStore('fire', () => {
   function resetEvacLightDirections() {
     // B1-02：demo 模式下疏散灯方向只来自 DemoWorld.devices → WS → store
     if (demoGuard('resetEvacLightDirections')) return
+    // P1.8.2 第一阶段：方向复位到位置默认值 ⇒ 本轮路线裁决结论一律作废，
+    // 否则上一轮的 resolved / conflict / undetermined 会残留并被误认为仍然有效。
+    routeDirectionVerdicts.value = []
+    routeNoPathRouteIds.value = []
     asArray(devices.value).forEach((d) => {
       if (d && d.type === 'evacuation_light' && typeof d.x === 'number') {
         const nd = d.x < 280 ? 'left' : 'right'
@@ -1259,6 +1768,8 @@ export const useFireStore = defineStore('fire', () => {
           const nd = d.direction === 'left' ? 'right' : 'left'
           d.direction = nd
           d.recommendedDirection = nd
+          // 问题 C：避火自动反向也不是路线裁决，裁决状态同步作废
+          markDirectionOverridden(d.id, nd, 'fire-avoidance')
         }
       }
     })
@@ -1343,12 +1854,8 @@ export const useFireStore = defineStore('fire', () => {
       replanRoutesForFire()
     }
     const bp = activeBuildingPlan.value
-    // ② 疏散灯：整栋楼所有路线统一联动（火灾只影响路线走向，不影响参与范围）
-    if (bp) {
-      const bindings = []
-      ;(bp.routes || []).forEach((r) => applyRouteToDevices(routeToRenderable(bp, r), bindings))
-      routeDeviceBindings.value = bindings
-    }
+    // ② 疏散灯：整栋楼所有路线**一次性**裁决后联动（禁止逐条覆盖）
+    if (bp) applyBuildingRoutesToDevices(bp)
     const scopeText = bp
       ? `整栋楼 ${bp.summary.zoneCount} 个有人区域 / ${bp.summary.personCount} 人 / ${bp.summary.routeCount} 条路线`
       : `${fe.floor}-${fe.area}`
@@ -1378,14 +1885,23 @@ export const useFireStore = defineStore('fire', () => {
     if (demoGuard('selectEvacuationPlan')) return false
     const plan = getRoutePlanById(planId)
     if (!plan) return false
+    // FIX-4（Stage 2-A 遗留项）：路线级门禁**先于分支判定**，整栋楼分支与 legacy 分支
+    // 适用同一口径 —— BLOCKED / DONE / 未知（含投影未命中的 null）一律拒绝选中，
+    // 不得对不可用路线无条件返回 true（修复前整栋楼分支无任何状态检查：
+    // 属当前方案 ⇒ no-op true；属其它方案 ⇒ 直接切换）。
+    // ⚠️ 门禁只约束**被选中的路线本身**：方案内其它分区路线不可用时不拒绝整个方案，
+    //    部分分区不可用下正常分区的可执行性由 FIX-1/FIX-2/FIX-3 在执行层逐条收敛。
+    // ⚠️ 只读判定，不改写 status / completedAt / assignedTo / history 等历史字段。
+    if (!USABLE_ROUTE_STATUSES.includes(plan.status)) {
+      console.warn('[fireStore] 拒绝选中不可执行路线：', { id: planId, status: plan.status })
+      return false
+    }
     if (plan.buildingPlanId && buildingEvacuationPlans.value.some((p) => p.id === plan.buildingPlanId)) {
       if (activeBuildingPlanId.value !== plan.buildingPlanId) return setActiveBuildingPlan(plan.buildingPlanId)
       return true
     }
     // ⚠️ LEGACY：非整栋楼方案（旧单区域结构）仅本地预览，不改变权威方案
-    // Stage 1.3 K-2：DONE 是终态，永不作为活动路线；此处为**只读**状态判定，
-    // 不改写 DONE 的 status / completedAt / assignedTo / history 等历史字段。
-    if (plan.status === 'BLOCKED' || plan.status === 'DONE') return false
+    // （状态门禁已由上方统一执行；原 legacy 分支内的 BLOCKED/DONE 双查被白名单判据覆盖）
     activeRoutePlanId.value = planId
     applyRouteToDevices(plan)
     return true
@@ -1412,14 +1928,12 @@ export const useFireStore = defineStore('fire', () => {
     const bp = activeBuildingPlan.value
     if (!bp) return false
     routeDecisionConfirmed.value = true
-    // 疏散灯统一沿整栋楼每条路线方向 + 途经楼层应急照明进入应急强闪
-    const bindings = []
-    ;(bp.routes || []).forEach((r) => applyRouteToDevices(routeToRenderable(bp, r), bindings))
-    routeDeviceBindings.value = bindings
+    // 疏散灯沿整栋楼每条路线的实际走向逐台联动 + 途经楼层应急照明进入应急强闪
+    applyBuildingRoutesToDevices(bp)
     addOperationLog(
       '调整疏散指示方向',
       '演示流程',
-      `疏散指示灯方向已按整栋楼方案「${bp.name}」统一指向出口 ${bp.summary.exitLabels.join('、') || '安全出口'}`,
+      `疏散指示灯方向已按整栋楼方案「${bp.name}」各区域实际路线逐段指向出口 ${bp.summary.exitLabels.join('、') || '安全出口'}`,
       'warning',
     )
     evacuationLogs.value.unshift({
@@ -1467,6 +1981,7 @@ export const useFireStore = defineStore('fire', () => {
     // P1.7.3-B3：canonical 唯一权威，别名（p.building）不再作为第二套身份来源
     const feBuildingId = buildingIdOf(fe) || fireBuildingId(fe.building)
     let total = 0
+    const skipped = [] // FIX-1：被门禁拒绝的路线 id（用于诊断告警）
     asArray(persons.value).forEach((p) => {
       if (!p || buildingIdOf(p) !== feBuildingId) return
       delete p._evacDone
@@ -1482,11 +1997,22 @@ export const useFireStore = defineStore('fire', () => {
           }),
         })
       }
-      const plan = route ? routeToRenderable(bp, route) : null
+      // FIX-1（Stage 2-A 遗留项）：执行入口必须消费**权威协调状态**
+      // （reconcileRouteStatuses 产出，见 reconciledRouteView 契约）。修复前此处用
+      // routeToRenderable 的种子 'NORMAL'，会把 BLOCKED / DONE 静默抹掉；投影未命中
+      // / 跨方案时 reconciledRouteView 返回 status === null（未知）。
+      const plan = route ? reconciledRouteView(bp, route) : null
       const ownFloor = p.floorId
+      // FIX-1：**先校验、后写入**。BLOCKED / DONE / null / 未知状态一律 fail-closed；
+      // 被拒人员显式清理陈旧 routeId 指派，不保留上一轮路线引用，也不写 _evac / status。
+      // （上方 delete p._evacDone / p._evac 是「重跑即复位」语义，属清理而非新的执行态写入）
+      if (!plan || !USABLE_ROUTE_STATUSES.includes(plan.status)) {
+        if (route) skipped.push(route.routeId)
+        p.routeId = null
+        return
+      }
       // routeId = `${planId}:${floorId}:${zone}` —— 2D / 3D / 后端同一个 id
-      p.routeId = route ? route.routeId : null
-      if (!plan || plan.status === 'BLOCKED') return
+      p.routeId = route.routeId
       const pts = []
       // 房间人员：先到本区门口走廊中心点，再沿走廊/楼梯节点（走廊人员直接从走廊节点出发）
       if (p.zone && p.zone !== '走廊') {
@@ -1507,6 +2033,9 @@ export const useFireStore = defineStore('fire', () => {
         total++
       }
     })
+    if (skipped.length) {
+      console.warn('[fireStore] 启动疏散时跳过不可执行路线（BLOCKED/DONE/未知）：', [...new Set(skipped)])
+    }
     // ── 以下仅 mock / 离线模式：P2 确定性滞留，与后端共用同一份固定候选名单 RETAINED_CANDIDATES ──
     // 只允许 evacuating → stranded —— 严禁把已撤离或未参与疏散的人重新标记为滞留，
     // 也不再按「火源区第一个 / C区第一个」这种顺序取人（否则同一份场景每次跑出来的人不一样）
@@ -1929,6 +2458,8 @@ export const useFireStore = defineStore('fire', () => {
           const nd = d.direction === 'left' ? 'right' : 'left'
           d.direction = nd
           d.recommendedDirection = nd
+          // 问题 C：避火自动反向也不是路线裁决，裁决状态同步作废
+          markDirectionOverridden(d.id, nd, 'fire-avoidance')
         }
       }
     })
@@ -2452,6 +2983,8 @@ export const useFireStore = defineStore('fire', () => {
     const oldDirection = dev.direction
     dev.direction = newDirection
     dev.recommendedDirection = newDirection
+    // 问题 C：本地手动覆盖后，上一轮的 resolved 不得继续被当作「路线已裁决」的依据
+    markDirectionOverridden(deviceId, newDirection, 'manual')
 
     evacuationLogs.value.unshift({
       id: `LOG-${Date.now()}`,
@@ -2555,7 +3088,13 @@ export const useFireStore = defineStore('fire', () => {
     // B1-02：demo 模式下疏散灯方向联动由 DemoEngine 下发
     if (demoGuard('adjustEvacuationDirection')) return false
     const plan = getRoutePlanById(activeRoutePlanId.value)
-    if (!plan) return false
+    // FIX-3（Stage 2-A 遗留项）：方向修改前核验权威协调状态；BLOCKED / DONE /
+    // 未知（投影未命中/非白名单）一律拒绝，不得把路线几何派发给设备。
+    if (!plan || !USABLE_ROUTE_STATUSES.includes(plan.status)) {
+      console.warn('[fireStore] 拒绝调整疏散灯方向：当前路线不可执行',
+        { id: activeRoutePlanId.value, status: plan ? plan.status : '<absent>' })
+      return false
+    }
     applyRouteToDevices(plan)
     addOperationLog('调整指示方向', '演示流程', '应急疏散指示灯方向已按疏散方案统一调整', 'warning')
     return true
@@ -2566,7 +3105,14 @@ export const useFireStore = defineStore('fire', () => {
     // B1-02：demo 模式下应急灯强闪来自 DemoWorld.lighting / devices，不由前端启动
     if (demoGuard('startPulseFlash')) return false
     const plan = getRoutePlanById(activeRoutePlanId.value)
-    if (!plan) return false
+    // FIX-3：门禁必须位于一切副作用**之前** —— setEmergencyMode 会写设备应急态 /
+    // 通知 / 操作日志，startEvacuationRun 会写人员执行态并启动疏散定时器。
+    // BLOCKED / DONE / 未知一律拒绝，避免"只拦底层、放过上层副作用"。
+    if (!plan || !USABLE_ROUTE_STATUSES.includes(plan.status)) {
+      console.warn('[fireStore] 拒绝启动脉冲强闪：当前路线不可执行',
+        { id: activeRoutePlanId.value, status: plan ? plan.status : '<absent>' })
+      return false
+    }
     setEmergencyMode(true)
     startEvacuationRun(plan)
     addOperationLog('启动疏散指示灯脉冲强闪', '演示流程', '应急疏散灯进入脉冲强闪，人员沿疏散路线动态撤离', 'warning')
@@ -3160,10 +3706,8 @@ export const useFireStore = defineStore('fire', () => {
     if (!buildingEvacuationPlans.value.some((p) => p.id === planId)) return false
     const active = syncLegacyRouteState(buildingEvacuationPlans.value, planId)
     if (!active) return false
-    // 疏散灯沿每条路线方向联动（整栋楼：所有楼层参与）
-    const bindings = []
-    ;(active.routes || []).forEach((r) => applyRouteToDevices(routeToRenderable(active, r), bindings))
-    routeDeviceBindings.value = bindings
+    // 疏散灯沿每条路线方向联动（整栋楼：所有楼层参与，一次性裁决）
+    applyBuildingRoutesToDevices(active)
     // 正在执行疏散时：整栋楼所有人改按新方案的各自路线走（A→B→C 全楼同步）
     if (evacRun.value) startEvacuationRun()
     addNotification({
@@ -3202,6 +3746,22 @@ export const useFireStore = defineStore('fire', () => {
   /** 当前整栋楼方案（2D/3D/后端共用一个源） */
   const activeBuildingPlan = computed(() => (
     buildingEvacuationPlans.value.find((p) => p.id === activeBuildingPlanId.value) || null
+  ))
+
+  /**
+   * RW-3（方案 B 最小版，**展示层专用**）：刷新后「仅存整栋楼路线投影、当前方案上下文已丢失」。
+   * 条件（第二轮只读核实结论）：
+   *   · routePlans 非空 —— 恢复的旧路线仍在展示；
+   *   · activeBuildingPlan 为空 —— buildingEvacuationPlans / activeBuildingPlanId 不持久化；
+   *   · routeMatrix.scope === EVACUATION_SCOPE.BUILDING —— 仅 syncLegacyRouteState:3587 写入
+   *     该标记；generateRoutePlans 的 legacy matrix（:3406）无 scope ⇒ legacy 路线不误标。
+   * ⚠️ 纯派生展示态：不参与任何执行门禁、不写业务状态、不触发重规划/自动清理/自动准入。
+   */
+  const hasStaleRoutesWithoutActivePlan = computed(() => (
+    asArray(routePlans.value).length > 0
+    && !activeBuildingPlan.value
+    && !!routeMatrix.value
+    && routeMatrix.value.scope === EVACUATION_SCOPE.BUILDING
   ))
 
   // ── 楼栋方案隔离（P1.6.3 E1）：方案永远属于某一栋楼，切换楼栋不得串用 ──
@@ -3245,6 +3805,8 @@ export const useFireStore = defineStore('fire', () => {
       routePlans.value = []
       routeMatrix.value = null
       routeDeviceBindings.value = []
+      routeDirectionVerdicts.value = []
+      routeNoPathRouteIds.value = []
       routeBuildingId.value = bid
       return false
     }
@@ -3402,16 +3964,27 @@ export const useFireStore = defineStore('fire', () => {
   function setCurrentRoutePlan(zone, planId) {
     // 整栋楼语义：点选某条区域路线 = 切换到它所属的整栋楼方案（全楼同步）
     const plan = getRoutePlanById(planId)
-    if (plan && plan.buildingPlanId && buildingEvacuationPlans.value.some((p) => p.id === plan.buildingPlanId)) {
+    // R1（Stage 2-A 补充收口）：路线级门禁**先于分支判定**，与 selectEvacuationPlan
+    // （FIX-4）同一白名单口径（USABLE_ROUTE_STATUSES）。修复前本函数整栋楼分支无任何
+    // 状态检查、legacy 分支仅拦 DONE，且投影未命中（plan=null）时会把未知 id 写入
+    // perZone.recommendedId。BLOCKED / DONE / null / 未知 / 投影未命中一律拒绝，
+    // 且拒绝时**不改任何指针**（activeRoutePlanId / perZone.recommendedId 均不动）。
+    // ⚠️ 只约束**被选中的路线本身**：方案内其它分区路线不可用不拒绝整个方案，
+    //    正常分区的可执行性由 FIX-1/FIX-2/FIX-3 在执行层逐条收敛。
+    // ⚠️ 只读判定，不触碰路线的历史字段（completedAt / assignedTo / history）。
+    if (!plan || !USABLE_ROUTE_STATUSES.includes(plan.status)) {
+      console.warn('[fireStore] 拒绝设定当前路线：路线状态不可执行',
+        { id: planId, status: plan ? plan.status : '<absent>' })
+      return false
+    }
+    if (plan.buildingPlanId && buildingEvacuationPlans.value.some((p) => p.id === plan.buildingPlanId)) {
       return setActiveBuildingPlan(plan.buildingPlanId)
     }
     // ⚠️ LEGACY：仅旧单区域结构的本地投影，不改变权威方案
     if (!routeMatrix.value) return false
     const info = routeMatrix.value.perZone[zone || selectedZone.value]
     if (!info) return false
-    // Stage 1.3 K-2：DONE 是终态，不得被选为推荐路线；只读判定，不触碰其历史字段。
-    // 注意：本行**只**新增 DONE 拦截，沿用既有 BLOCKED 处理规则，不扩大状态规则。
-    if (plan && plan.status === 'DONE') return false
+    // （状态门禁已由上方统一执行；原 legacy 分支内的 DONE 单查被白名单判据覆盖）
     info.recommendedId = planId
     addNotification({
       title: '当前路线已设定',
@@ -3481,37 +4054,190 @@ export const useFireStore = defineStore('fire', () => {
     })
   }
 
-  // 根据路线出口方向自动联动沿途疏散灯
+  // 根据路线方向自动联动沿途疏散灯
   // P1.6.2：楼层归属用统一三元组判定 —— buildingId（兼容旧 buildingName）+ floorId + 路线途经楼层
+  //
+  // ⚠️ P1.8.2：方向不再取整层统一的 exitSide。旧实现按 `plan.exitSide` 把途经楼层
+  //    的**全部**疏散灯改写成同一个方向，整栋楼方案又是逐条路线调用本函数，
+  //    于是最终全场方向由「最后一条被遍历的路线」单方面决定（已验证缺陷）。
+  //    现在改为按路线路径几何逐台裁决，详见 shared/evacuation/deviceDirection.js。
+  //
+  // ⚠️ 整栋楼方案必须走 applyBuildingRoutesToDevices()（一次性传入全部路线裁决）。
+  //    禁止再写成 forEach(route => applyRouteToDevices(route))。
   function applyRouteToDevices(plan, bindingsAcc) {
     // B1-02：demo 模式下设备方向 / 应急态来自 DemoWorld.devices → WS → store
     if (demoGuard('applyRouteToDevices')) return bindingsAcc || []
     if (!plan) return
-    const buildingKey = plan.buildingId || plan.buildingName
-    const floorsPassed = plan.floorsPassed || []
+    // R3（Stage 2-A 补充收口）：本入口自身持有状态安全契约，不再依赖调用方自律 ——
+    // 它是导出 API（store 导出面），历史上出现过无门禁直调（DashboardView.pickPlan，
+    // 已只读复核确认为死代码）。BLOCKED / DONE / null / 未知 / status 缺失（无法验证
+    // 状态）一律拒绝，且在 applyRoutesToDevices（设备绑定 / 方向裁决 / 方向写入的
+    // 唯一执行体）**之前**返回 ⇒ 拒绝时零副作用（不写绑定、不写裁决、不改设备方向）。
+    // 上层门禁（FIX-3 adjustEvacuationDirection / FIX-4 selectEvacuationPlan）保留，
+    // 本处为纵深防御，两者判据同源（USABLE_ROUTE_STATUSES）。
+    // ⚠️ 兼容边界：合法路线视图必携 status（routeToRenderable 恒产出该字段；
+    //    reconciledRouteView 未命中时为 null）⇒「缺失即拒绝」不影响任何生产调用方；
+    //    测试 / E2E 夹具须显式携带可信 status（demo 短路先于本门禁，不受影响）。
+    if (!USABLE_ROUTE_STATUSES.includes(plan.status)) {
+      console.warn('[fireStore] 拒绝设备方向下发：路线状态不可执行',
+        { id: plan.id, status: plan.status === undefined ? '<absent>' : plan.status })
+      return bindingsAcc || []
+    }
     const bindings = bindingsAcc || []
-    asArray(devices.value).forEach((d) => {
-      if (
+    applyRoutesToDevices([plan], bindings)
+    if (!bindingsAcc) routeDeviceBindings.value = bindings
+    return bindings
+  }
+
+  /**
+   * 整栋楼方案的**唯一**设备联动入口：先把全部路线一次性裁决，再写设备。
+   * 逐条调用 applyRouteToDevices 会让后一条路线覆盖前一条，故此处禁止那样写。
+   * @param {object} bp 整栋楼方案（activeBuildingPlan 形状）
+   * @returns {Array<{routeId:string,deviceId:string,direction:string}>}
+   */
+  function applyBuildingRoutesToDevices(bp) {
+    if (demoGuard('applyRouteToDevices')) return []
+    if (!bp) return []
+    // FIX-2（Stage 2-A 遗留项）：设备绑定 / 方向裁决 / 方向写入之前必须核验权威协调
+    // 状态。修复前此处用 routeToRenderable 的种子 'NORMAL'，BLOCKED / DONE / 未知
+    // （投影未命中 ⇒ reconciledRouteView 返回 null 状态）都会被静默放行。
+    // ⚠️ 只剔除不可执行路线：部分分区不可用时正常分区照常下发，不无理由阻断整案。
+    const routes = (bp.routes || [])
+      .map((r) => reconciledRouteView(bp, r))
+      .filter((p) => p && USABLE_ROUTE_STATUSES.includes(p.status))
+    const bindings = []
+    if (!routes.length) {
+      // 全部路线不可执行：不得产生任何设备更新 / 残留绑定 / 陈旧裁决（裁决为覆盖式，
+      // 不重写会残留上一轮结论），也不启动应急灯强闪（无途经楼层）。
+      routeDeviceBindings.value = []
+      routeDirectionVerdicts.value = []
+      routeNoPathRouteIds.value = []
+      console.warn('[fireStore] 楼栋级设备下发中止：当前方案无可执行路线（BLOCKED/DONE/未知）')
+      return bindings
+    }
+    applyRoutesToDevices(routes, bindings)
+    routeDeviceBindings.value = bindings
+    return bindings
+  }
+
+  /**
+   * 内部实现（不单独做 demo 守卫，由上面的入口统一拦截）。
+   *   ① 应急照明灯：途经楼层全部进入应急强闪 —— 与方向无关，维持既有行为，
+   *      且**不因方向未定/冲突而回退**；
+   *   ② 疏散指示灯：按路线几何逐台裁决，**每台设备只写一次、只留一条绑定**。
+   *
+   * ⚠️ P1.8.2 第一阶段：只有 state === resolved 的设备才被写入方向。
+   *    conflict / undetermined / unlinked 一律**不写** d.direction（也不写 recommendedDirection），
+   *    并登记到 routeDirectionVerdicts —— 调用方（UI）必须据此显示「冲突 / 未裁决 / 未联动」，
+   *    **不得**把设备保留的旧 direction 当作本轮有效指引。
+   */
+  function applyRoutesToDevices(routes, bindingsAcc) {
+    const list = (routes || []).filter(Boolean)
+    if (!list.length) return bindingsAcc
+    const buildingKey = list[0].buildingId || list[0].buildingName
+    const floorsPassed = [...new Set(list.flatMap((r) => r.floorsPassed || []))]
+    const targets = asArray(devices.value).filter(
+      (d) =>
         d &&
         deviceInBuilding(d, buildingKey) &&
         // P1.7.3-B3：楼层只看 canonical floorId（别名 d.floor 不再作为第二套口径）
         floorsPassed.includes(floorIdOf(d)) &&
-        (d.type === 'evacuation_light' || d.type === 'emergency_light')
-      ) {
-        if (d.type === 'evacuation_light') {
-          const dir = plan.exitSide === 'right' ? 'right' : 'left'
-          d.direction = dir
-          d.recommendedDirection = dir
-          bindings.push({ routeId: plan.id, deviceId: d.id, direction: dir })
-        } else {
-          d.status = 'emergency'
-          d.brightness = 100
-          d.currentMode = 'emergency'
-        }
+        (d.type === 'evacuation_light' || d.type === 'emergency_light'),
+    )
+    // ① 应急照明灯（与方向裁决结果无关，不受未定/冲突影响）
+    targets.forEach((d) => {
+      if (d.type !== 'emergency_light') return
+      d.status = 'emergency'
+      d.brightness = 100
+      d.currentMode = 'emergency'
+    })
+    // ② 疏散指示灯
+    const lights = targets.filter((d) => d.type === 'evacuation_light')
+    const result = resolveDeviceDirections(
+      lights.map((d) => ({ id: d.id, x: d.x, y: d.y, floorId: floorIdOf(d) })),
+      // weight 只作为诊断信息进入 conflicts.candidates，不参与方向裁决
+      list.map((r) => ({ id: r.id, path: r.path, weight: r.congestion ?? r.personCount ?? null })),
+    )
+    const { bindings, undetermined, conflicts, unlinked, noPathRoutes } = result
+
+    // 登记本轮裁决状态（覆盖式：本轮结果不残留上一轮结论）
+    const verdicts = []
+    bindings.forEach((b) => {
+      verdicts.push({
+        deviceId: b.deviceId,
+        state: DIRECTION_VERDICT.RESOLVED,
+        routeId: b.routeId,
+        direction: b.direction,
+        distance: b.distance,
+        dx: b.dx,
+      })
+    })
+    undetermined.forEach((u) => {
+      verdicts.push({
+        deviceId: u.deviceId,
+        state: DIRECTION_VERDICT.UNDETERMINED,
+        routeId: u.routeId,
+        distance: u.distance,
+        dx: u.dx,
+        // P1.8.2 第二阶段：降级原因（corner-vertical-in-edge / no-horizontal-movement）
+        reason: u.reason || null,
+      })
+    })
+    conflicts.forEach((c) => {
+      verdicts.push({
+        deviceId: c.deviceId,
+        state: DIRECTION_VERDICT.CONFLICT,
+        distance: c.distance,
+        reason: c.reason,
+        candidates: c.candidates,
+      })
+    })
+    unlinked.forEach((u) => {
+      verdicts.push({ deviceId: u.deviceId, state: DIRECTION_VERDICT.UNLINKED, reason: u.reason })
+    })
+    routeDirectionVerdicts.value = verdicts
+    routeNoPathRouteIds.value = (noPathRoutes || []).filter((x) => x !== null && x !== undefined)
+
+    // 只有 resolved 才写设备；其余保持原值但**不被视为本轮结果**
+    const lightById = new Map(lights.map((d) => [d.id, d]))
+    bindings.forEach((b) => {
+      const d = lightById.get(b.deviceId)
+      if (!d) return
+      d.direction = b.direction
+      d.recommendedDirection = b.direction
+      // routeDeviceBindings 保持既有形状 {routeId, deviceId, direction}
+      if (!bindingsAcc.some((x) => x.deviceId === b.deviceId)) {
+        bindingsAcc.push({ routeId: b.routeId, deviceId: b.deviceId, direction: b.direction })
       }
     })
-    if (!bindingsAcc) routeDeviceBindings.value = bindings
-    return bindings
+    return bindingsAcc
+  }
+
+  /** 取某台设备的本轮路线裁决状态；未参与本轮裁决返回 null（UI 应显示"暂无本轮裁决"）。 */
+  function getRouteDirectionVerdict(deviceId) {
+    return routeDirectionVerdicts.value.find((v) => v.deviceId === deviceId) || null
+  }
+
+  /**
+   * P1.8.2 第二阶段（问题 C）：方向被**非路线途径**改写时，把该设备的裁决状态标记为
+   * `overridden`，使界面无法再把上一轮的 `resolved` 当作「当前方向有效」的依据。
+   *
+   * ⚠️ 只改前端裁决状态，**不新增设备协议字段、不下发任何远程命令**。
+   * @param {string} deviceId
+   * @param {string} direction 实际写入设备的方向
+   * @param {'manual'|'fire-avoidance'} source 覆盖来源
+   */
+  function markDirectionOverridden(deviceId, direction, source) {
+    const list = routeDirectionVerdicts.value
+    const entry = {
+      deviceId,
+      state: DIRECTION_VERDICT.OVERRIDDEN,
+      direction,
+      overrideSource: source,
+    }
+    const idx = list.findIndex((v) => v.deviceId === deviceId)
+    if (idx >= 0) list[idx] = entry
+    else list.push(entry)
   }
 
   function simulateRouteFire(building = '3号楼', floor = '5F', area = 'A区') {
@@ -3560,7 +4286,7 @@ export const useFireStore = defineStore('fire', () => {
     reconcileRouteStatuses()
   }
 
-  // -------- 手动模式（不影响自动算法，仅人工覆盖/编辑） --------
+  // -------- 自由绘制（草稿，不影响自动算法，也不进入独立可执行路线集合） --------
   function addManualNode(x, y, type = 'waypoint') {
     routeNodes.value.push({ id: `MN-${Date.now()}-${routeNodes.value.length}`, x, y, type, floor: routeFloorId.value })
   }
@@ -3575,42 +4301,32 @@ export const useFireStore = defineStore('fire', () => {
   function setManualExit(nodeId) {
     routeNodes.value.forEach((n) => (n.isExit = n.id === nodeId))
   }
+  // K-1B.2：自由绘制只生成草稿（manualRouteDrafts），不再注入 routePlans 候选列表，
+  // 也不得进入 manualExecutableRoutes（独立可执行路线）。
   function saveManualRoute() {
-    const buildingName = getRouteBuildingName(routeBuildingId.value)
-    const plan = {
-      id: `RP-MANUAL-${Date.now()}`,
-      name: '自定义方案',
+    const draft = {
+      id: `RP-MANUAL-DRAFT-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name: '自由绘制草稿',
+      type: 'manual-draft',
       buildingId: routeBuildingId.value,
-      buildingName,
       startFloor: routeFloorId.value,
-      startArea: '手动',
-      corridor: '走廊',
-      stair: '楼梯',
-      exit: '出口A',
-      exitLabel: '自定义出口',
-      exitSide: 'right',
-      desc: '管理员手动规划路线',
-      type: 'manual',
-      status: 'NORMAL',
-      recommended: false,
-      floorsPassed: [routeFloorId.value],
-      riskLevel: '低',
-      score: 90,
-      distance: 0,
-      estimatedTime: 0,
-      deviceCount: 0,
-      congestion: 0,
+      createdAt: Date.now(),
       manualNodes: JSON.parse(JSON.stringify(routeNodes.value)),
       manualEdges: JSON.parse(JSON.stringify(routeEdges.value)),
     }
-    routePlans.value.push(plan)
+    manualRouteDrafts.value.push(draft)
     addNotification({
-      title: '手动路线已保存',
-      message: '自定义疏散方案已加入候选列表',
+      title: '草稿已保存',
+      message: '自由绘制内容已保存为草稿（不可执行）',
       level: 'success',
       time: new Date().toLocaleTimeString('zh-CN'),
     })
-    return plan
+    return draft
+  }
+  function deleteManualRouteDraft(draftId) {
+    const before = manualRouteDrafts.value.length
+    manualRouteDrafts.value = manualRouteDrafts.value.filter((x) => !x || x.id !== draftId)
+    return manualRouteDrafts.value.length < before
   }
   function clearManualRoute() {
     routeNodes.value = []
@@ -3644,6 +4360,8 @@ export const useFireStore = defineStore('fire', () => {
     devices,
     dashboardView,
     operationLogs,
+    // K-1B.2：独立手动可执行路线（仅持久化原始路线数据，草稿不持久化）
+    manualExecutableRoutes,
   }
 
   let persistTimer = null
@@ -3678,6 +4396,26 @@ export const useFireStore = defineStore('fire', () => {
   restorePersistSnapshot()
   // 持久化快照可能是旧格式：恢复后统一升级为「人员统一契约」（保证 2D/3D 字段齐全）
   persons.value = normalizePersons(persons.value)
+  // K-1B.2：恢复后对独立手动路线做结构清洗 —— 区分「结构损坏（剔除）」与「拓扑失效（保留）」。
+  // 旧快照缺少 manualExecutableRoutes 字段时，restorePersistSnapshot 不写入，此处按空集合处理。
+  {
+    const sanitized = sanitizeManualExecutableRoutes(manualExecutableRoutes.value)
+    manualExecutableRoutes.value = sanitized.clean
+    if (sanitized.dropped.length) {
+      manualRoutesRestoreReport.value = sanitized.dropped
+      console.warn('[fireStore] 手动路线恢复：已剔除结构损坏记录（拓扑失效路线保留）', sanitized.dropped)
+    }
+  }
+  // RW-2：路线投影恢复清洗（结构剔除 + 未知 status 归一 null + 悬空引用清除 + routeMatrix 兜底）。
+  // 位置约束：必须在 restorePersistSnapshot 赋值之后、持久化 watch 注册之前 ——
+  // 避免清洗赋值触发防抖回写（watch 此时尚未注册）。
+  {
+    const sanitized = sanitizeRouteProjection()
+    if (sanitized.dropped.length) {
+      routeProjectionRestoreReport.value = sanitized.dropped
+      console.warn('[fireStore] 路线投影恢复：已剔除/降级无效数据（未知状态路线保留几何但不可执行）', sanitized.dropped)
+    }
+  }
 
   watch(
     Object.values(persistRefs),
@@ -3833,6 +4571,10 @@ export const useFireStore = defineStore('fire', () => {
     routeNodes,
     routeEdges,
     routeDeviceBindings,
+    // P1.8.2 第一阶段：本轮路线裁决状态（resolved / conflict / undetermined / unlinked）
+    routeDirectionVerdicts,
+    getRouteDirectionVerdict,
+    routeNoPathRouteIds,
     routeFireAutoSwitch,
     generateRoutePlans,
     // ── P1.8.2 Stage 1：出口运行态（后端唯一权威；导出供 UI 展示与验证注入） ──
@@ -3850,6 +4592,8 @@ export const useFireStore = defineStore('fire', () => {
     buildingEvacuationPlans,
     activeBuildingPlanId,
     activeBuildingPlan,
+    // RW-3（方案 B）：刷新后仅存整栋楼路线投影、无当前方案上下文的展示态标志
+    hasStaleRoutesWithoutActivePlan,
     evacuationScope,
     generateBuildingEvacuationPlans,
     setActiveBuildingPlan,
@@ -3864,6 +4608,8 @@ export const useFireStore = defineStore('fire', () => {
     getRouteSegmentForFloor,
     getAllZoneRoutes,
     applyRouteToDevices,
+    // P1.8.2：整栋楼方案的疏散灯联动唯一入口（多路线一次性裁决）
+    applyBuildingRoutesToDevices,
     simulateRouteFire,
     clearRouteFire,
     replanRoutesForFire,
@@ -3873,6 +4619,39 @@ export const useFireStore = defineStore('fire', () => {
     setManualExit,
     saveManualRoute,
     clearManualRoute,
+    deleteManualRouteDraft,
+    // ── K-1B.2：权威图统一暴露 + 独立手动可执行路线 ──
+    manualExecutableRoutes,
+    manualRouteDrafts,
+    manualRoutesRestoreReport,
+    authoritativeRouteGraph,
+    authGraphPath,
+    authGraphDraftId,
+    authGraphError,
+    authAdjacentNodeIds,
+    isAuthStartNode,
+    isAuthExitNode,
+    canAuthStep,
+    pickAuthGraphStart,
+    appendAuthGraphNode,
+    undoAuthGraphStep,
+    cancelAuthGraphSelection,
+    resetAuthGraphSelection,
+    loadAuthGraphRouteForEdit,
+    saveAuthGraphRoute,
+    createManualExecutableRoute,
+    replaceManualExecutableRoute,
+    deleteManualExecutableRoute,
+    buildManualExecutableRoute,
+    sanitizeManualExecutableRoutes,
+    // ── RW-2：持久化恢复时的路线投影清洗（结构剔除 / 未知状态归一 null / 悬空引用清除） ──
+    routeProjectionRestoreReport,
+    sanitizeRouteProjection,
+    // ── K-1B.3：安全准入（拓扑）+ 只读状态投影 ──
+    graphForBuilding,
+    validateManualRouteTopology,
+    manualRouteExitVerdict,
+    manualRouteStatusView,
     dashboardView,
     saveDashboardViewState,
     restoreDashboardView,

@@ -276,6 +276,12 @@
             </g>
           </g>
 
+          <!-- RW-3（方案 B）：历史路线水印（仅规划楼层；纯展示态，不参与门禁 / 不拦截点击） -->
+          <g v-if="floor.id === store.routeFloorId && store.hasStaleRoutesWithoutActivePlan" class="stale-routes-mark" pointer-events="none">
+            <rect :x="SVG_W / 2 - 132" :y="SVG_H / 2 - 20" width="264" height="40" rx="8" fill="rgba(15,23,42,0.88)" stroke="#F59E0B" stroke-width="1"/>
+            <text :x="SVG_W / 2" :y="SVG_H / 2 + 5" text-anchor="middle" font-size="13" font-weight="700" fill="#F59E0B">⚠️ 历史路线，请重新规划</text>
+          </g>
+
           <!-- 路网调试层 -->
           <g v-if="netTopo" class="net-debug" pointer-events="none">
             <rect v-for="(w, i) in netTopo.walls" :key="'dw' + i" :x="w.x" :y="w.y" :width="w.w" :height="w.h" fill="rgba(239,68,68,0.1)" stroke="rgba(239,68,68,0.4)" stroke-width="1" stroke-dasharray="4 3" />
@@ -898,7 +904,7 @@
       <div class="tt-row"><span class="tt-label">状态</span><span :class="['tt-status', getDeviceStatus(hoveredDevice)]"><span class="tt-dot"></span>{{ statusLabel(getDeviceStatus(hoveredDevice)) }}</span></div>
       <div class="tt-row"><span class="tt-label">类型</span><span>{{ typeLabel(hoveredDevice.type) }}</span></div>
       <div class="tt-row"><span class="tt-label">区域</span><span>{{ hoveredDevice.area }}</span></div>
-      <div v-if="hoveredDevice.type === 'evacuation_light'" class="tt-row"><span class="tt-label">方向</span><span class="num-font">{{ directionLabel(getDeviceDirection(hoveredDevice)) }}</span></div>
+      <div v-if="hoveredDevice.type === 'evacuation_light'" class="tt-row"><span class="tt-label">方向</span><span class="num-font">{{ directionText(hoveredDevice) }}</span></div>
       <div class="tt-row"><span class="tt-label">区域人数</span><span class="num-font">{{ getPersonCountInArea(hoveredDevice) }} 人</span></div>
     </div>
 
@@ -939,7 +945,7 @@
           <div class="info-item"><span class="i-label">楼栋</span><span class="i-value">{{ selectedDeviceView.buildingId }}</span></div>
           <div class="info-item"><span class="i-label">楼层</span><span class="i-value">{{ selectedDeviceView.floorId }}</span></div>
           <div class="info-item"><span class="i-label">区域</span><span class="i-value">{{ selectedDeviceView.area }}</span></div>
-          <div v-if="selectedDeviceView.type === 'evacuation_light'" class="info-item"><span class="i-label">方向</span><span class="i-value blue num-font">{{ directionLabel(selectedDeviceView.direction) }}</span></div>
+          <div v-if="selectedDeviceView.type === 'evacuation_light'" class="info-item"><span class="i-label">方向</span><span class="i-value blue num-font">{{ directionText(selectedDeviceView) }}</span></div>
           <div class="info-item"><span class="i-label">电量</span><span class="i-value num-font">{{ selectedDeviceView.battery }}%</span></div>
           <div class="info-item"><span class="i-label">通信</span><span class="i-value" :class="selectedDeviceView.communication === 'online' ? 'green' : 'red'">{{ selectedDeviceView.communication === 'online' ? '在线' : '离线' }}</span></div>
           <div class="info-item full"><span class="i-label">所在区域人数</span><span class="i-value num-font">{{ selectedDeviceView.areaPersons }} 人</span></div>
@@ -950,15 +956,16 @@
           <template v-if="selectedDeviceView.type === 'evacuation_light'">
             <div class="ctrl-label">调整方向</div>
             <div class="dir-pad">
-              <button class="dir-btn" :class="{ active: selectedDeviceView.direction === 'left' }" @click="switchDir('left')">
+              <button class="dir-btn" :class="{ active: selectedDirectionDisplay.direction === 'left' }" @click="switchDir('left')">
                 <span class="dir-arrow">←</span>
                 <span class="dir-label">向左</span>
               </button>
-              <button class="dir-btn" :class="{ active: selectedDeviceView.direction === 'right' }" @click="switchDir('right')">
+              <button class="dir-btn" :class="{ active: selectedDirectionDisplay.direction === 'right' }" @click="switchDir('right')">
                 <span class="dir-arrow">→</span>
                 <span class="dir-label">向右</span>
               </button>
             </div>
+            <div v-if="selectedOverrideNote" class="dir-override-note">{{ selectedOverrideNote }}</div>
           </template>
           <div class="action-btns">
             <button v-if="selectedDeviceView.type === 'evacuation_light' || selectedDeviceView.type === 'emergency_light'" class="act-btn emergency" @click="emergencyHighlight(selectedDevice)">
@@ -1163,6 +1170,12 @@ import { getFloorTopology } from '../mock/routeGraph'
 import {
   personInLocation, countPersonsInLocation, buildingIdOf, floorIdOf, zoneOf,
 } from '../../shared/person/personRuntime.js'
+// P1.8.2 F2：方向显示判定统一复用契约函数（与 EvacuationView 同源，不重复实现裁决规则）
+import {
+  resolveDirectionDisplay,
+  DIRECTION_VERDICT,
+  DIRECTION_OVERRIDE_SOURCE_LABELS,
+} from '../../shared/evacuation/deviceDirection.js'
 
 const store = useFireStore()
 const router = useRouter()
@@ -1619,8 +1632,18 @@ function getDeviceStatus(dev) {
   // 已直接改写设备 status，本地不再维护覆盖层
   return dev.status || 'normal'
 }
-function getDeviceDirection(dev) {
-  return dev.direction || 'right'
+// P1.8.2 F2：统一方向显示判定 —— 复用 resolveDirectionDisplay + 本轮裁决状态，
+// 不再把设备上保留的历史 direction 当作当前有效方向，也不再默认「缺方向 = 向右」。
+function directionDisplayOf(dev) {
+  if (!dev) return { showArrow: false, direction: null, isManualOverride: false }
+  const verdict = typeof store.getRouteDirectionVerdict === 'function'
+    ? store.getRouteDirectionVerdict(dev.id)
+    : null
+  return resolveDirectionDisplay(verdict, dev.direction)
+}
+function directionText(dev) {
+  const d = directionDisplayOf(dev)
+  return d.showArrow ? directionLabel(d.direction) : '—'
 }
 
 function statusColor(s) {
@@ -1652,7 +1675,10 @@ function haloFill(dev) {
   return statusColor(getDeviceStatus(dev))
 }
 function dirArrow(dev) {
-  return getDeviceDirection(dev) === 'left' ? '←' : '→'
+  const d = directionDisplayOf(dev)
+  // 无效方向（未裁决 / 冲突 / 未联动 / 从未裁决）⇒ 中性无方向占位，不再显示历史方向
+  if (!d.showArrow) return '—'
+  return d.direction === 'left' ? '←' : '→'
 }
 function haloR(dev) {
   const s = getDeviceStatus(dev)
@@ -1748,6 +1774,19 @@ const selectedDeviceView = computed(() => {
     name: devName(d),
     areaPersons: getPersonCountInArea(d),
   }
+})
+
+// P1.8.2 F2：选中设备的方向显示判定（与平面图 / tooltip 共用同一有效方向）
+const selectedDirectionDisplay = computed(() => directionDisplayOf(selectedDevice.value))
+// 本机覆盖提示：overridden 可显示本地覆盖方向，但必须明确「未下发设备」
+const selectedOverrideNote = computed(() => {
+  const dev = selectedDevice.value
+  const verdict = dev && typeof store.getRouteDirectionVerdict === 'function'
+    ? store.getRouteDirectionVerdict(dev.id)
+    : null
+  if (!verdict || verdict.state !== DIRECTION_VERDICT.OVERRIDDEN) return ''
+  const src = DIRECTION_OVERRIDE_SOURCE_LABELS[verdict.overrideSource] || '未下发设备'
+  return `本机覆盖（非本轮路线裁决）：${src}`
 })
 
 // ============ 交互 ============
@@ -2432,6 +2471,12 @@ watch(expandedFloor, () => {
 .dir-btn.active { border-color: #4CC9F0; background: rgba(76,201,240,0.15); color: #4CC9F0; }
 .dir-arrow { font-size: 22px; font-weight: bold; }
 .dir-label { font-size: 11px; }
+.dir-override-note {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #FBBF24;
+}
 .action-btns { display: flex; gap: 8px; margin-top: 12px; }
 .act-btn {
   flex: 1;

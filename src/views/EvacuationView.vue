@@ -64,13 +64,15 @@
           <div class="direction-control">
             <div class="section-label">当前指示方向</div>
 
-            <!-- 大方向箭头 -->
-            <div class="arrow-display" :class="statusClass">
+            <!-- 大方向箭头（★ 仅在本轮可靠裁决 / 本机覆盖时才渲染**带朝向**的箭头） -->
+            <div class="arrow-display" :class="{ [statusClass]: true, 'arrow-invalid': !directionDisplay.showArrow }">
               <div class="arrow-rings" :class="statusClass">
                 <div class="ring ring-1"></div>
                 <div class="ring ring-2"></div>
               </div>
-              <div class="arrow-wrapper" :style="{ transform: `rotate(${currentAngle}deg)` }">
+
+              <!-- 有有效方向（本轮路线裁决 / 本机覆盖）⇒ 渲染带朝向的箭头 -->
+              <div v-if="directionDisplay.showArrow" class="arrow-wrapper" :style="{ transform: `rotate(${currentAngle}deg)` }">
                 <svg width="100" height="100" viewBox="0 0 120 120" class="arrow-svg">
                   <defs>
                     <linearGradient id="arrow-grad-normal" x1="0" y1="0" x2="1" y2="0">
@@ -96,17 +98,36 @@
                   </g>
                 </svg>
               </div>
+
+              <!-- 无有效方向（未裁决 / 冲突 / 未联动 / 从未裁决）⇒ **无方向性**的占位图形。
+                   不使用「降低透明度 / 灰度 / 删除线弱化真实箭头」的做法 —— 那仍会指向历史方向。 -->
+              <div v-else class="arrow-placeholder" role="img" aria-label="本轮暂无有效方向">
+                <svg width="100" height="100" viewBox="0 0 120 120" class="arrow-svg">
+                  <circle cx="60" cy="60" r="36" fill="none" stroke="currentColor" stroke-width="3" stroke-dasharray="7 7" opacity="0.85"/>
+                  <line x1="42" y1="60" x2="78" y2="60" stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
+                </svg>
+                <span class="placeholder-caption">无有效方向</span>
+              </div>
             </div>
 
             <!-- 方向标签 -->
             <div class="direction-label">
-              <span class="dir-text num-font" :class="statusClass">{{ evacStore.currentDirectionLabel }}</span>
+              <span class="dir-text num-font" :class="{ [statusClass]: true, 'dir-stale': routeVerdictIsStale }">{{ evacStore.currentDirectionLabel }}</span>
+            </div>
+
+            <!-- 本轮路线裁决状态（P1.8.2 第二阶段 问题 A） -->
+            <div v-if="routeVerdictIsStale" class="route-verdict-note">
+              {{ routeVerdictLabel }}：设备仍保留旧方向「{{ storedDirectionLabel }}」，该值非本轮有效指引，已显示为无方向占位图形
+            </div>
+            <div v-else-if="directionDisplay.isManualOverride" class="route-verdict-note">
+              {{ routeVerdictLabel }}：{{ overrideSourceLabel }}
             </div>
 
             <!-- 设备状态 -->
             <div class="device-status-row">
               <span class="status-tag" :class="deviceStatusClass">{{ deviceStatusLabel }}</span>
               <span class="status-tag" :class="evacStore.currentDevice?.controllable ? 'cyan' : ''">{{ evacStore.currentDevice?.controllable ? '远程可控' : '仅本地控制' }}</span>
+              <span class="status-tag" :class="routeVerdictClass">本轮裁决：{{ routeVerdictLabel }}</span>
             </div>
 
             <!-- 方向选择（左 / 右） -->
@@ -115,7 +136,7 @@
               <div class="direction-pad">
                 <button
                   class="pad-btn left"
-                  :class="{ active: evacStore.currentDevice?.direction === 'left', disabled: evacStore.switching }"
+                  :class="{ active: directionDisplay.direction === 'left', disabled: evacStore.switching, unverified: !directionDisplay.showArrow }"
                   @click="selectDirection('left')"
                   title="向左"
                 >
@@ -124,7 +145,7 @@
                 </button>
                 <button
                   class="pad-btn right"
-                  :class="{ active: evacStore.currentDevice?.direction === 'right', disabled: evacStore.switching }"
+                  :class="{ active: directionDisplay.direction === 'right', disabled: evacStore.switching, unverified: !directionDisplay.showArrow }"
                   @click="selectDirection('right')"
                   title="向右"
                 >
@@ -137,17 +158,17 @@
             <!-- 切换方向按钮 -->
             <button
               class="switch-btn"
-              :class="{ switching: evacStore.switching, success: evacStore.switchResult === 'success' }"
+              :class="{ switching: evacStore.switching, success: evacStore.switchResult === 'local-only' }"
               @click="handleSwitchClick"
               :disabled="evacStore.switching"
             >
               <span v-if="evacStore.switching" class="btn-loading">
                 <span class="spinner"></span>
-                正在下发指令
+                正在更新本地方向
               </span>
-              <span v-else-if="evacStore.switchResult === 'success'" class="btn-success">
+              <span v-else-if="evacStore.switchResult === 'local-only'" class="btn-success">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                方向切换成功
+                本地方向已更新（未下发设备）
               </span>
               <span v-else class="btn-normal">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -159,6 +180,11 @@
                 切换指示方向
               </span>
             </button>
+
+            <!-- 下发通道说明（当前无真实设备下发通道，不得宣称下发成功） -->
+            <div v-if="!remoteDispatchAvailable" class="dispatch-note">
+              当前未接入真实设备下发通道：方向变更仅保存在本地，未下发至设备、无设备回执
+            </div>
 
             <!-- 模拟火源按钮 -->
             <button
@@ -446,6 +472,13 @@ import { useFireStore } from '../stores/fireStore'
 import { useDemoStore } from '../stores/demoStore'
 import { dataSource } from '../api'
 import { directionMap, directionAngle, floorOptions } from '../mock/evacuation'
+// P1.8.2 第一阶段：本轮路线裁决状态词汇（前端/审计用词，非设备协议字段）
+import {
+  DIRECTION_VERDICT,
+  DIRECTION_VERDICT_LABELS,
+  DIRECTION_OVERRIDE_SOURCE_LABELS,
+  resolveDirectionDisplay,
+} from '../../shared/evacuation/deviceDirection.js'
 import OperationLog from '../components/OperationLog.vue'
 // P1.6.1：人员「楼层 / 区域 / 楼栋」判定统一走契约 helper（buildingId / floorId / zone）
 // P1.7.3-B3：设备 / 火灾归属同样只认 canonical（buildingId / floorId / zone）
@@ -520,9 +553,12 @@ const fireSimulation = computed(() => !!fireStore.fireEvent)
 // P1.7.3-B3：火源区域读 canonical zone（fe.area 只是只读别名）
 const fireLocation = computed(() => zoneOf(fireStore.fireEvent || {}) || fireStore.riskAreas[0]?.zone || null)
 
-const currentDirectionLabel = computed(() =>
-  currentDevice.value ? directionMap[currentDevice.value.direction] : '—'
-)
+// ★ 问题 A：只有「本轮路线已裁决」或「本机覆盖」才显示方向；
+//   其余状态一律显示「—」，绝不把设备上保留的历史 direction 透出为当前有效指引。
+const currentDirectionLabel = computed(() => {
+  const d = directionDisplay.value.direction
+  return d ? directionMap[d] : '—'
+})
 
 const recommendedDirection = computed(() => {
   if (!currentDevice.value) return null
@@ -533,6 +569,55 @@ const recommendedDirection = computed(() => {
 const recommendedDirectionLabel = computed(() =>
   recommendedDirection.value ? directionMap[recommendedDirection.value] : '—'
 )
+
+/**
+ * ⚠️ P1.8.2 第一阶段：**当前不存在真实设备下发通道**
+ *   —— deviceService.update 全仓无调用点、WebSocket 出站仅 PING/SYNC、
+ *      HTTP 出站仅阶段指令（DEMO_COMMANDS 无设备方向指令）。
+ *   因此在通道建成前，方向切换只能表达「本地状态已变更」，
+ *   **不得**宣称指令已下发、设备已确认或已更新。
+ */
+const remoteDispatchAvailable = false
+
+// 本轮路线裁决状态（找不到即"暂无本轮裁决"，不得用设备旧 direction 冒充当轮结果）
+const routeVerdict = computed(() => {
+  const id = currentDeviceId.value
+  if (!id) return null
+  const fn = fireStore.getRouteDirectionVerdict
+  return typeof fn === 'function' ? fn(id) : null
+})
+const routeVerdictState = computed(() => routeVerdict.value?.state || null)
+const routeVerdictLabel = computed(() => {
+  const s = routeVerdictState.value
+  return s ? DIRECTION_VERDICT_LABELS[s] || s : '暂无本轮裁决'
+})
+const routeVerdictClass = computed(() => {
+  const s = routeVerdictState.value
+  if (s === DIRECTION_VERDICT.RESOLVED) return 'green'
+  if (s === DIRECTION_VERDICT.CONFLICT) return 'orange'
+  if (s === DIRECTION_VERDICT.OVERRIDDEN) return 'cyan'
+  return 'grey'
+})
+
+/**
+ * ★ 问题 A：箭头 / 方向文字渲染判定的**唯一**入口（纯函数 resolveDirectionDisplay，可单测）。
+ *   resolved / overridden 才给出可指引方向；其余状态 direction === null ⇒ 不渲染有效箭头。
+ *   设备里保留的历史 `direction` 不删除，只作为「旧值」在提示中展示。
+ */
+const directionDisplay = computed(() =>
+  resolveDirectionDisplay(routeVerdict.value, currentDevice.value?.direction || null)
+)
+/** 设备上仍保留方向值、但本轮并未可靠裁决 ⇒ 必须提示，不得渲染为有效箭头 */
+const routeVerdictIsStale = computed(() => directionDisplay.value.stale)
+/** 历史方向值（仅供展示 / 审计，界面明确标注为本轮无效） */
+const storedDirectionLabel = computed(() => {
+  const s = directionDisplay.value.storedDirection
+  return s ? directionMap[s] || s : '—'
+})
+const overrideSourceLabel = computed(() => {
+  const src = routeVerdict.value?.overrideSource
+  return src ? DIRECTION_OVERRIDE_SOURCE_LABELS[src] || src : ''
+})
 
 const moduleStatus = computed(() => {
   if (currentDevice.value?.risk) return 'emergency'
@@ -612,8 +697,10 @@ const deviceStatusClass = computed(() => {
 const currentAngle = ref(0)
 const targetAngle = ref(0)
 
+// ★ 旋转角只跟随**有效显示方向**（本轮裁决 / 本机覆盖），
+//   不再跟随设备上的历史 `direction` —— 否则无效状态仍会残留一个指向旧方向的旋转量。
 watch(
-  () => evacStore.currentDevice?.direction,
+  () => directionDisplay.value.direction,
   (newDir) => {
     if (newDir) {
       const newAngle = directionAngle[newDir]
@@ -669,10 +756,11 @@ function confirmSwitch() {
   setTimeout(() => {
     fireStore.switchEvacuationDirection(dev.id, newDirection, reason)
     switching.value = false
-    switchResult.value = 'success'
+    // 只表达**本地状态已变更**；无真实下发通道时不得宣称"下发成功 / 设备已更新"
+    switchResult.value = remoteDispatchAvailable ? 'dispatched' : 'local-only'
     pendingDirection.value = null
 
-    // 切换结果在按钮上以「方向切换成功」页面内反馈展示（不用弹窗）
+    // 结果在按钮上以页面内反馈展示（不用弹窗）
     setTimeout(() => {
       switchResult.value = null
     }, 3000)
@@ -952,6 +1040,61 @@ function confirmSwitch() {
 /* 疏散方向文字恒绿（绿色 = 疏散方向语义） */
 .dir-text.normal { color: #39FF88; }
 .dir-text.warning { color: #39FF88; }
+
+/* P1.8.2 第一阶段：本轮路线未裁决/冲突/未联动时，设备旧方向不得呈现为本轮有效指引 */
+/* 无效状态下方向文字恒为「—」（值由 directionDisplay.direction 决定），
+   故不再叠加删除线 —— 删除线只是弱化样式，仍会让用户误以为那是一个被划掉的方向值。 */
+.dir-text.dir-stale {
+  color: #94a3b8;
+}
+.route-verdict-note {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+}
+.dispatch-note {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #94a3b8;
+}
+.status-tag.grey {
+  color: #94a3b8;
+  border-color: rgba(148, 163, 184, 0.4);
+  background: rgba(148, 163, 184, 0.1);
+}
+.pad-btn.unverified {
+  opacity: 0.55;
+}
+/* 本轮未可靠裁决时，大箭头不得作为有效指引呈现 */
+/* 本轮未可靠裁决：带朝向的箭头根本不渲染（模板已切到占位图形），只弱化光环与发光 */
+.arrow-display.arrow-invalid .arrow-rings {
+  animation: none;
+  opacity: 0.3;
+}
+.arrow-display.arrow-invalid .arrow-svg {
+  filter: none;
+}
+/* 无方向性占位图形：虚线圆环 + 居中短横，左右完全对称，不暗示任何朝向 */
+.arrow-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+}
+.placeholder-caption {
+  font-size: 12px;
+  letter-spacing: 1px;
+  color: #94a3b8;
+}
 .dir-text.emergency { color: #39FF88; text-shadow: 0 0 8px rgba(57, 255, 136, 0.6); }
 
 /* 四向方向选择面板 */
