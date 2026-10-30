@@ -1,5 +1,13 @@
 # 智慧消防可视化指挥平台（Smart Fire Platform）
 
+[![Vue](https://img.shields.io/badge/Vue-3.x-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
+[![Vite](https://img.shields.io/badge/Vite-5.x-646CFF?logo=vite&logoColor=white)](https://vite.dev/)
+[![Three.js](https://img.shields.io/badge/Three.js-0.169-000000?logo=threedotjs&logoColor=white)](https://threejs.org/)
+[![Pinia](https://img.shields.io/badge/Pinia-2.x-FFD859?logo=pinia&logoColor=black)](https://pinia.vuejs.org/)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflareworkers&logoColor=white)](https://developers.cloudflare.com/workers/)
+[![Cloudflare D1](https://img.shields.io/badge/Cloudflare-D1-F38020?logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/d1/)
+[![License: All Rights Reserved](https://img.shields.io/badge/license-All%20Rights%20Reserved-red)](https://github.com/Sun12056/smart-fire-platform#license)
+
 面向高层建筑及复杂建筑消防场景的智慧消防可视化指挥平台，基于 Vue 3 + Three.js + Cloudflare Workers 构建，集成建筑数字孪生、消防设备管理、实时数据协同、火灾模拟演练、智能疏散路径规划及应急指挥等能力。
 
 项目采用前后端分离架构，通过统一的数据契约、Repository 数据访问层和共享疏散算法，实现 Mock、API、Demo 三种运行模式。平台目前已具备前后端业务数据闭环、后端实时状态机、WebSocket 实时广播及整栋楼疏散规划能力，正在持续推进疏散算法治理和系统能力完善。
@@ -861,3 +869,13 @@ docs/
 - 消防设备维修小程序：`fireFightingEipmentApplet` (https://github.com/Sun12056/fireFightingEipmentApplet)
 
 项目目标：建设集建筑数字孪生、消防感知、实时协同、火灾动力学仿真、智能疏散和应急指挥于一体的智慧消防平台。
+
+## License
+
+Copyright (c) 2026 忒忒
+
+All rights reserved.
+
+This project is proprietary software. No license is granted
+to use, copy, modify, distribute, or sublicense this software
+without prior written permission from the copyright owner.
