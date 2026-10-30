@@ -866,7 +866,6 @@ docs/
 
 - 主平台：`smart-fire-platform` (https://github.com/Sun12056/smart-fire-platform)
 - FDS 火灾动力学仿真：`fds` (https://github.com/Sun12056/fds)
-- 消防设备维修小程序：`fireFightingEipmentApplet` (https://github.com/Sun12056/fireFightingEipmentApplet)
 
 项目目标：建设集建筑数字孪生、消防感知、实时协同、火灾动力学仿真、智能疏散和应急指挥于一体的智慧消防平台。
 
