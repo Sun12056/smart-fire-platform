@@ -10,9 +10,8 @@ import { planEvacuationRoutes } from '../../../shared/evacuation/routePlanner.js
 import { buildBuildingGraph } from '../../../shared/evacuation/routeGraph.js'
 // 整栋楼疏散：一次火灾 = 一栋楼的一次整体疏散任务（火灾只描述位置，不改变疏散范围）
 import {
-  planBuildingStrategies, routeOfPerson, groupPersonsByZone, resolvePlanningZone,
+  planBuildingStrategies, routeOfPerson, groupPersonsByZone, resolvePlanningZone, auditZoneGroups,
 } from '../../../shared/evacuation/buildingEvacuationPlanner.js'
-import { zoneKeyOf } from '../../../shared/evacuation/buildingEvacuationTypes.js'
 // P1.8.2 Stage 1（D-1 = B）：出口运行态由后端统一持有，默认取静态权威定义
 import { defaultExitStates } from '../../../shared/evacuation/exitRuntime.js'
 // P2 确定性滞留：固定候选名单与推进上限（与前端 2D/3D 共用同一份人员 id）
@@ -184,11 +183,14 @@ export function applyStageEffects(
       world.legacyPlans = plans as DemoPlan[]
       // 整栋楼疏散方案（scope = BUILDING）：火灾只作为动态障碍，疏散范围始终是一栋楼
       // PLAN-A/B/C = 均衡 / 快速 / 安全，每套覆盖全部「有人员的 floorId + zone」
+      // RG-01：规划阶段必须与校验阶段传同一套坐标输入。走廊等公共区域的归属判定依赖 (x, y)，
+      // 缺坐标时 resolvePlanningZone 会判定「无法归属」（不会退化成 (0,0) 参与最近区域竞争）。
       const buildingRes = planBuildingStrategies({
         buildingId: scenario.buildingId,
         buildingName: scenario.buildingName,
         persons: buildingPersons(world).map((p) => ({
           id: p.id, buildingId: p.buildingId, floorId: p.floorId, zone: p.zone, status: p.status,
+          x: p.x, y: p.y,
         })),
         fire: { buildingId: scenario.buildingId, floorId: scenario.floorId, zone: scenario.zone },
         maxFloor: MAX_FLOOR,
@@ -442,18 +444,34 @@ export function validateConfirmedBuildingPlan(
   if (String(plan.buildingId) !== String(world.scenario.buildingId)) {
     return { ok: false, error: `方案楼栋 ${plan.buildingId} 与火情楼栋 ${world.scenario.buildingId} 不一致` }
   }
-  const groups = groupPersonsByZone(buildingPersons(world).map((p) => ({
-    id: p.id, buildingId: p.buildingId, floorId: p.floorId, zone: p.zone, status: p.status, x: p.x, y: p.y,
-  })), { buildingId: world.scenario.buildingId, graph: buildBuildingGraph(MAX_FLOOR) })
-  const missing = groups.filter((g) => !plan.routesByZone || !plan.routesByZone[zoneKeyOf(g.floorId, g.zone)])
+  const persons = buildingPersons(world)
+    .map((p) => ({
+      id: p.id, buildingId: p.buildingId, floorId: p.floorId, zone: p.zone, status: p.status, x: p.x, y: p.y,
+    }))
+    .filter((p) => !p.buildingId || String(p.buildingId) === String(world.scenario.buildingId))
+  const groups = groupPersonsByZone(persons, {
+    buildingId: world.scenario.buildingId, graph: buildBuildingGraph(MAX_FLOOR),
+  })
+  // RG-01：不无条件信任 g.zoneKey。统一由 shared auditZoneGroups 校验：
+  //   ① zoneKey 必须等于 zoneKeyOf(floorId, zone)（篡改 / 写错即拒绝）
+  //   ② 每个人都必须落在某个分组里（不静默丢人）
+  //   ③ 每个分组都必须有 routesByZone[zoneKey]
+  const audit = auditZoneGroups({ groups, persons, plan })
   const invalid = (plan.routes || []).filter((r) => !r.valid)
-  if (missing.length || invalid.length) {
+  if (!audit.ok || invalid.length) {
     return {
       ok: false,
-      error: `整栋楼方案不完整：${missing.length} 个有人区域缺少路线、${invalid.length} 条路线未通过校验`,
+      error: '整栋楼方案不完整：'
+        + `${audit.missing.length} 个有人区域缺少路线、`
+        + `${audit.inconsistent.length} 个分组键不一致、`
+        + `${audit.missingPersons.length} 名人员未纳入分组、`
+        + `${invalid.length} 条路线未通过校验`,
       detail: {
-        missing: missing.map((g) => g.zoneKey),
+        missing: audit.missing,
+        inconsistent: audit.inconsistent,
+        missingPersons: audit.missingPersons,
         invalid: invalid.map((r) => r.routeId),
+        reasons: audit.reasons,
       },
     }
   }

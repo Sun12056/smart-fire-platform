@@ -29,19 +29,42 @@ import { validateRoute } from './routeValidator.js'
 const finite = (v) => (isFinite(v) ? v : 0)
 
 /**
+ * 坐标是否可用作「空间位置」。
+ * null / undefined / 空串 / NaN / Infinity / 非数字字符串一律视为无效 ——
+ * 无效坐标绝不能被当成 (0,0) 参与最近区域比较（那会产生一个确定的错误归属）。
+ */
+export function isValidCoordinate(v) {
+  if (v === null || v === undefined || v === '') return false
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n)
+}
+
+/**
  * 人员 → 规划区域（起点必须在拓扑里是房间节点，否则路线无法通过 validateRoute）
  * 「走廊」等公共区域没有房间节点，按最近房间节点归属到同层某个区域，
  * 保证整栋楼每一个人都有合法起点与路线（不修改 routeGraph 的基础拓扑）。
+ *
+ * 三级判定：
+ *   ① 本身是房间区域（ZONE_NODE_KEY 命中且节点存在）→ 原值（归一化等价）
+ *   ② 公共区域 + 同层存在房间节点 + 坐标有效 → 最近房间节点的 zone
+ *   ③ 坐标无效 / 同层无房间节点 → 返回原始 zone（**不猜测**）。
+ *      此时该人员所在分组无法推导合法起点，由 planZoneRoutes 返回空候选，
+ *      最终进入 missingZones 使方案 valid=false —— 即「明确失败」，不静默回退。
  */
 export function resolvePlanningZone(graph, person) {
+  if (!person) return ''
   const floorId = String(person.floorId)
   const key = ZONE_NODE_KEY[person.zone]
-  if (key && graph.nodes[`${floorId}:${key}`]) return person.zone
+  if (key && graph && graph.nodes && graph.nodes[`${floorId}:${key}`]) return person.zone
+  if (!graph || !graph.nodes) return person.zone
+  if (!isValidCoordinate(person.x) || !isValidCoordinate(person.y)) return person.zone
+  const px = Number(person.x)
+  const py = Number(person.y)
   let best = null
   let bestD = Infinity
   Object.values(graph.nodes).forEach((n) => {
     if (n.floorId !== floorId || n.type !== NODE_TYPE.ROOM || !n.zone) return
-    const d = (n.x - Number(person.x || 0)) ** 2 + (n.y - Number(person.y || 0)) ** 2
+    const d = (n.x - px) ** 2 + (n.y - py) ** 2
     if (d < bestD) { bestD = d; best = n }
   })
   return best ? best.zone : person.zone
@@ -49,10 +72,19 @@ export function resolvePlanningZone(graph, person) {
 
 /**
  * ① 整栋楼人员 → 按 floorId + zone 分组（ evacuationScope = BUILDING 的基础）
- * @param {Array<{id:string, buildingId:string, floorId:string, zone:string, status?:string}>} persons
+ *
+ * 分组对象字段（RG-01 语义契约，三者必须同源）：
+ *   · zoneKey      —— `${floorId}:${zone}`，由**归一化后**的 zone 生成
+ *   · zone         —— 归一化后的规划区域（走廊人员 = 归属到的房间区域）
+ *   · sourceZones  —— 该组内出现过的**原始**区域（去重、按输入顺序；如 ['A区','走廊']）
+ * 因此 `zoneKey === zoneKeyOf(floorId, zone)` 恒成立，下游取路线不会出现
+ * 「键按归属后区域、区域字段仍是走廊」的错位。
+ *
+ * @param {Array<{id:string, buildingId:string, floorId:string, zone:string, status?:string, x?:number, y?:number}>} persons
  * @param {object} opts
  * @param {string} [opts.buildingId] 只统计该楼栋（不传则全部）
  * @param {string[]} [opts.excludeStatuses] 排除的状态（如已撤离 safe）
+ * @param {object} [opts.graph] 楼栋拓扑图；传入时走廊人员才会被归属到最近房间区域
  */
 export function groupPersonsByZone(persons = [], opts = {}) {
   const { buildingId = null, excludeStatuses = [], graph = null } = opts
@@ -64,16 +96,231 @@ export function groupPersonsByZone(persons = [], opts = {}) {
     // 走廊等公共区域不是房间节点 → 归到同层最近的房间区域（保证人人有合法起点）
     const zone = graph ? resolvePlanningZone(graph, p) : p.zone
     const key = zoneKeyOf(p.floorId, zone)
-    if (!map.has(key)) {
-      map.set(key, { zoneKey: key, floorId: p.floorId, zone: p.zone, personCount: 0, personIds: [] })
+    let g = map.get(key)
+    if (!g) {
+      // RG-01：zone 与 zoneKey 必须同源 —— zoneKey 由归一化后的 zone 生成，
+      // zone 就保存同一个归一化区域；原始区域另存 sourceZones，绝不回写 zone。
+      // （修复前这里写的是 p.zone，导致「分组键归到 A区、取路线却按走廊」）
+      g = { zoneKey: key, floorId: p.floorId, zone, sourceZones: [], personCount: 0, personIds: [] }
+      map.set(key, g)
     }
-    const g = map.get(key)
+    if (!g.sourceZones.includes(p.zone)) g.sourceZones.push(p.zone)
     g.personCount += 1
-    if (p.id) g.personIds.push(p.id)
+    // G5（RG-01-R1.3）：人员 id 是否入组必须与 normalizePersonId 的判定同源，
+    // 不再用真假值判断 —— 否则数字 0 会被丢弃（falsy），而 auditZoneGroups 却认它为有效 id '0'。
+    if (normalizePersonId(p.id)) g.personIds.push(p.id)
   }
   return [...map.values()].sort(
     (a, b) => floorNum(b.floorId) - floorNum(a.floorId) || String(a.zone).localeCompare(String(b.zone), 'zh'),
   )
+}
+
+/**
+ * 人员 id 规范化（RG-01-R1.2）：返回 '' 表示「无有效 id」，调用方必须据此报错，不得静默跳过。
+ *   · 字符串：只用 trim 结果判断是否空白，**不改变有效字符串原值**（'A001' 仍为 'A001'）
+ *   · 有限数字：转字符串（0 → '0'，不因 falsy 被拒绝）
+ *   · null / undefined / 对象 / 数组 / 布尔值 / NaN / Infinity / 其它类型：一律返回 ''
+ */
+const normalizePersonId = (v) => {
+  if (typeof v === 'string') {
+    return v.trim() === '' ? '' : v
+  }
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    return String(v)
+  }
+  return ''
+}
+
+/**
+ * 安全描述一个非法 id 原始值（RG-01-R1.3 / R1.4）—— 只用于构造错误文案，**不抛出**。
+ * JSON.stringify 对 BigInt 直接抛 TypeError、对循环引用对象也会抛，
+ * 因此这里只做类型安全的摘要：原始类型给值，引用类型只给类型标签，不做序列化。
+ *
+ * R1.4：仍有一类值会在摘要过程中抛错 —— 已撤销的 Proxy（`Array.isArray(revoked)` 抛
+ * TypeError）、以及被改写过的 `Symbol.prototype.toString` / `BigInt.prototype.toString`。
+ * 这里用**仅包住格式化**的局部 try/catch 兜住，返回占位符 `<unprintable>`。
+ * 严禁把 try/catch 上移到 auditZoneGroups 主体 —— 那会吞掉真正的审计业务异常。
+ */
+const describeIdValue = (v) => {
+  try {
+    if (v === null) return 'null'
+    if (v === undefined) return 'undefined'
+    const t = typeof v
+    if (t === 'string') return JSON.stringify(v)
+    if (t === 'number') return String(v)
+    if (t === 'boolean') return String(v)
+    if (t === 'bigint') return `${v.toString()}n`
+    if (t === 'symbol') return v.toString()
+    if (Array.isArray(v)) return '<array>'
+    return `<${t}>`
+  } catch {
+    // 只兜「文案格式化」本身：不影响任何判定规则，也不掩盖审计逻辑错误
+    return '<unprintable>'
+  }
+}
+
+/**
+ * 分组 → 方案覆盖一致性审计（Worker validateConfirmedBuildingPlan 与单测共用的唯一规则来源）
+ *
+ * 任一检查不通过 ⇒ ok=false，方案不可确认执行，客户端必须被拒绝：
+ *
+ *   ⓪ 输入结构：groups / persons / plan 缺失（null、undefined、非数组）**不等于**合法空集合 ——
+ *      返回明确失败，既不抛异常，也不静默跳过覆盖校验。合法空集合必须显式传 []。
+ *   ① 人员记录合法：persons 中每条记录必须是对象（拒绝 null / 非对象 / 数组），
+ *      且必须带有效 id（拒绝 null / 空串 / 纯空白串 / 对象 / 数组 / 布尔 / NaN / Infinity）。
+ *      非法记录一律写入 inputErrors 并参与最终 ok —— **任何人员记录都不允许被静默跳过**。
+ *   ② 组内自洽：zoneKey === zoneKeyOf(floorId, zone)；personIds 必须是数组且不含空 id；
+ *      personCount === personIds.length。
+ *   ③ 人员唯一性：每个人员 id 在全部分组中必须**恰好出现一次**（跨组重复或组内重复都拒绝）；
+ *      输入人员集合自身出现重复 id 同样拒绝。
+ *   ④ 人员覆盖：输入人员集合中的每个 id 都必须出现在某个分组里（不静默丢人）。
+ *   ⑤ 无越界：分组中不允许出现不属于输入人员集合的 id。
+ *   ⑥ 路线区域对应：routesByZone[zoneKey] 必须存在，且该路线对象必须属于本区域
+ *      （route.zone === group.zone 且 route.floorId === group.floorId）——
+ *      不允许其他区域的路线对象冒充当前区域路线。
+ *
+ * 明确不做（属 RG-02 执行门禁）：不重跑 validateRoute()，不校验墙体几何 / 完整拓扑 /
+ * 出口运行状态 / 路线评分 / routeId 唯一性。
+ *
+ * @param {object} opts
+ * @param {Array} opts.groups   groupPersonsByZone 的结果（必填；合法空集合请传 []）
+ * @param {Array} opts.persons  参与分组的人员（必填；合法空集合请传 []）
+ * @param {object} opts.plan    待校验的整栋楼方案（必填，需含 routesByZone）
+ * @returns {{
+ *   ok:boolean, reasons:string[],
+ *   inputErrors:string[], inconsistent:Array, missing:string[], missingPersons:string[],
+ *   duplicatePersons:Array, duplicatePersonIds:Array, extraPersonIds:string[],
+ *   countMismatch:Array, invalidRoutes:Array
+ * }}
+ */
+export function auditZoneGroups(opts = {}) {
+  const { groups, persons, plan } = opts || {}
+  const result = {
+    ok: false,
+    reasons: [],
+    inputErrors: [],
+    inconsistent: [],
+    missing: [],
+    missingPersons: [],
+    duplicatePersons: [],
+    duplicatePersonIds: [],
+    extraPersonIds: [],
+    countMismatch: [],
+    invalidRoutes: [],
+  }
+
+  // ⓪ 输入结构：缺失参数 ≠ 合法空集合
+  if (!Array.isArray(groups)) result.inputErrors.push('groups 缺失或不是数组（合法空集合请显式传 []）')
+  if (!Array.isArray(persons)) result.inputErrors.push('persons 缺失或不是数组（合法空集合请显式传 []）')
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) result.inputErrors.push('plan 缺失或不是对象')
+  if (result.inputErrors.length) {
+    result.reasons.push(...result.inputErrors)
+    return result
+  }
+
+  // ① 输入人员集合（非法记录必须留痕：不得静默跳过）
+  const inputIds = new Map() // id → 出现次数
+  persons.forEach((p, index) => {
+    // G1：null / undefined / 非对象 / 数组 一律判为非法记录
+    if (!p || typeof p !== 'object' || Array.isArray(p)) {
+      result.inputErrors.push(`persons[${index}] 不是有效的人员记录（null / 非对象 / 数组）`)
+      return
+    }
+    // G2 + G3：缺失 id、null id、空串、纯空白串、非字符串非有限数字 → 明确报错
+    const id = normalizePersonId(p.id)
+    if (!id) {
+      // 错误文案使用安全格式化：BigInt / Symbol / 循环引用对象都不能让审计自身抛异常
+      result.inputErrors.push(`persons[${index}] 缺少有效 id（原始值 ${describeIdValue(p.id)}）`)
+      return
+    }
+    inputIds.set(id, (inputIds.get(id) || 0) + 1)
+  })
+  inputIds.forEach((count, id) => {
+    if (count > 1) {
+      result.duplicatePersons.push({ id, count })
+      result.reasons.push(`输入人员 id 重复：${id} 出现 ${count} 次`)
+    }
+  })
+  if (result.inputErrors.length) result.reasons.push(...result.inputErrors)
+
+  // ② 分组结构自洽 + ⑤ 路线区域对应
+  const groupedIds = new Map() // id → 在全部 personIds 中出现的次数
+  groups.forEach((g, index) => {
+    if (!g) {
+      result.inconsistent.push({ index, reason: '分组对象为空' })
+      result.reasons.push(`第 ${index} 个分组对象为空`)
+      return
+    }
+    const expectedKey = zoneKeyOf(g.floorId, g.zone)
+    if (g.zoneKey !== expectedKey) {
+      result.inconsistent.push({ zoneKey: g.zoneKey, floorId: g.floorId, zone: g.zone, expectedKey })
+      result.reasons.push(`分组键不一致：zoneKey=${g.zoneKey}，但 floorId+zone 推导为 ${expectedKey}`)
+    }
+    if (!Array.isArray(g.personIds)) {
+      result.inconsistent.push({ zoneKey: g.zoneKey, reason: 'personIds 缺失或不是数组' })
+      result.reasons.push(`${g.zoneKey} 的 personIds 缺失或不是数组`)
+    } else {
+      if (g.personCount !== g.personIds.length) {
+        result.countMismatch.push({ zoneKey: g.zoneKey, personCount: g.personCount, idCount: g.personIds.length })
+        result.reasons.push(`${g.zoneKey} personCount=${g.personCount} 与 personIds.length=${g.personIds.length} 不一致`)
+      }
+      g.personIds.forEach((rawId) => {
+        const id = normalizePersonId(rawId)
+        if (!id) {
+          result.inconsistent.push({ zoneKey: g.zoneKey, reason: 'personIds 含空 id' })
+          result.reasons.push(`${g.zoneKey} 的 personIds 含空 id`)
+          return
+        }
+        groupedIds.set(id, (groupedIds.get(id) || 0) + 1)
+      })
+    }
+
+    const route = plan.routesByZone ? plan.routesByZone[g.zoneKey] : null
+    if (!route) {
+      result.missing.push(g.zoneKey)
+      result.reasons.push(`${g.zoneKey} 有 ${g.personCount} 人但没有疏散路线`)
+    } else if (route.zone !== g.zone || String(route.floorId) !== String(g.floorId)) {
+      result.invalidRoutes.push({
+        zoneKey: g.zoneKey, routeZone: route.zone, routeFloorId: route.floorId,
+        routeId: route.routeId,
+      })
+      result.reasons.push(
+        `${g.zoneKey} 的路线属于其他区域（route.zone=${route.zone} / route.floorId=${route.floorId}），`
+        + '不允许其他区域路线冒充当前区域路线',
+      )
+    }
+  })
+
+  // ③ 分组 id 唯一性 + ④ 越界检查
+  groupedIds.forEach((count, id) => {
+    if (count > 1) {
+      result.duplicatePersonIds.push({ id, count })
+      result.reasons.push(`分组中人员 id 重复：${id} 出现 ${count} 次（每个人员必须恰好出现在一个分组中）`)
+    }
+    if (!inputIds.has(id)) {
+      result.extraPersonIds.push(id)
+      result.reasons.push(`分组中出现不属于输入人员集合的 id：${id}`)
+    }
+  })
+
+  // ⑤ 人员覆盖：输入侧每个 id 都必须被分组吸收
+  inputIds.forEach((_, id) => {
+    if (!groupedIds.has(id)) result.missingPersons.push(id)
+  })
+  if (result.missingPersons.length) {
+    result.reasons.push(`${result.missingPersons.length} 名人员未纳入任何区域分组`)
+  }
+
+  result.ok = result.inputErrors.length === 0   // G4：输入错误必须参与最终结论
+    && result.inconsistent.length === 0
+    && result.missing.length === 0
+    && result.missingPersons.length === 0
+    && result.duplicatePersons.length === 0
+    && result.duplicatePersonIds.length === 0
+    && result.extraPersonIds.length === 0
+    && result.countMismatch.length === 0
+    && result.invalidRoutes.length === 0
+  return result
 }
 
 /**
