@@ -13,6 +13,7 @@
  */
 const {
   sleep, waitFor, check, summary,
+  markFailure, safeCleanup, cleanupCheck, resetToIdle,
   cmd, demoState, resetDemoSession, openPage, openDemoPanel, clickByText,
 } = require('./e2e-lib.cjs')
 
@@ -60,8 +61,16 @@ const ROUTE_FP = () => {
 /** 切换到 TOOL 无关的「下一个不同于当前」的方案 id */
 const nextPlanId = (ids, cur) => ids.find((x) => x !== cur) || cur
 
+const TITLE = 'P1.7.3-B4-01 专项回归（3D 直接订阅 activeBuildingPlan）'
+
 ;(async () => {
-  await resetDemoSession()
+  // WP-A3.1 / F-2：启动隔离失败 → 记录失败、输出汇总并中止本轮（不打开浏览器）
+  const isolated = await resetDemoSession()
+  check('测试隔离前置：启动 RESET 成功（失败则中止本轮）', isolated)
+  if (!isolated) {
+    summary(`${TITLE}（前置隔离失败，已中止）`)
+    return
+  }
   const { browser, page } = await openPage()
   const pageErrors = []
   page.on('pageerror', (e) => pageErrors.push(String(e.message).slice(0, 160)))
@@ -203,10 +212,16 @@ const nextPlanId = (ids, cur) => ids.find((x) => x !== cur) || cur
 
     check('全程无未捕获页面异常', pageErrors.length === 0, pageErrors.slice(0, 3))
   } finally {
-    await cmd('RESET').catch(() => {})
+    // WP-A3.1 / F-1+F-3：结束 RESET 失败必须进入统一台账（判红），且要复读确认已回到 IDLE
+    await cleanupCheck('测试隔离复位（结束 RESET）', () => resetToIdle())
     await sleep(600)
-    await browser.close()
-    summary('P1.7.3-B4-01 专项回归（3D 直接订阅 activeBuildingPlan）')
-    process.exitCode = 0
+    // 浏览器关闭失败仍只告警，不覆盖业务断言结果
+    await safeCleanup('浏览器关闭', () => browser.close())
+    // summary 内部按台账提升退出码（有失败即非零，且永不写回 0）
+    summary(TITLE)
   }
 })()
+  .catch((e) => {
+    console.error('B4-01 回归异常：', e)
+    markFailure()
+  })

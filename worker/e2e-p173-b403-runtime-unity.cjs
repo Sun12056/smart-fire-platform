@@ -26,8 +26,11 @@
  */
 const {
   sleep, waitFor, check, summary,
+  markFailure, safeCleanup, cleanupCheck, resetToIdle,
   cmd, resetDemoSession, openPage, openDemoPanel,
 } = require('./e2e-lib.cjs')
+// WP-A3 / A3-3：方向「期望侧」独立于产品的兜底逻辑（e2e-direction.cjs 零依赖、可单测）
+const { bucketDirections } = require('./e2e-direction.cjs')
 
 // DemoRoom.DEFAULT_SCENARIO：火情楼栋固定 B003 / 5F / A区（后端托管设备只覆盖这一栋）
 const FIRE_BLD = 'B003'
@@ -103,13 +106,22 @@ const readRuntime = () => {
   const allDevices = (s.devices || []).filter(Boolean)
   const authList = allDevices.filter((d) => String(d.buildingId) === bid)
   const authMap = new Map(allDevices.map((d) => [norm(d.id), d]))
-  const st = (d) => ({
-    status: norm(d.status),
-    currentMode: norm(d.currentMode),
-    direction: norm(d.direction) === 'left' ? 'left' : 'right',
-    brightness: Number(d.brightness),
-    emergencyFlash: !!d.emergencyFlash,
-  })
+  // ★ WP-A3 / A3-3：权威方向**保留原始值**，绝不在读取侧做 `=== 'left' ? 'left' : 'right'` 兜底。
+  //   缺失用哨兵字符串标记（undefined 键无法通过 page.evaluate 的序列化往返）。
+  const DIR_MISSING = '__dir_missing__'
+  const DIR_DOMAIN = ['left', 'right']
+  const rawDirOf = (d) => (d && d.direction !== undefined ? d.direction : DIR_MISSING)
+  const st = (d) => {
+    const dirRaw = rawDirOf(d)
+    return {
+      status: norm(d.status),
+      currentMode: norm(d.currentMode),
+      directionRaw: dirRaw,
+      dirLegal: DIR_DOMAIN.includes(String(dirRaw)),
+      brightness: Number(d.brightness),
+      emergencyFlash: !!d.emergencyFlash,
+    }
+  }
   const emergency = (d) =>
     !!d.emergencyFlash || norm(d.currentMode) === 'emergency' || norm(d.status) === 'emergency'
   const isLight = (d) => d.type === 'emergency_light' || d.type === 'evacuation_light'
@@ -146,6 +158,7 @@ const readRuntime = () => {
   // ── 2D：平面图 DOM 实际消费到的运行态（data-* 即渲染所用值，按 data-id 精确对齐权威）
   const nodes = Array.from(document.querySelectorAll('.plan-device'))
   const d2Mismatch = []
+  const d2Directions = []
   let d2NotInBuilding = 0
   const d2 = nodes.map((g) => {
     const id = norm(g.getAttribute('data-id'))
@@ -166,7 +179,10 @@ const readRuntime = () => {
     if (got.mode !== want.currentMode) diff.push('currentMode')
     if (got.flash !== String(emergency(dev))) diff.push('emergencyFlash')
     if (Number(got.brightness) !== want.brightness) diff.push('brightness')
-    if (isLight(dev) && got.dir !== want.direction) diff.push('direction')
+    // 方向单独收集（WP-A3 / A3-3）：既不吃兜底，也不允许被 `x.dir &&` 之类条件跳过
+    if (isLight(dev)) {
+      d2Directions.push({ id, type: dev.type, authRaw: want.directionRaw, downRaw: got.dir })
+    }
     if (diff.length) d2Mismatch.push({ id, type: dev.type, got, want, diff })
     return { ...got, matched: true }
   })
@@ -180,12 +196,16 @@ const readRuntime = () => {
     d3RuntimeMismatch: d3.filter((x) => x.runtime && (
       String(x.runtime.status) !== x.auth.status
       || String(x.runtime.currentMode) !== x.auth.currentMode
-      || String(x.runtime.direction) !== x.auth.direction
+      // 方向只在权威方向合法时参与逐字段比对；未知方向由 d3Directions 记为契约缺口
+      || (x.auth.dirLegal && String(x.runtime.direction) !== String(x.auth.directionRaw))
       || Number(x.runtime.brightness) !== x.auth.brightness
       || Boolean(x.runtime.emergencyFlash) !== x.auth.emergencyFlash
     )).map((x) => ({ id: x.id, kind: x.kind, runtime: x.runtime, auth: x.auth })),
-    d3DirMismatch: d3.filter((x) => x.dir && x.dir !== x.auth.direction)
-      .map((x) => ({ id: x.id, kind: x.kind, dir3d: x.dir, authDir: x.auth.direction })),
+    // 方向的原始对交给 Node 侧 e2e-direction.cjs 分桶（不做任何兜底、不做空值短路）
+    d3Directions: d3.map((x) => ({
+      id: x.id, kind: x.kind, authRaw: x.auth.directionRaw, downRaw: x.dir,
+    })),
+    d2Directions,
     d2Total: nodes.length,
     d2NotInBuilding,
     d2MissingRuntime: d2.filter((x) => x.status === null || x.id === '').length,
@@ -309,8 +329,38 @@ async function readLightingView(page) {
 const MODE_LABEL = { daily: '日常节能', induction: '人员感应增强', emergency: '应急照明' }
 const STATUS_LABEL = { normal: '在线', offline: '离线', emergency: '应急', warning: '异常' }
 
+/**
+ * 方向断言（WP-A3 / A3-3）—— 期望侧完全独立于产品的兜底逻辑：
+ *   · 权威方向合法（left / right）⇒ 下游必须逐台严格相等；下游缺失或非法同样算缺陷；
+ *   · 权威方向未知（null / 缺失 / 非法）⇒ 记为「契约缺口 D-01」，
+ *     既不计为通过，也不判为产品测试失败（产品语义统一由项目负责人另行裁决）。
+ */
+function assertDirections(label, records) {
+  const b = bucketDirections(records)
+  const brief = (list) => list.slice(0, 3)
+    .map((x) => ({ id: x.record.id, auth: x.cmp.auth.raw, rendered: x.cmp.down.raw }))
+  check(`${label}：合法方向逐台严格相等（left 不得被判成 right）`, b.mismatch.length === 0, brief(b.mismatch))
+  check(`${label}：渲染侧不得缺失或出现非法方向（不得静默跳过）`, b.missing.length === 0, brief(b.missing))
+  check(`${label}：存在可严格比对的合法方向样本（断言有意义）`, b.matched.length > 0,
+    { matched: b.matched.length, gaps: b.gaps.length, total: b.total })
+  if (b.gaps.length) {
+    console.log(`  ⚠ 契约缺口 D-01：${b.gaps.length} 台设备权威方向为 null/缺失/非法`
+      + `（${b.gaps.slice(0, 3).map((x) => `${x.record.id}=${JSON.stringify(x.cmp.auth.raw)}`).join(' / ')}），`
+      + '产品侧兜底为 right；按 WP-A3 决策 B 记为契约缺口，不计为产品失败，也不视为通过')
+  }
+  return b
+}
+
+const TITLE = 'P1.7.3-B4-03 专项回归（应急灯运行态三端统一）'
+
 ;(async () => {
-  await resetDemoSession()
+  // WP-A3.1 / F-2：启动隔离失败 → 记录失败、输出汇总并中止本轮（不打开浏览器）
+  const isolated = await resetDemoSession()
+  check('测试隔离前置：启动 RESET 成功（失败则中止本轮）', isolated)
+  if (!isolated) {
+    summary(`${TITLE}（前置隔离失败，已中止）`)
+    return
+  }
   const { browser, page } = await openPage()
   const pageErrors = []
   page.on('pageerror', (e) => pageErrors.push(String(e.message).slice(0, 160)))
@@ -325,10 +375,8 @@ const STATUS_LABEL = { normal: '在线', offline: '离线', emergency: '应急',
     const idle = await page.evaluate(readRuntime)
     check('基线 3D 已绑定火情楼栋灯具', idle.d3.length > 0,
       { d3: idle.d3.length, authLightTotal: idle.authLightTotal })
-    const dirIdle = idle.d3.filter((x) => x.kind === 'evacuation_light')
-    const dirIdleBad = dirIdle.filter((x) => x.dir && x.dir !== x.auth.direction)
-    check('基线 T3-a IDLE 时 3D 箭头方向 === 权威 direction', dirIdleBad.length === 0,
-      { checked: dirIdle.length, bad: dirIdleBad.slice(0, 3) })
+    const dirIdle = idle.d3Directions.filter((x) => x.kind === 'evacuation_light')
+    assertDirections('基线 T3-a 3D', dirIdle)
 
     // ═══ 推进到应急联动（后端翻转 direction + 置 emergency/brightness=100/emergencyFlash） ═══
     console.log('\n[推进] START_FIRE → ACTIVATE_RESPONSE')
@@ -361,17 +409,18 @@ const STATUS_LABEL = { normal: '在线', offline: '离线', emergency: '应急',
     const emOnFloor = run.floorLights.filter((d) => d.emergency)
     check('T6 火情楼层确实存在应急态灯具（样本有意义）', emOnFloor.length > 0,
       { floorLights: run.floorLights.length, emergency: emOnFloor.length })
+    assertDirections('T6 2D', run.d2Directions)
 
     // ═══ T3-b：后端翻转 direction 后 3D 必须收敛 ═══
     console.log('\n[T3-b] 后端翻转 direction 后 3D 箭头必须跟随权威')
-    const dirNow = run.d3.filter((x) => x.kind === 'evacuation_light')
-    const dirFlippedCount = dirNow.filter((x, i) => {
+    const dirNow = run.d3Directions.filter((x) => x.kind === 'evacuation_light')
+    const dirFlippedCount = dirNow.filter((x) => {
       const before = dirIdle.find((y) => y.id === x.id)
-      return before && before.auth.direction !== x.auth.direction
+      return before && String(before.authRaw) !== String(x.authRaw)
     }).length
-    check('T3-b 3D 箭头方向 === 权威 direction（翻转后）',
-      run.d3DirMismatch.length === 0,
-      { checked: dirNow.length, 后端翻转条数: dirFlippedCount, bad: run.d3DirMismatch.slice(0, 3) })
+    check('T3-b 样本有意义：后端确实翻转了 direction', dirFlippedCount > 0,
+      { checked: dirNow.length, 后端翻转条数: dirFlippedCount })
+    assertDirections('T3-b 3D（翻转后）', dirNow)
 
     // ═══ T2：3D 强闪只由设备 emergencyFlash 决定（非火情楼栋不得强闪） ═══
     console.log('\n[T2] 3D 应急强闪只能由设备自身 emergencyFlash 决定（全局 emergencyMode 不得污染）')
@@ -405,8 +454,8 @@ const STATUS_LABEL = { normal: '在线', offline: '离线', emergency: '应急',
     const rst = await page.evaluate(readRuntime)
     check('T7 RESET 后 3D 运行态仍与权威一致', rst.d3RuntimeMismatch.length === 0,
       rst.d3RuntimeMismatch.slice(0, 3))
-    check('T7 RESET 后 3D 箭头方向仍与权威一致', rst.d3DirMismatch.length === 0,
-      rst.d3DirMismatch.slice(0, 3))
+    assertDirections('T7 RESET 后 3D', rst.d3Directions.filter((x) => x.kind === 'evacuation_light'))
+    assertDirections('T7 RESET 后 2D', rst.d2Directions)
     check('T7 RESET 后 2D 运行态仍与权威一致',
       rst.d2MissingRuntime === 0 && rst.d2Mismatch.length === 0,
       { missing: rst.d2MissingRuntime, bad: rst.d2Mismatch.slice(0, 3) })
@@ -433,6 +482,7 @@ const STATUS_LABEL = { normal: '在线', offline: '离线', emergency: '应急',
     check('T8 新一轮 2D 运行态与权威一致',
       r2.d2MissingRuntime === 0 && r2.d2Mismatch.length === 0,
       { missing: r2.d2MissingRuntime, bad: r2.d2Mismatch.slice(0, 3) })
+    assertDirections('T8 新一轮 2D', r2.d2Directions)
 
     // ═══ T4 / T5 / T9：智能照明页（需切页，统一放在 3D / 2D 之后） ═══
     console.log('\n[T4] LightingView 呈现的亮度必须等于「当前选中的权威设备」')
@@ -473,10 +523,16 @@ const STATUS_LABEL = { normal: '在线', offline: '离线', emergency: '应急',
 
     check('全程无未捕获页面异常', pageErrors.length === 0, pageErrors.slice(0, 3))
   } finally {
-    await cmd('RESET').catch(() => {})
+    // WP-A3.1 / F-1+F-3：结束 RESET 失败必须进入统一台账（判红），且要复读确认已回到 IDLE
+    await cleanupCheck('测试隔离复位（结束 RESET）', () => resetToIdle())
     await sleep(600)
-    await browser.close()
-    summary('P1.7.3-B4-03 专项回归（应急灯运行态三端统一）')
-    process.exitCode = 0
+    // 浏览器关闭失败仍只告警，不覆盖业务断言结果
+    await safeCleanup('浏览器关闭', () => browser.close())
+    // summary 内部按台账提升退出码（有失败即非零，且永不写回 0）
+    summary(TITLE)
   }
 })()
+  .catch((e) => {
+    console.error('B4-03 回归异常：', e)
+    markFailure()
+  })
