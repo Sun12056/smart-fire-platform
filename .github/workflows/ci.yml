@@ -4,6 +4,7 @@ name: CI
 #   只跑「纯 Node、无外部服务、无浏览器」的测试：
 #     • 根目录单元测试（npm run test:unit）
 #     • 退出码 / 方向分类的纯 Node 验证（WP-A3 新增）
+#     • E2E Harness 的监管 / 超时机制纯 Node 验证（WP-A3.3 新增）
 #     • Worker 脚本测试（check-d1-config / deploy-guarded / seed-local）
 #   明确不做：D1 migration、真实 Seed、数据库写入、Wrangler 部署、
 #             依赖本机 Edge 的浏览器 E2E（不作为普通 CI 的前置条件）。
@@ -25,6 +26,7 @@ jobs:
   unit:
     name: 单元测试（Node 20）
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -58,6 +60,7 @@ jobs:
   worker-scripts:
     name: Worker 脚本测试（Node 20）
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
