@@ -1,0 +1,79 @@
+name: CI
+
+# WP-A3 / A3-4：最小基础 CI
+#   只跑「纯 Node、无外部服务、无浏览器」的测试：
+#     • 根目录单元测试（npm run test:unit）
+#     • 退出码 / 方向分类的纯 Node 验证（WP-A3 新增）
+#     • Worker 脚本测试（check-d1-config / deploy-guarded / seed-local）
+#   明确不做：D1 migration、真实 Seed、数据库写入、Wrangler 部署、
+#             依赖本机 Edge 的浏览器 E2E（不作为普通 CI 的前置条件）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: 单元测试（Node 20）
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      # test:unit 中 5 个测试文件 import 了 vite，必须安装根依赖；
+      # 只使用仓库现有 package-lock.json，不新增/升级任何依赖。
+      - name: 安装依赖（npm ci）
+        run: npm ci
+
+      - name: 单元测试
+        run: npm run test:unit
+
+      - name: E2E 退出码验证（纯 Node，不启动浏览器）
+        run: node worker/e2e-exit.test.cjs
+
+      - name: E2E 进程级监管与退出确认（纯 Node，不启动浏览器）
+        run: node worker/e2e-supervisor.test.cjs
+
+      - name: E2E 统一超时机制（纯 Node，不启动浏览器）
+        run: node worker/e2e-timeouts.test.cjs
+
+      - name: 方向期望负向验证（纯 Node，不启动浏览器）
+        run: node worker/e2e-direction.test.cjs
+
+  worker-scripts:
+    name: Worker 脚本测试（Node 20）
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 三个测试均为零外部依赖（仅 node: 内置模块 + 同目录本地模块），
+      # 因此无需安装 worker 依赖（也避免引入 playwright-core）。
+      - name: check-d1-config
+        run: node worker/scripts/check-d1-config.test.mjs
+
+      - name: deploy-guarded
+        run: node worker/scripts/deploy-guarded.test.mjs
+
+      - name: seed-local
+        run: node worker/scripts/seed-local.test.mjs
