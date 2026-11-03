@@ -10,8 +10,14 @@ import {
   resolveDeviceDirections,
   routeDirectionAtDevice,
   resolveDirectionDisplay,
+  validDisplayDirection,
+  overrideSourceLabelOf,
   DIRECTION_MIN_DX,
   DIRECTION_VERDICT,
+  DIRECTION_VERDICT_LABELS,
+  DIRECTION_OVERRIDE_SOURCE_LABELS,
+  DIRECTION_DISPLAY_DOMAIN,
+  OVERRIDE_DISPLAYABLE_SOURCES,
 } from './deviceDirection.js'
 import { buildBuildingGraph, dijkstra } from './routeGraph.js'
 // 规则乙复核用：真实整栋楼规划器（与手写 dijkstra 夹具互为交叉验证，见第十六组）
@@ -452,6 +458,83 @@ console.log('=== 十六、真实规划器（planZoneRoutes + BALANCED）路径�
   check('真实 BALANCED 方案下无冲突', r.conflicts.length === 0, r.conflicts)
   const dirs = new Set(r.bindings.map((b) => b.direction))
   check('真实 BALANCED 下仍同时存在 left 与 right（未整层统一）', dirs.has('left') && dirs.has('right'), [...dirs])
+}
+
+console.log('')
+console.log('=== 十七、方向显示白名单与覆盖来源（R-01 / R-08 / R-11）===')
+{
+  // 本组验证 resolveDirectionDisplay 的显示口径：
+  //   ① 可显示来源只有 resolved / remote / overridden(manual)；
+  //   ② 避火自动反向与未知来源一律不显示方向，但来源必须可读出；
+  //   ③ 方向载荷（含设备历史值）一律过 left/right 白名单，非法即 fail-closed。
+  const v = (state, direction, overrideSource) => ({ state, direction, overrideSource })
+
+  const remote = resolveDirectionDisplay(v(DIRECTION_VERDICT.REMOTE, 'left'), 'right')
+  check('① remote ⇒ 渲染箭头且输出下发方向', remote.showArrow === true && remote.direction === 'left', remote)
+  check('① remote 不算本轮路线裁决（isValidRouteGuidance=false）', remote.isValidRouteGuidance === false, remote)
+  check('① remote 标记 isRemoteGuidance=true 且非 stale', remote.isRemoteGuidance === true && remote.stale === false, remote)
+  check('① remote 不拿历史值顶替（storedDirection 只作展示）', remote.direction === 'left' && remote.storedDirection === 'right', remote)
+
+  const manual = resolveDirectionDisplay(v(DIRECTION_VERDICT.OVERRIDDEN, 'right', 'manual'), 'left')
+  check('② overridden(manual) ⇒ 渲染箭头', manual.showArrow === true && manual.direction === 'right', manual)
+  check('② overridden(manual) ⇒ isManualOverride=true / isOverridden=true', manual.isManualOverride === true && manual.isOverridden === true, manual)
+  check('② overridden(manual) 不算本轮路线裁决', manual.isValidRouteGuidance === false && manual.isRemoteGuidance === false, manual)
+
+  const avoid = resolveDirectionDisplay(v(DIRECTION_VERDICT.OVERRIDDEN, 'left', 'fire-avoidance'), 'left')
+  check('★ ③ overridden(fire-avoidance) ⇒ 不渲染箭头', avoid.showArrow === false, avoid)
+  check('★ ③ overridden(fire-avoidance) ⇒ direction 为 null', avoid.direction === null, avoid)
+  check('★ ③ overridden(fire-avoidance) ⇒ isManualOverride=false', avoid.isManualOverride === false, avoid)
+  check('③ overridden(fire-avoidance) ⇒ stale=true（有历史值必须提示）', avoid.stale === true, avoid)
+  check('③ overridden(fire-avoidance) ⇒ 来源透出（UI 须显示「避火自动反向」）',
+    avoid.overrideSource === 'fire-avoidance' && overrideSourceLabelOf('fire-avoidance') === '避火自动反向，非路线裁决', avoid)
+
+  const future = resolveDirectionDisplay(v(DIRECTION_VERDICT.OVERRIDDEN, 'right', 'some-future-source'), 'left')
+  check('★ ④ 未知覆盖来源 ⇒ 不渲染箭头', future.showArrow === false && future.direction === null, future)
+  check('★ ④ 未知覆盖来源 ⇒ 文案为「未知覆盖来源（不作有效指引）」',
+    overrideSourceLabelOf('some-future-source') === '未知覆盖来源（不作有效指引）', overrideSourceLabelOf('some-future-source'))
+  const noSource = resolveDirectionDisplay(v(DIRECTION_VERDICT.OVERRIDDEN, 'right'), 'left')
+  check('④ 覆盖来源缺失（undefined）同样按未知处理', noSource.showArrow === false && noSource.isManualOverride === false, noSource)
+
+  for (const bad of ['up', 'RIGHT', 'left ', '', null, undefined]) {
+    const d = resolveDirectionDisplay(v(DIRECTION_VERDICT.RESOLVED, bad), 'left')
+    check(`★ ⑤ resolved + 非法方向 ${JSON.stringify(bad)} ⇒ 无箭头且 invalidDirection=true`,
+      d.showArrow === false && d.direction === null && d.invalidDirection === true, d)
+  }
+  check('⑤ 白名单原样放行合法值', validDisplayDirection('left') === 'left' && validDisplayDirection('right') === 'right',
+    [validDisplayDirection('left'), validDisplayDirection('right')])
+  check('⑤ 白名单域只有 left / right', DIRECTION_DISPLAY_DOMAIN.length === 2, [...DIRECTION_DISPLAY_DOMAIN])
+
+  for (const st of [DIRECTION_VERDICT.CONFLICT, DIRECTION_VERDICT.UNDETERMINED, DIRECTION_VERDICT.UNLINKED, 'future-state']) {
+    const d = resolveDirectionDisplay(v(st, 'up'), 'left')
+    check(`★ ⑥ ${st} + 非法载荷 ⇒ 无箭头且 invalidDirection=false（只在可显示状态置位）`,
+      d.showArrow === false && d.invalidDirection === false, d)
+  }
+
+  const badStored = resolveDirectionDisplay(v(DIRECTION_VERDICT.CONFLICT), 'RIGHT')
+  check('★ ⑦ 设备历史方向非法 ⇒ storedDirection=null 且 stale=false',
+    badStored.storedDirection === null && badStored.stale === false, badStored)
+
+  for (const st of Object.values(DIRECTION_VERDICT)) {
+    check(`⑧ 状态 ${st} 有中文标签`, typeof DIRECTION_VERDICT_LABELS[st] === 'string' && DIRECTION_VERDICT_LABELS[st].length > 0,
+      DIRECTION_VERDICT_LABELS[st])
+  }
+  check('⑧ 覆盖来源标签含 manual / fire-avoidance / unknown',
+    ['manual', 'fire-avoidance', 'unknown'].every((k) => typeof DIRECTION_OVERRIDE_SOURCE_LABELS[k] === 'string'),
+    Object.keys(DIRECTION_OVERRIDE_SOURCE_LABELS))
+  check('⑧ 可显示覆盖来源仅 manual', OVERRIDE_DISPLAYABLE_SOURCES.length === 1 && OVERRIDE_DISPLAYABLE_SOURCES[0] === 'manual',
+    [...OVERRIDE_DISPLAYABLE_SOURCES])
+
+  for (const st of [DIRECTION_VERDICT.NONE, DIRECTION_VERDICT.CONFLICT, DIRECTION_VERDICT.UNDETERMINED, DIRECTION_VERDICT.UNLINKED]) {
+    const d = resolveDirectionDisplay(v(st, 'left'), 'left')
+    check(`⑨ ${st} + 合法历史值 ⇒ 无箭头、direction=null、stale=true`,
+      d.showArrow === false && d.direction === null && d.stale === true, d)
+  }
+  check('⑨ verdict=null ⇒ 状态归一 none', resolveDirectionDisplay(null, 'left').state === DIRECTION_VERDICT.NONE,
+    resolveDirectionDisplay(null, 'left').state)
+
+  const samples = [remote, manual, avoid, future, badStored, noSource, resolveDirectionDisplay(null, 'right')]
+  check('★ ⑩ 不变式：direction !== null ⇔ showArrow',
+    samples.every((d) => (d.direction !== null) === d.showArrow), samples.map((d) => [d.direction, d.showArrow]))
 }
 
 console.log('')

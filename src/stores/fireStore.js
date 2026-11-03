@@ -86,7 +86,7 @@ import { generateFloorDevices, FLOOR_CONFIG, ROOMS as PLAN_ROOMS, STAIRS as PLAN
 import { buildSeedDevices } from '../mock/deviceSeed'
 // P1.8.2：疏散灯方向按「路线路径几何 + 设备位置」逐台裁决（取代整层统一的 exitSide）
 // P1.8.2 第一阶段：裁决结果状态词汇（resolved / conflict / undetermined / unlinked）
-import { resolveDeviceDirections, DIRECTION_VERDICT } from '../../shared/evacuation/deviceDirection.js'
+import { resolveDeviceDirections, DIRECTION_VERDICT, validDisplayDirection } from '../../shared/evacuation/deviceDirection.js'
 // 双数据源（mock / api）与 Service 层 —— 见 docs/API_CONTRACT.md
 import { dataSource } from '../api'
 import { buildingService } from '../services/buildingService'
@@ -577,6 +577,7 @@ export const useFireStore = defineStore('fire', () => {
     if (Array.isArray(snap.devices)) {
       const dmap = new Map(snap.devices.map((d) => [String(d.id), d]))
       const authoritative = dataSource.isDemo
+      const demoVerdicts = []
       asArray(devices.value).forEach((d) => {
         if (!d) return
         captureBusinessSeed(d, DEVICE_BUSINESS_FIELDS)
@@ -588,7 +589,12 @@ export const useFireStore = defineStore('fire', () => {
         }
         assignDeviceRuntime(d, r)
         if (authoritative) applyStrictDeviceRuntime(d, r)
+        // R-11：只为「本次快照命中的灯具」投影裁决；未命中的设备天然无条目（回落 none）
+        if (authoritative && (d.type === 'evacuation_light' || d.type === 'emergency_light')) {
+          demoVerdicts.push(demoDirectionVerdictOf(d, r))
+        }
       })
+      if (authoritative) projectDemoDirectionVerdicts(demoVerdicts)
     }
     // ⑤ 照明
     if (snap.lighting) {
@@ -729,6 +735,48 @@ export const useFireStore = defineStore('fire', () => {
     if ('recommendedDirection' in target) target.recommendedDirection = n.direction
     target.brightness = n.brightness
     target.emergencyFlash = n.emergencyFlash
+  }
+
+  /**
+   * R-11：demo 快照 → 方向裁决投影的**单台设备**映射。
+   * 权威输入：`deviceId` 取 store 设备 id（与快照按 String(id) 对齐）；
+   * 方向取 **DTO 原值 `dto.direction`**（不是已过 directionOf 默认值的 target.direction）；
+   * 非法/缺失一律不产出方向（fail-closed），只记入 undetermined 供审计。
+   */
+  function demoDirectionVerdictOf(device, dto) {
+    const raw = dto ? dto.direction : undefined
+    const dir = validDisplayDirection(raw)
+    const deviceId = String(device.id)
+    if (dir) {
+      return { deviceId, state: DIRECTION_VERDICT.REMOTE, direction: dir, source: 'demo-backend' }
+    }
+    const missing = raw === undefined || raw === null || raw === ''
+    return {
+      deviceId,
+      state: DIRECTION_VERDICT.UNDETERMINED,
+      source: 'demo-backend',
+      reason: missing ? 'backend-direction-missing' : 'backend-direction-invalid',
+    }
+  }
+
+  /** 裁决表内容签名：demo 投影的幂等基准（取自当前表，不设影子状态） */
+  function directionVerdictSignature(list) {
+    return (Array.isArray(list) ? list : [])
+      .map((v) => `${v.deviceId}|${v.state}|${v.direction || ''}|${v.reason || ''}`)
+      .sort()
+      .join('\n')
+  }
+
+  /**
+   * R-11：把 demo 快照投影写入裁决表。
+   * 契约：仅 demo 模式（反向守卫）、**整表替换**、与当前表内容相同则跳过。
+   */
+  function projectDemoDirectionVerdicts(entries) {
+    if (!dataSource.isDemo) return
+    const list = Array.isArray(entries) ? entries : []
+    // 幂等基准取自当前表：表被清空或改写（含 manual 覆盖）后，相同快照必须重新写入
+    if (directionVerdictSignature(list) === directionVerdictSignature(routeDirectionVerdicts.value)) return
+    routeDirectionVerdicts.value = list
   }
 
   /**
@@ -972,13 +1020,18 @@ export const useFireStore = defineStore('fire', () => {
   const routeEdges = ref([]) // 手动模式连线
   const routeDeviceBindings = ref([]) // 路线-设备方向绑定
   /**
-   * P1.8.2 第一阶段：**本轮路线裁决结果**（按设备），是「本轮方向是否有效」的唯一依据。
+   * P1.8.2：**方向裁决表**（按设备），是「当前方向能否作为指引显示」的唯一依据。
+   * 两个主写者互斥：非 demo 模式 = 路线裁决（applyRoutesToDevices）；
+   * demo 模式 = 后端运行时投影（projectDemoDirectionVerdicts）。
    *
-   * ⚠️ 不得再用设备旧有的 `direction` 字段反推本轮结果：未产出绑定时设备保持旧值，
-   *    旧值只代表上一次写入，**不是**本轮路线指引。
-   * 元素形状：{deviceId, state, routeId?, direction?, distance?, dx?, candidates?, reason?}
+   * ⚠️ 不得再用设备旧有的 `direction` 字段反推本轮结果：未产出裁决时设备保持旧值，
+   *    旧值只代表上一次写入，**不是**本轮有效指引。
+   * ⚠️ 写入契约：只允许**整表替换**（引用变化是唯一失效信号）；就地改写会让显示层漏检。
+   * 元素形状：{deviceId, state, routeId?, direction?, distance?, dx?, candidates?, reason?, overrideSource?, source?}
    */
   const routeDirectionVerdicts = ref([])
+  /** 裁决表索引（deviceId → verdict）：显示层 O(1) 查询，随整表替换自动失效 */
+  const directionVerdictIndex = computed(() => new Map(routeDirectionVerdicts.value.map((v) => [v.deviceId, v])))
   /** 本轮因缺少 path 几何而未参与裁决的路线（典型：手动路线），非空时 UI 须明示「未联动」 */
   const routeNoPathRouteIds = ref([])
   const routeFireAutoSwitch = ref(false) // 火灾是否触发过自动重规划
@@ -4223,21 +4276,23 @@ export const useFireStore = defineStore('fire', () => {
    * `overridden`，使界面无法再把上一轮的 `resolved` 当作「当前方向有效」的依据。
    *
    * ⚠️ 只改前端裁决状态，**不新增设备协议字段、不下发任何远程命令**。
+   * ⚠️ 写入方式为**整表替换**（过滤同 deviceId 后追加），不得就地改写：显示层的缓存失效
+   *    与 E2E 采集都以「数组引用变化」为信号。
    * @param {string} deviceId
    * @param {string} direction 实际写入设备的方向
    * @param {'manual'|'fire-avoidance'} source 覆盖来源
    */
   function markDirectionOverridden(deviceId, direction, source) {
-    const list = routeDirectionVerdicts.value
     const entry = {
       deviceId,
       state: DIRECTION_VERDICT.OVERRIDDEN,
       direction,
       overrideSource: source,
     }
-    const idx = list.findIndex((v) => v.deviceId === deviceId)
-    if (idx >= 0) list[idx] = entry
-    else list.push(entry)
+    routeDirectionVerdicts.value = [
+      ...routeDirectionVerdicts.value.filter((v) => v.deviceId !== deviceId),
+      entry,
+    ]
   }
 
   function simulateRouteFire(building = '3号楼', floor = '5F', area = 'A区') {
@@ -4571,8 +4626,9 @@ export const useFireStore = defineStore('fire', () => {
     routeNodes,
     routeEdges,
     routeDeviceBindings,
-    // P1.8.2 第一阶段：本轮路线裁决状态（resolved / conflict / undetermined / unlinked）
+    // P1.8.2：方向裁决表（resolved / remote / conflict / undetermined / unlinked / overridden）
     routeDirectionVerdicts,
+    directionVerdictIndex,
     getRouteDirectionVerdict,
     routeNoPathRouteIds,
     routeFireAutoSwitch,

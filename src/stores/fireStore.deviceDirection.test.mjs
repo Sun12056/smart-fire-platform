@@ -572,6 +572,229 @@ console.log('=== 十七、无效状态不显示带朝向的箭头（源码级显
   check('未删除设备 direction 字段的读取（仅用于历史展示）', /currentDevice\.value\?\.direction/.test(src))
 }
 
+console.log('')
+console.log('=== 十八、Demo 快照裁决投影 / 索引 / 覆盖写不可变（R-11）===')
+{
+  const origMode = dataSource.mode
+  const dtoOf = (d, direction) => ({ id: d.id, type: d.type, direction })
+  const runSnap = (devices) => store.applyDemoSnapshot({ devices })
+  const lights = lights5F()
+
+  // ── S11 非 demo 路线裁决不产出 remote（两写者互斥）──
+  // ⚠️ 顺序约束：必须在任何 demo 快照介入之前执行。demo 快照会让方案投影切到 demo
+  //    语义，随后 applyBuildingPlans 的路线校验不再通过；这是「运行期切换数据源」的
+  //    测试态产物，生产环境 dataSource.mode 启动后不再变化。
+  resetDevices()
+  applyBpRoutes(ROUTES)
+  const routeStates = new Set((store.routeDirectionVerdicts || []).map((v) => v.state))
+  check('S11 非 demo 路线裁决不产出 remote 且存在路线裁决状态',
+    !routeStates.has('remote') && (routeStates.has('resolved') || routeStates.has('undetermined')), [...routeStates])
+
+  try {
+    // ── S1 投影正确：命中快照的灯具全部 remote，方向取 DTO 原值 ──
+    dataSource.mode = 'demo'
+    const s1 = lights.map((d, i) => dtoOf(d, i % 2 === 0 ? 'left' : 'right'))
+    runSnap(s1)
+    check('S1 裁决表条目数 = 命中快照的灯具数', store.routeDirectionVerdicts.length === lights.length, [store.routeDirectionVerdicts.length, lights.length])
+    check('S1 条目全部为 remote', store.routeDirectionVerdicts.every((v) => v.state === 'remote'), store.routeDirectionVerdicts.map((v) => v.state))
+    check('S1 方向取自 DTO 原值（首台 left）', (store.getRouteDirectionVerdict(lights[0].id) || {}).direction === 'left', store.getRouteDirectionVerdict(lights[0].id))
+    check('S1 索引与裁决表同源', store.directionVerdictIndex.get(lights[0].id)?.state === 'remote', store.directionVerdictIndex.size)
+
+    // ── S2 非法方向：不产出方向，记 backend-direction-invalid ──
+    runSnap([dtoOf(lights[0], 'up'), dtoOf(lights[1], 'left')])
+    const v2 = store.getRouteDirectionVerdict(lights[0].id)
+    check('S2 非法方向 ⇒ undetermined + backend-direction-invalid', v2?.state === 'undetermined' && v2?.reason === 'backend-direction-invalid', v2)
+    check('S2 非法方向条目不携带 direction', v2 && v2.direction === undefined, v2)
+    // 上游 directionOf() 对任意非空字符串原样放行 ⇒ 设备字段会留下 'up'，这正是显示层必须做白名单的原因
+    check('S2 设备字段保留非法原值 up（上游放行，故显示层必须靠白名单拦住）', lights[0].direction === 'up', lights[0].direction)
+
+    // ── S3 缺失方向：防御分支（当前链路不可达，仍须 fail-closed） ──
+    runSnap([{ id: lights[2].id, type: lights[2].type }])
+    const v3 = store.getRouteDirectionVerdict(lights[2].id)
+    check('S3 缺失方向 ⇒ undetermined + backend-direction-missing', v3?.state === 'undetermined' && v3?.reason === 'backend-direction-missing', v3)
+    check('S3 缺失方向条目不携带 direction', v3 && v3.direction === undefined, v3)
+
+    // ── S4 反向守卫：非 demo 模式绝不写裁决表 ──
+    dataSource.mode = 'demo'
+    runSnap([dtoOf(lights[0], 'left')])
+    const refBeforeGuard = store.routeDirectionVerdicts
+    dataSource.mode = origMode
+    runSnap([dtoOf(lights[1], 'right')])
+    check('S4 非 demo 模式不写裁决表（引用未变）', store.routeDirectionVerdicts === refBeforeGuard, store.routeDirectionVerdicts.length)
+    check('S4 非 demo 模式条目数不变', store.routeDirectionVerdicts.length === refBeforeGuard.length)
+
+    // ── S5 设备移出快照 ⇒ 条目消失（覆盖式，不残留） ──
+    dataSource.mode = 'demo'
+    runSnap([dtoOf(lights[0], 'left'), dtoOf(lights[1], 'right'), dtoOf(lights[2], 'left')])
+    check('S5 三台设备进入裁决表', store.routeDirectionVerdicts.length === 3, store.routeDirectionVerdicts.length)
+    runSnap([dtoOf(lights[0], 'left')])
+    check('S5 移出快照的设备条目消失', store.getRouteDirectionVerdict(lights[1].id) === null, store.routeDirectionVerdicts.map((v) => v.deviceId))
+
+    // ── S6 签名幂等：相同快照不换引用，内容变化必换 ──
+    const s6 = [dtoOf(lights[0], 'left'), dtoOf(lights[1], 'right')]
+    runSnap(s6)
+    const refA = store.routeDirectionVerdicts
+    runSnap(s6)
+    check('S6 相同快照重复 ⇒ 数组引用不变（签名幂等）', store.routeDirectionVerdicts === refA)
+    runSnap([dtoOf(lights[0], 'right'), dtoOf(lights[1], 'right')])
+    check('S6 内容变化 ⇒ 数组引用改变', store.routeDirectionVerdicts !== refA)
+
+    // ── S7 快照覆盖本机覆盖：manual 生命周期 ≤ 1 个快照周期 ──
+    // ★ S2.1 强化：第二次使用**完全相同**的快照内容（旧版换了内容，会掩盖签名脱节）
+    dataSource.mode = 'demo'
+    const s7 = [dtoOf(lights[0], 'right'), dtoOf(lights[1], 'right')]
+    runSnap(s7)
+    store.switchEvacuationDirection(lights[0].id, 'left')
+    check('S7 手动切换后条目为 overridden', store.getRouteDirectionVerdict(lights[0].id)?.state === 'overridden', store.getRouteDirectionVerdict(lights[0].id))
+    runSnap(s7)
+    check('S7 相同快照再次到达 ⇒ 覆盖回 remote', store.getRouteDirectionVerdict(lights[0].id)?.state === 'remote', store.getRouteDirectionVerdict(lights[0].id))
+    check('S7 恢复后的方向等于后端下发值', store.getRouteDirectionVerdict(lights[0].id)?.direction === 'right', store.getRouteDirectionVerdict(lights[0].id))
+
+    // ── S8 覆盖写不可变：整表替换，同设备仅 1 条 ──
+    const refB = store.routeDirectionVerdicts
+    const lenB = refB.length
+    store.switchEvacuationDirection(lights[1].id, 'left')
+    check('S8 覆盖写 ⇒ 数组引用改变（不可变整表替换）', store.routeDirectionVerdicts !== refB)
+    check('S8 同设备不产生重复条目（长度不变或 +1）', store.routeDirectionVerdicts.length === lenB || store.routeDirectionVerdicts.length === lenB + 1, [lenB, store.routeDirectionVerdicts.length])
+    check('S8 被覆盖设备仅 1 条', store.routeDirectionVerdicts.filter((v) => v.deviceId === lights[1].id).length === 1)
+
+    // ── S9 复位清空裁决表与索引（复位须在非 demo 模式下执行，否则被 demoGuard 拦截） ──
+    dataSource.mode = origMode
+    resetDevices()
+    check('S9 复位后裁决表为空', store.routeDirectionVerdicts.length === 0, store.routeDirectionVerdicts.length)
+    check('S9 复位后索引为空', store.directionVerdictIndex.size === 0, store.directionVerdictIndex.size)
+
+    // ── S10 非灯具不产生条目 ──
+    dataSource.mode = 'demo'
+    const nonLight = (store.devices || []).find((d) => d && d.type === 'smoke_detector')
+    if (nonLight) {
+      runSnap([{ id: nonLight.id, type: nonLight.type, direction: 'left' }])
+      check('S10 非灯具不产生裁决条目', store.routeDirectionVerdicts.length === 0, store.routeDirectionVerdicts.map((v) => v.deviceId))
+    } else {
+      check('S10 非灯具样本存在（用于断言）', false, '未找到 smoke_detector')
+    }
+
+    // ── S12 索引唯一且与表同源 ──
+    dataSource.mode = 'demo'
+    runSnap([dtoOf(lights[0], 'left'), dtoOf(lights[1], 'right')])
+    const idx = store.directionVerdictIndex
+    check('S12 索引键数 = 裁决表条目数（2 台样本）', idx.size === 2 && idx.size === store.routeDirectionVerdicts.length, [idx.size, store.routeDirectionVerdicts.length])
+    check('S12 索引值均为表内对象', [...idx.values()].every((v) => (store.routeDirectionVerdicts || []).includes(v)))
+
+    // ── S13 替换式清空后索引同步 ──
+    store.routeDirectionVerdicts = []
+    check('S13 替换式清空（=[]）后索引为空', store.directionVerdictIndex.size === 0, store.directionVerdictIndex.size)
+
+    // ── S14 连续两次覆盖同一设备 ──
+    dataSource.mode = 'demo'
+    runSnap([dtoOf(lights[0], 'left')])
+    const r1 = store.routeDirectionVerdicts
+    store.switchEvacuationDirection(lights[0].id, 'right')
+    const r2 = store.routeDirectionVerdicts
+    store.switchEvacuationDirection(lights[0].id, 'left')
+    const r3 = store.routeDirectionVerdicts
+    check('S14 连续两次覆盖：引用每次都变', r1 !== r2 && r2 !== r3)
+    check('S14 连续两次覆盖：同设备仅 1 条', store.routeDirectionVerdicts.filter((v) => v.deviceId === lights[0].id).length === 1)
+    check('S14 最后一条为最新覆盖方向', store.getRouteDirectionVerdict(lights[0].id)?.direction === 'left', store.getRouteDirectionVerdict(lights[0].id))
+  } finally {
+    dataSource.mode = origMode
+    store.routeDirectionVerdicts = []
+    store.routeDeviceBindings = []
+  }
+}
+
+console.log('')
+console.log('=== 十九、N-5 幂等基准取自当前表（投影→清空→重投影 / 覆盖→重投影）===')
+{
+  const origMode = dataSource.mode
+  const dtoOf = (d, direction) => ({ id: d.id, type: d.type, direction })
+  const runSnap = (devices) => store.applyDemoSnapshot({ devices })
+  const flush = () => new Promise((r) => setTimeout(r, 0))
+  const lights = lights5F()
+  const A = [dtoOf(lights[0], 'left'), dtoOf(lights[1], 'right')]
+  const isAllRemote = () => store.routeDirectionVerdicts.length === A.length
+    && store.routeDirectionVerdicts.every((v) => v.state === 'remote')
+
+  try {
+    // ── N5-1 投影 A → 清空 → 再投影同一 A（核心回归）──
+    dataSource.mode = 'demo'
+    store.routeDirectionVerdicts = []
+    runSnap(A)
+    check('N5-1-① 首次投影建立裁决表（2 条 remote）', isAllRemote(), store.routeDirectionVerdicts)
+    const refCleared = (store.routeDirectionVerdicts = [])
+    check('N5-1-② 清空后表为空', store.routeDirectionVerdicts.length === 0)
+    runSnap(A)
+    check('N5-1-③ 清空后相同快照必须重建裁决表', isAllRemote(), store.routeDirectionVerdicts)
+    check('N5-1-④ 重建写入的是新数组（未复用空数组引用）', store.routeDirectionVerdicts !== refCleared)
+    check('N5-1-⑤ 索引同步重建', store.directionVerdictIndex.size === A.length, store.directionVerdictIndex.size)
+
+    // ── N5-2 无清空、内容不变 ⇒ 引用不变（且连续两次）──
+    const refStable = store.routeDirectionVerdicts
+    runSnap(A)
+    runSnap(A)
+    check('N5-2-① 无清空且内容不变 ⇒ 连续重复投影引用不变', store.routeDirectionVerdicts === refStable)
+
+    // ── N5-6 内容变化 ⇒ 必须换引用 ──
+    const B = [dtoOf(lights[0], 'right'), dtoOf(lights[1], 'left')]
+    runSnap(B)
+    check('N5-6-① 内容变化 ⇒ 数组引用改变', store.routeDirectionVerdicts !== refStable)
+    check('N5-6-② 表内容跟随新投影', store.getRouteDirectionVerdict(lights[0].id)?.direction === 'right', store.getRouteDirectionVerdict(lights[0].id))
+    runSnap(A)
+    check('N5-6-③ 回到原内容 ⇒ 再次换引用并恢复 A', store.routeDirectionVerdicts !== refStable && isAllRemote())
+
+    // ── N5-5 非法方向：清空重投影后仍 fail-closed（签名基于内容）──
+    const bad = [dtoOf(lights[0], 'up'), dtoOf(lights[1], 'right')]
+    runSnap(bad)
+    const vBad = store.getRouteDirectionVerdict(lights[0].id)
+    check('N5-5-① 非法方向仍 fail-closed（undetermined + 无方向）',
+      vBad?.state === 'undetermined' && vBad?.reason === 'backend-direction-invalid' && vBad?.direction === undefined, vBad)
+    store.routeDirectionVerdicts = []
+    runSnap(bad)
+    const vBad2 = store.getRouteDirectionVerdict(lights[0].id)
+    check('N5-5-② 清空后重投影非法内容仍为 undetermined（未退化成 remote）',
+      vBad2?.state === 'undetermined' && vBad2?.reason === 'backend-direction-invalid', vBad2)
+
+    // ── P1 切换楼栋（W3 :3858 真实触发）→ 相同快照必须重建 ──
+    dataSource.mode = 'demo'
+    store.routeDirectionVerdicts = []
+    runSnap(A)
+    const buildingBefore = store.dashboardView.selectedBuildingId
+    store.dashboardView.selectedBuildingId = 'B001'
+    await flush()
+    check('P1-① 切换楼栋后裁决表被清空（真实触发 activateBuildingPlansFor）',
+      store.routeDirectionVerdicts.length === 0, store.routeDirectionVerdicts.length)
+    runSnap(A)
+    check('P1-② 修复后：相同快照重建裁决表', isAllRemote(), store.routeDirectionVerdicts)
+    store.dashboardView.selectedBuildingId = buildingBefore || 'B003'
+    await flush()
+
+    // ── P2 IDLE 快照（applyDemoPlans 先清空 :404，④ 再投影）──
+    dataSource.mode = 'demo'
+    store.routeDirectionVerdicts = []
+    runSnap(A)
+    const idleSnap = { buildingPlans: [], devices: A }
+    store.applyDemoSnapshot(idleSnap)
+    check('P2-① IDLE 快照（同轮清空 + 投影）后裁决表仍存在', isAllRemote(), store.routeDirectionVerdicts)
+    store.applyDemoSnapshot(idleSnap)
+    check('P2-② 重复相同 IDLE 快照不再出现「先清后空」', isAllRemote(), store.routeDirectionVerdicts)
+
+    // ── P3 manual 覆盖后收到完全相同快照 ⇒ 恢复 remote ──
+    dataSource.mode = 'demo'
+    store.routeDirectionVerdicts = []
+    runSnap(A)
+    store.switchEvacuationDirection(A[0].id, 'right')
+    check('P3-① 覆盖后条目为 overridden', store.getRouteDirectionVerdict(A[0].id)?.state === 'overridden', store.getRouteDirectionVerdict(A[0].id))
+    runSnap(A)
+    check('P3-② 相同快照到达 ⇒ 恢复 remote', store.getRouteDirectionVerdict(A[0].id)?.state === 'remote', store.getRouteDirectionVerdict(A[0].id))
+    check('P3-③ 恢复后的方向等于后端下发值 left', store.getRouteDirectionVerdict(A[0].id)?.direction === 'left', store.getRouteDirectionVerdict(A[0].id))
+    check('P3-④ 表中不残留 overridden 条目', store.routeDirectionVerdicts.every((v) => v.state === 'remote'), store.routeDirectionVerdicts.map((v) => v.state))
+  } finally {
+    dataSource.mode = origMode
+    store.routeDirectionVerdicts = []
+    store.routeDeviceBindings = []
+  }
+}
+
 await server.close()
 console.log('')
 console.log(`=== 结果：${pass} 通过 / ${fail} 失败 ===`)

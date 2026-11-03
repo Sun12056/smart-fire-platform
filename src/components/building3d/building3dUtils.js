@@ -168,6 +168,26 @@ export function makeArrowTexture(dir, color = '#39FF88', bgFill = null) {
   return tex
 }
 
+// 无有效方向时的中性占位：虚线圆环，**只用 arc**（不产生任何箭头/直线段几何）
+export function makeNeutralDirectionTexture(color = '#39FF88') {
+  const size = 128
+  const c = document.createElement('canvas')
+  c.width = size
+  c.height = size
+  const ctx = c.getContext('2d')
+  ctx.clearRect(0, 0, size, size)
+  ctx.strokeStyle = color
+  ctx.lineWidth = 10
+  ctx.setLineDash([10, 10])
+  ctx.beginPath()
+  ctx.arc(size / 2, size / 2, 34, 0, Math.PI * 2)
+  ctx.stroke()
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.needsUpdate = true
+  return tex
+}
+
 // 数字孪生人员简笔图标（CanvasTexture，用于 Sprite 头顶标签）
 export function makePersonTexture(status) {
   const size = 96

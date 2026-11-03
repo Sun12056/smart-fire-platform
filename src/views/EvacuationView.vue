@@ -117,7 +117,7 @@
 
             <!-- 本轮路线裁决状态（P1.8.2 第二阶段 问题 A） -->
             <div v-if="routeVerdictIsStale" class="route-verdict-note">
-              {{ routeVerdictLabel }}：设备仍保留旧方向「{{ storedDirectionLabel }}」，该值非本轮有效指引，已显示为无方向占位图形
+              {{ staleNoteText }}
             </div>
             <div v-else-if="directionDisplay.isManualOverride" class="route-verdict-note">
               {{ routeVerdictLabel }}：{{ overrideSourceLabel }}
@@ -430,7 +430,7 @@
                 <span class="device-item-name">{{ dev.name }}</span>
               </div>
               <div class="device-item-right">
-                <span class="device-item-dir num-font">{{ directionMap[dev.direction] }}</span>
+                <span class="device-item-dir num-font">{{ displayDirText(dev) }}</span>
                 <svg v-if="dev.risk" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--fire-red)"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
               </div>
             </div>
@@ -476,7 +476,7 @@ import { directionMap, directionAngle, floorOptions } from '../mock/evacuation'
 import {
   DIRECTION_VERDICT,
   DIRECTION_VERDICT_LABELS,
-  DIRECTION_OVERRIDE_SOURCE_LABELS,
+  overrideSourceLabelOf,
   resolveDirectionDisplay,
 } from '../../shared/evacuation/deviceDirection.js'
 import OperationLog from '../components/OperationLog.vue'
@@ -566,8 +566,11 @@ const recommendedDirection = computed(() => {
   return oppositeMap[currentDevice.value.direction]
 })
 
+// 建议方向与主箭头同源判定：主箭头不可显示时不得给出基于历史值的建议
 const recommendedDirectionLabel = computed(() =>
-  recommendedDirection.value ? directionMap[recommendedDirection.value] : '—'
+  directionDisplay.value.showArrow && recommendedDirection.value
+    ? directionMap[recommendedDirection.value]
+    : '—'
 )
 
 /**
@@ -616,8 +619,21 @@ const storedDirectionLabel = computed(() => {
 })
 const overrideSourceLabel = computed(() => {
   const src = routeVerdict.value?.overrideSource
-  return src ? DIRECTION_OVERRIDE_SOURCE_LABELS[src] || src : ''
+  return src ? overrideSourceLabelOf(src) : ''
 })
+/** 无有效方向且有历史值时的一句说明；来源为空则不追加括号（不产生多余标点） */
+const staleNoteText = computed(() => {
+  const base = `${routeVerdictLabel.value}：设备仍保留旧方向「${storedDirectionLabel.value}」，该值非本轮有效指引，已显示为无方向占位图形`
+  return overrideSourceLabel.value ? `${base}（${overrideSourceLabel.value}）` : base
+})
+
+/** 列表行方向：同样走统一 resolver；只有合法方向显示中文，其余「—」（不得回退历史值） */
+function displayDirText(dev) {
+  const fn = fireStore.getRouteDirectionVerdict
+  const verdict = typeof fn === 'function' ? fn(String(dev.id)) : null
+  const dir = resolveDirectionDisplay(verdict, dev.direction).direction
+  return dir ? directionMap[dir] : '—'
+}
 
 const moduleStatus = computed(() => {
   if (currentDevice.value?.risk) return 'emergency'

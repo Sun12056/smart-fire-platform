@@ -55,7 +55,7 @@ console.log('=== 二、Dashboard 三处展示面统一接线（源码级）===')
 {
   check('② 引入 resolveDirectionDisplay', src.includes('resolveDirectionDisplay'))
   check('② 引入 DIRECTION_VERDICT', src.includes('DIRECTION_VERDICT'))
-  check('② 引入 DIRECTION_OVERRIDE_SOURCE_LABELS', src.includes('DIRECTION_OVERRIDE_SOURCE_LABELS'))
+  check('② 引入 overrideSourceLabelOf（来源文案统一解析）', src.includes('overrideSourceLabelOf'))
   check('② 定义 directionDisplayOf（复用契约函数）', /function directionDisplayOf\(dev\)/.test(src))
   check('② directionDisplayOf 读取本轮裁决 store.getRouteDirectionVerdict(dev.id)', /store\.getRouteDirectionVerdict\(dev\.id\)/.test(src))
   check('② directionText 走 directionDisplayOf，无效显示 —', /function directionText\(dev\)/.test(src) && src.includes("d.showArrow ? directionLabel(d.direction) : '—'"))
@@ -70,7 +70,8 @@ console.log('=== 二、Dashboard 三处展示面统一接线（源码级）===')
   // overridden 提示
   check('② 存在 selectedOverrideNote（overridden 提示）', /const selectedOverrideNote = computed/.test(src))
   check('② 覆盖提示分支绑定 v-if="selectedOverrideNote"', /v-if="selectedOverrideNote"/.test(src))
-  check('② 覆盖提示含「未下发设备」', src.includes('未下发设备'))
+  check('② 覆盖提示改用 overrideSourceLabelOf 解析来源', /overrideSourceLabelOf\(verdict\.overrideSource\)/.test(src))
+  check('② 不再回退「未下发设备」或原始来源字符串', !src.includes('未下发设备') && !/DIRECTION_OVERRIDE_SOURCE_LABELS\[/.test(src))
   // 缺失方向不得伪造为 right；不得再直接渲染历史方向
   check('② 删除「缺方向默认 right」兜底（无 dev.direction || \'right\'）', !/return dev\.direction \|\| 'right'/.test(src))
   check('② 已删除 getDeviceDirection（共享兜底函数）', !/getDeviceDirection/.test(src))

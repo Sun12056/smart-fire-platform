@@ -47,6 +47,11 @@ export const CORNER_ON_EDGE_EPS = 1e-6
 export const DIRECTION_VERDICT = {
   /** 本轮路线已唯一裁决出方向 */
   RESOLVED: 'resolved',
+  /**
+   * 后端运行时下发（demo 模式下唯一的方向来源）。
+   * 它不是路线几何裁决结果，界面必须标注来源，不得表述为「本轮路线已裁决」。
+   */
+  REMOTE: 'remote',
   /** 同样贴近的多条路线要求**相反**方向 —— 不产出方向，等待人工/规则裁决 */
   CONFLICT: 'conflict',
   /** 最近处为垂直段（楼梯上下）等当前模型无法表达的情形 */
@@ -61,6 +66,7 @@ export const DIRECTION_VERDICT = {
 
 export const DIRECTION_VERDICT_LABELS = {
   [DIRECTION_VERDICT.RESOLVED]: '本轮路线已裁决',
+  [DIRECTION_VERDICT.REMOTE]: '演示态下发（非路线裁决）',
   [DIRECTION_VERDICT.CONFLICT]: '本轮路线方向冲突，未裁决',
   [DIRECTION_VERDICT.UNDETERMINED]: '本轮路线未裁决（方向未知）',
   [DIRECTION_VERDICT.UNLINKED]: '未参与本轮路线联动',
@@ -71,6 +77,27 @@ export const DIRECTION_VERDICT_LABELS = {
 export const DIRECTION_OVERRIDE_SOURCE_LABELS = {
   manual: '管理员手动切换，未下发设备',
   'fire-avoidance': '避火自动反向，非路线裁决',
+  unknown: '未知覆盖来源（不作有效指引）',
+}
+
+/**
+ * 可作为方向指引显示的覆盖来源。
+ * 未列入者一律 fail-closed：避火自动反向是 `flip(旧方向)` 的结果，输入可能是
+ * 从未被裁决过的种子值，显示即等于把陈旧值洗白为有效指引（R-08）。
+ */
+export const OVERRIDE_DISPLAYABLE_SOURCES = Object.freeze(['manual'])
+
+/** 覆盖来源 → 文案；未命中一律「未知覆盖来源」，禁止回退成原始字符串 */
+export function overrideSourceLabelOf(source) {
+  const labels = DIRECTION_OVERRIDE_SOURCE_LABELS
+  return Object.prototype.hasOwnProperty.call(labels, source) ? labels[source] : labels.unknown
+}
+
+/** 方向显示白名单：只有 left / right 是合法方向载荷（严格相等，不做 trim / 大小写归一） */
+export const DIRECTION_DISPLAY_DOMAIN = Object.freeze(['left', 'right'])
+
+export function validDisplayDirection(v) {
+  return DIRECTION_DISPLAY_DOMAIN.includes(v) ? v : null
 }
 
 /** 路线负载（人数）读取：仅作**诊断信息**，不得用于裁决方向。 */
@@ -376,41 +403,58 @@ export function resolveDeviceDirections(devices, routes = []) {
 }
 
 /**
- * ★ UI 方向显示判定（P1.8.2 第二阶段 问题 A）——**纯函数，可独立单测**。
+ * ★ UI 方向显示判定 —— **全站唯一方向显示入口（纯函数，可独立单测）**。
  *
  * 解决的问题：设备对象里始终保留着上一次写入的 `direction` 值。当本轮没有可靠裁决时
  * （未裁决 / 冲突 / 未联动 / 从未裁决），界面不能拿这个历史值当作当前有效疏散方向。
  *
+ * 可显示来源只有三种：本轮路线裁决（resolved）、后端运行时下发（remote）、
+ * 本机人工设定（overridden + manual）。其余一律不渲染朝向，但必须能区分
+ * 「未知」与「有旧值」。方向载荷一律过白名单：非法值不回退成 right（fail-closed）。
+ *
  * 设计原则：**不删除任何历史字段**（保留兼容性与状态记录），只区分
- * 「存储中保留了方向值」与「当前路线已可靠裁决方向」。
+ * 「存储中保留了方向值」与「当前存在可靠方向」。
  *
  * @param {{state?:string,direction?:string,overrideSource?:string}|null|undefined} verdict
  *        本轮裁决结果（getRouteDirectionVerdict 的返回值）；null / 无条目 = 从未裁决。
  * @param {string|null|undefined} storedDirection 设备上当前保留的 `direction` 值（历史值）。
  * @returns {{
  *   state:string, direction:string|null, storedDirection:string|null,
- *   isValidRouteGuidance:boolean, isManualOverride:boolean,
- *   showArrow:boolean, stale:boolean, hasStoredButUnverified:boolean
+ *   isValidRouteGuidance:boolean, isRemoteGuidance:boolean,
+ *   isManualOverride:boolean, isOverridden:boolean, overrideSource:string|null,
+ *   showArrow:boolean, invalidDirection:boolean, stale:boolean, hasStoredButUnverified:boolean
  * }}
  */
 export function resolveDirectionDisplay(verdict, storedDirection) {
   const state = verdict && verdict.state ? verdict.state : DIRECTION_VERDICT.NONE
+  const overrideSource = verdict && verdict.overrideSource ? verdict.overrideSource : null
   const isResolved = state === DIRECTION_VERDICT.RESOLVED
-  const isOverride = state === DIRECTION_VERDICT.OVERRIDDEN
-  // 只有「本轮路线已裁决」或「本机覆盖」才给出可用于指引的方向；其余一律为 null
-  const direction = isResolved || isOverride ? verdict.direction || null : null
-  const stored = storedDirection || null
+  const isRemote = state === DIRECTION_VERDICT.REMOTE
+  const isOverridden = state === DIRECTION_VERDICT.OVERRIDDEN
+  const isManualOverride = isOverridden && OVERRIDE_DISPLAYABLE_SOURCES.includes(overrideSource)
+  // 可显示集合：路线裁决 / 后端下发 / 本机人工设定；其余状态一律不输出方向
+  const displayableState = isResolved || isRemote || isManualOverride
+  // 白名单对任何状态都执行（决定方向是否可用），但 invalidDirection 只在可显示状态置位
+  const payload = validDisplayDirection(verdict && verdict.direction)
+  const direction = displayableState ? payload : null
+  const stored = validDisplayDirection(storedDirection)
   return {
     state,
     direction,
     storedDirection: stored,
-    /** 该方向是否来自本轮路线裁决（手动覆盖不算） */
+    /** 该方向是否来自本轮路线裁决（后端下发 / 手动覆盖都不算） */
     isValidRouteGuidance: isResolved,
-    isManualOverride: isOverride,
-    /** 是否渲染有效箭头：未裁决 / 冲突 / 未联动 / 从未裁决一律 false */
+    isRemoteGuidance: isRemote,
+    /** 仅「本机人工设定」算 manual；避火自动反向、未知来源均为 false */
+    isManualOverride,
+    isOverridden,
+    overrideSource,
+    /** 是否渲染有效箭头：其余状态（含避火自动反向）一律 false */
     showArrow: !!direction,
-    /** 设备里还留着方向值，但它不是本轮有效指引 ⇒ 必须提示，不得渲染为有效箭头 */
-    stale: !isResolved && !isOverride && !!stored,
-    hasStoredButUnverified: !!stored && !isResolved,
+    /** 可显示状态却拿不到合法方向 ⇒ 载荷本身有问题（审计/测试用，UI 不据此新增文案） */
+    invalidDirection: displayableState && !payload,
+    /** 设备里还留着合法方向值，但不是本轮有效指引 ⇒ 必须提示，不得渲染为有效箭头 */
+    stale: !direction && !!stored,
+    hasStoredButUnverified: !!stored && !isResolved && !isRemote,
   }
 }

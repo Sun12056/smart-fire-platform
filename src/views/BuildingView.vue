@@ -241,7 +241,8 @@
               <text x="45" y="275" fill="#475569" font-size="6" text-anchor="middle">楼梯</text>
             </g>
 
-            <!-- 设备点位：B4-03 起消费权威设备的完整运行态（data-* 即本次渲染所用值） -->
+            <!-- 设备点位：B4-03 起消费权威设备的完整运行态
+                 P1.8.2 R-01：data-dir 为**实际渲染方向**（非权威镜像）；data-dir-state / data-dir-source 为裁决探针 -->
             <g
               v-for="(dev, idx) in currentFloorDevices"
               :key="dev.id"
@@ -254,6 +255,8 @@
               :data-flash="devFlash(dev)"
               :data-brightness="devBrightness(dev)"
               :data-dir="devDir(dev)"
+              :data-dir-state="devDirState(dev)"
+              :data-dir-source="devDirSource(dev)"
             >
               <circle :cx="getDeviceX(idx)" :cy="getDeviceY(idx)" :r="12" :fill="`url(#device-glow-${devGlowKey(dev)})`" :class="{ 'alarm-pulse': dev.status === 'abnormal' || devFlash(dev) }" :opacity="devGlowOpacity(dev)"/>
               <circle :cx="getDeviceX(idx)" :cy="getDeviceY(idx)" :r="5" :fill="devColor(dev)" :class="{ 'alarm-breathe': dev.status === 'abnormal', 'offline-dot': dev.status === 'offline' }"/>
@@ -261,10 +264,18 @@
               <text :x="getDeviceX(idx)" :y="getDeviceY(idx) - 11" :fill="devColor(dev)" font-size="7" text-anchor="middle" font-weight="600">{{ getDeviceLabel(dev.type) }}</text>
               <!-- 疏散指示方向（恒绿 #22C55E，禁止用红 / 橙 / 蓝替代） -->
               <path
-                v-if="isEvacuationLight(dev)"
+                v-if="isEvacuationLight(dev) && devDisplayOf(dev).showArrow"
                 class="plan-device-dir"
                 :d="devDirPath(dev, idx)"
                 fill="#22C55E"
+              />
+              <!-- 无有效方向：中性虚线圆环占位（无指向性几何；禁止用透明度/灰度弱化真实箭头） -->
+              <circle
+                v-else-if="isEvacuationLight(dev)"
+                class="plan-device-dir-none"
+                :cx="getDeviceX(idx)"
+                :cy="getDeviceY(idx)"
+                r="9.5"
               />
             </g>
           </svg>
@@ -341,6 +352,10 @@
               <div class="popup-row">
                 <span class="popup-label">最后上报</span>
                 <span class="popup-value">{{ popupDevice.lastReport }}</span>
+              </div>
+              <div class="popup-row" v-if="isEvacuationLight(popupDevice)">
+                <span class="popup-label">方向来源</span>
+                <span class="popup-value">{{ popupDirectionState }}</span>
               </div>
             </div>
           </div>
@@ -437,8 +452,12 @@ import {
 } from '../../shared/person/personRuntime.js'
 // P1.7.3-B4-03：应急灯运行态统一契约（与 3D / 智能照明页同源）
 import {
-  deviceBrightness, deviceBrightnessRatio, deviceDirection, isDeviceEmergency,
+  deviceBrightness, deviceBrightnessRatio, isDeviceEmergency,
 } from '../../shared/device/deviceRuntime.js'
+// P1.8.2 R-01：方向能否显示由统一 resolver 判定（与 Dashboard / Evacuation 同源）
+import {
+  resolveDirectionDisplay, DIRECTION_VERDICT_LABELS,
+} from '../../shared/evacuation/deviceDirection.js'
 
 const store = useFireStore()
 const router = useRouter()
@@ -568,15 +587,31 @@ function devGlowOpacity(dev) {
 }
 function devFlash(dev) { return isDeviceEmergency(dev) }
 function devBrightness(dev) { return deviceBrightness(dev) }
-function devDir(dev) { return deviceDirection(dev) }
+/** 方向显示唯一判定入口：裁决表索引（S2 导出）+ 设备历史值 → 统一 resolver */
+function devDisplayOf(dev) {
+  const verdict = store.directionVerdictIndex.get(String(dev.id)) || null
+  return resolveDirectionDisplay(verdict, dev.direction)
+}
+/** 实际渲染方向；无有效方向时为空串（不得用历史值兜底） */
+function devDir(dev) { return devDisplayOf(dev).direction || '' }
+function devDirState(dev) { return devDisplayOf(dev).state }
+/** 仅本机覆盖带来源；其余为空串（禁止把脏来源写进 DOM） */
+function devDirSource(dev) { return devDisplayOf(dev).overrideSource || '' }
 function isEvacuationLight(dev) { return dev.type === 'evacuation_light' }
-/** 方向箭头（三角形）：位置由既有点位派生，不改动设备坐标 */
+/** 方向箭头（三角形）：位置由既有点位派生，不改动设备坐标；无有效方向则不给路径 */
 function devDirPath(dev, idx) {
+  const dir = devDisplayOf(dev).direction
+  if (!dir) return ''
   const x = getDeviceX(idx), y = getDeviceY(idx)
-  return deviceDirection(dev) === 'left'
+  return dir === 'left'
     ? `M ${x - 11} ${y - 4} L ${x - 19} ${y} L ${x - 11} ${y + 4} Z`
     : `M ${x + 11} ${y - 4} L ${x + 19} ${y} L ${x + 11} ${y + 4} Z`
 }
+/** 弹窗「方向来源」：七态标签；仅疏散指示灯显示该行 */
+const popupDirectionState = computed(() => {
+  if (!popupDevice.value || !isEvacuationLight(popupDevice.value)) return ''
+  return DIRECTION_VERDICT_LABELS[devDisplayOf(popupDevice.value).state] || '暂无本轮裁决'
+})
 
 function getDeviceLabel(type) {
   const labels = {
@@ -1093,6 +1128,16 @@ onMounted(() => {
 @keyframes evacDirPulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
+}
+
+/* P1.8.2 R-01：无有效方向时的中性占位（虚线圆环，无指向性几何）
+   注意：此处的 opacity 是「占位图形自身的描边常量」，不得据此对真实箭头做弱化 */
+.plan-device-dir-none {
+  fill: none;
+  stroke: #22C55E;
+  stroke-width: 1.5;
+  stroke-dasharray: 2 2;
+  opacity: 0.55;
 }
 
 /* ========== Floor Device List ========== */

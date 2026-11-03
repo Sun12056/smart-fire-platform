@@ -7,13 +7,15 @@
 //   • 设备编号不显示在 3D 中（仅右侧设备信息栏）
 // ────────────────────────────────────────────────
 import * as THREE from 'three'
-import { COLORS, makeArrowTexture, seededRand, currentBuildingName } from './building3dUtils.js'
+import { COLORS, makeArrowTexture, makeNeutralDirectionTexture, seededRand, currentBuildingName } from './building3dUtils.js'
 // P1.7.3-B3-03：设备楼栋归属只认 canonical（buildingId），别名 building 仅在 canonical 缺失时兜底
 import { buildingIdOf, buildingNameOf } from '../../../shared/person/personRuntime.js'
 // P1.7.3-B4-03：应急灯运行态的唯一权威 = fireStore.devices[i]，本层只读 + 派生，禁止另立第二份运行态
 import {
-  deviceRuntimeState, deviceBrightnessRatio, deviceDirection, isDeviceEmergency, deviceIsOnline,
+  deviceRuntimeState, deviceBrightnessRatio, isDeviceEmergency, deviceIsOnline,
 } from '../../../shared/device/deviceRuntime.js'
+// P1.8.2 R-01：方向能否显示由统一 resolver 判定（与 2D / Dashboard / Evacuation 同源）
+import { resolveDirectionDisplay } from '../../../shared/evacuation/deviceDirection.js'
 
 export class EmergencyLight3D {
   constructor(threeScene, model) {
@@ -28,6 +30,7 @@ export class EmergencyLight3D {
 
     this.arrowTexL = makeArrowTexture('left')
     this.arrowTexR = makeArrowTexture('right')
+    this.neutralTex = makeNeutralDirectionTexture()
 
     // 已绑定的 mesh/light 缓存（避免每帧重建）
     this.evacMap = new Map() // deviceId → { sprite, baseY, dir }
@@ -54,7 +57,7 @@ export class EmergencyLight3D {
 
     const seen = new Set()
     devs.forEach((d) => {
-      if (d.type === 'evacuation_light') this._bindEvac(d)
+      if (d.type === 'evacuation_light') this._bindEvac(d, store)
       else if (d.type === 'emergency_light') this._bindEm(d)
       seen.add(d.id)
     })
@@ -96,23 +99,39 @@ export class EmergencyLight3D {
     return { x, z, top }
   }
 
-  _bindEvac(dev) {
+  /** 方向显示判定：裁决表索引（S2 导出）+ 设备历史值 → 统一 resolver；索引缺失按 null ⇒ fail-closed */
+  _displayOf(dev, store) {
+    const index = store && store.directionVerdictIndex
+    const verdict = index ? (index.get(String(dev.id)) || null) : null
+    return resolveDirectionDisplay(verdict, dev.direction)
+  }
+
+  /** 渲染方向 → 贴图；空串（无有效方向）⇒ 中性占位圆环 */
+  _textureOf(dir) {
+    if (dir === 'left') return this.arrowTexL
+    if (dir === 'right') return this.arrowTexR
+    return this.neutralTex
+  }
+
+  _bindEvac(dev, store) {
+    const disp = this._displayOf(dev, store)
+    const dir = disp.direction || ''
     let rec = this.evacMap.get(dev.id)
     if (rec) {
-      const newDir = dev.direction || 'right'
-      if (rec.dir !== newDir) {
-        rec.sprite.material.map = newDir === 'left' ? this.arrowTexL : this.arrowTexR
+      if (rec.dir !== dir) {
+        rec.sprite.material.map = this._textureOf(dir)
         rec.sprite.material.needsUpdate = true
-        rec.dir = newDir
+        rec.dir = dir
       }
       rec.device = dev
+      rec.displayState = disp.state
+      rec.verdict = disp
       return
     }
     const pos = this._resolveDevicePos(dev, 0.6)
     if (!pos) return
-    const dir = dev.direction || 'right'
     const spr = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: dir === 'left' ? this.arrowTexL : this.arrowTexR,
+      map: this._textureOf(dir),
       color: 0xffffff,
       transparent: true,
       depthWrite: false,
@@ -120,7 +139,7 @@ export class EmergencyLight3D {
     spr.scale.set(0.8, 0.8, 1)
     spr.position.set(pos.x, pos.top + 0.75, pos.z)
     this.evacGroup.add(spr)
-    rec = { id: String(dev.id), sprite: spr, dir, device: dev }
+    rec = { id: String(dev.id), sprite: spr, dir, device: dev, displayState: disp.state, verdict: disp }
     this.evacMap.set(dev.id, rec)
   }
 
@@ -166,13 +185,17 @@ export class EmergencyLight3D {
     }
 
     // 疏散指示灯：箭头恒绿，方向随权威 direction，应急时脉冲
+    // ⚠️ 方向显示只在此路径更新：demo 快照为就地合并，update() 不会因方向变化重跑
     this.evacMap.forEach((rec) => {
       const dev = resolve(rec)
       if (!dev) return
       this._syncRuntime(rec, dev)
-      const dir = deviceDirection(dev)
+      const disp = this._displayOf(dev, store)
+      const dir = disp.direction || ''
+      rec.displayState = disp.state
+      rec.verdict = disp
       if (rec.dir !== dir) {
-        rec.sprite.material.map = dir === 'left' ? this.arrowTexL : this.arrowTexR
+        rec.sprite.material.map = this._textureOf(dir)
         rec.sprite.material.needsUpdate = true
         rec.dir = dir
       }

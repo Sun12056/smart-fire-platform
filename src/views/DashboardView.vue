@@ -1174,7 +1174,7 @@ import {
 import {
   resolveDirectionDisplay,
   DIRECTION_VERDICT,
-  DIRECTION_OVERRIDE_SOURCE_LABELS,
+  overrideSourceLabelOf,
 } from '../../shared/evacuation/deviceDirection.js'
 
 const store = useFireStore()
@@ -1778,14 +1778,14 @@ const selectedDeviceView = computed(() => {
 
 // P1.8.2 F2：选中设备的方向显示判定（与平面图 / tooltip 共用同一有效方向）
 const selectedDirectionDisplay = computed(() => directionDisplayOf(selectedDevice.value))
-// 本机覆盖提示：overridden 可显示本地覆盖方向，但必须明确「未下发设备」
+// 本机覆盖提示：overridden 可显示本地覆盖方向，但必须标注来源（未知来源按「不作有效指引」处理）
 const selectedOverrideNote = computed(() => {
   const dev = selectedDevice.value
   const verdict = dev && typeof store.getRouteDirectionVerdict === 'function'
     ? store.getRouteDirectionVerdict(dev.id)
     : null
   if (!verdict || verdict.state !== DIRECTION_VERDICT.OVERRIDDEN) return ''
-  const src = DIRECTION_OVERRIDE_SOURCE_LABELS[verdict.overrideSource] || '未下发设备'
+  const src = overrideSourceLabelOf(verdict.overrideSource)
   return `本机覆盖（非本轮路线裁决）：${src}`
 })
 
