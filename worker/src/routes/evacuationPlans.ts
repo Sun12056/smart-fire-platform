@@ -39,6 +39,17 @@ evacuationPlansRoute.post('/', async (c) => {
   if (!body?.id || !body.buildingId || !body.startFloor || !body.startArea) {
     return c.json({ error: '缺少 id / buildingId / startFloor / startArea' }, 400)
   }
+  // API-007 / G-05 守卫①：LEGACY 接口不允许创建整栋楼方案（type='building'）
+  if (body.type === 'building') {
+    return c.json(
+      { error: "LEGACY 接口不允许创建整栋楼方案（type='building'），请使用 /api/v1/building-evacuation-plans" },
+      400,
+    )
+  }
+  // API-007 / G-05 守卫②：客户端不得指定 DEMO- 前缀 id（服务端保留前缀，仅拒绝客户端指定）
+  if (String(body.id).trim().toUpperCase().startsWith('DEMO-')) {
+    return c.json({ error: '不允许客户端指定 DEMO- 前缀 id（应由服务端生成）' }, 400)
+  }
   const extra = {
     corridor: body.corridor,
     stair: body.stair,
@@ -64,7 +75,20 @@ evacuationPlansRoute.patch('/:id', async (c) => {
   const existing = await first(c.env.DB, 'SELECT * FROM evacuation_plans WHERE id = ?', [id])
   if (!existing) return c.json({ error: '预案不存在' }, 404)
 
-  const body = await c.req.json<{ status?: string; recommended?: boolean }>().catch(() => ({}))
+  // API-007 / G-05 守卫④：整栋楼方案不属于 legacy 端点，不允许在此修改
+  if (String(existing.type ?? '') === 'building') {
+    return c.json(
+      { error: '该 id 属于整栋楼疏散方案，请使用 /api/v1/building-evacuation-plans/:id', legacy: true },
+      404,
+    )
+  }
+
+  const raw = await c.req.json<Record<string, unknown>>().catch(() => ({}))
+  // API-007 / G-05 守卫③：LEGACY 接口不支持修改 type
+  if (Object.prototype.hasOwnProperty.call(raw, 'type')) {
+    return c.json({ error: 'LEGACY 接口不支持修改 type' }, 400)
+  }
+  const body = raw as { status?: string; recommended?: boolean }
   const sets: string[] = []
   const params: unknown[] = []
   if (body.status !== undefined) {
