@@ -1,11 +1,18 @@
 #!/usr/bin/env node
-// 受守卫保护的正式部署入口：先校验 D1 配置，通过后才调用 wrangler deploy。
-// 不依赖 shell 的 && 语义（Windows cmd / PowerShell / bash 行为一致）。
-// 用法：npm run deploy   （构建检查请用 npm run deploy:dry-run）
+// 受守卫保护的部署入口（多目标版）：
+//   · production（默认）：校验 worker/wrangler.toml → 调用 wrangler deploy
+//   · trial            ：校验 worker/wrangler.trial.toml（并跨配置比对生产 D1 id）→ 调用 wrangler deploy --config
 //
-// 参数策略：拒绝 --config/-c、--env/-e、--cwd 传入（见 findForbiddenArg 注释），
-// 否则守卫校验的是 worker/wrangler.toml，wrangler 实际可能部署另一份配置。
-// 该检查先于任何子进程执行，命中即以退出码 2 终止。
+// 参数策略（deny-by-default 白名单）：
+//   仅允许 `--target production` / `--target trial`（含 `--target=VALUE` 形式）；
+//   任何其他参数（含位置参数、短参数、裸 `--`）一律拒绝，且拒绝发生在任何子进程启动之前（退出码 2）。
+//   理由：`--config/-c`、`--env/-e`、`--cwd`、`--name`、`--var`、`--route`、`--define`、`--outdir`
+//   等都会改变「部署名称 / 变量 / 路由 / 资源 / 目标」，使守卫校验的配置与实际部署的不一致。
+//
+// 路径隔离：
+//   · production 路径只读取/部署 worker/wrangler.toml，**不读取 trial 配置、不执行跨配置比对**；
+//   · trial 路径只把 trial 配置传给 wrangler deploy；生产配置**仅**用于 check-d1-config 的隔离比对，
+//     绝不作为 trial 部署的配置文件。
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -16,49 +23,80 @@ export const WORKER_DIR = resolve(__dirname, '..')
 const DEFAULT_CHECK = resolve(__dirname, 'check-d1-config.mjs')
 const DEFAULT_WRANGLER = resolve(WORKER_DIR, 'node_modules', 'wrangler', 'bin', 'wrangler.js')
 
-/**
- * 禁止透传给 `wrangler deploy` 的参数（守卫只校验 worker/wrangler.toml）。
- *
- * 依据 wrangler 4.147.0 的实际 CLI 定义（`wrangler-dist/cli.js`，yargs）：
- *   · config: { alias: 'c', type: 'string', requiresArg: true }
- *   · env:    { alias: 'e', type: 'string', requiresArg: true }
- *   · cwd:    { type: 'string', requiresArg: true }（改变配置查找目录）
- * 因此以下任一种写法都会让 wrangler 读取「守卫没有校验过」的配置：
- *   --config x / --config=x / -c x / -c=x / -cx / --env x / --env=x / -e x / -ex / --cwd x / --cwd=x
- * 注意：yargs 不做长参数前缀缩写匹配，故只需精确匹配长参数名；
- * 短参数按首字母匹配即可覆盖 `-cVALUE` 这类「短参数带值」写法。
- * `--env-file` 只加载环境变量文件、不改变配置文件路径，故不拦截。
- */
-const FORBIDDEN_LONG = ['config', 'env', 'cwd']
-const FORBIDDEN_SHORT = ['c', 'e']
-const SHORT_TO_LONG = { c: 'config', e: 'env' }
+/** 目标 → 固定配置文件名（不接受外部路径）。 */
+export const TARGET_CONFIG_FILES = Object.freeze({
+  production: 'wrangler.toml',
+  trial: 'wrangler.trial.toml',
+})
+const ALLOWED_TARGETS = new Set(Object.keys(TARGET_CONFIG_FILES))
 
 /**
- * 在参数列表中查找会绕过守卫的禁用参数。
+ * 解析部署参数（deny-by-default 白名单）。
+ * 仅接受 `--target <production|trial>` / `--target=<production|trial>`，最多出现一次。
+ *
+ * @param {string[]} argv
+ * @returns {{ ok: true, target: 'production' | 'trial' } | { ok: false, reason: string, arg: string }}
+ */
+export function parseDeployArgs(argv = []) {
+  let target = 'production'
+  let targetSeen = false
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const raw = argv[i]
+    if (typeof raw !== 'string' || raw.length === 0) {
+      return { ok: false, reason: '不接受空参数', arg: String(raw) }
+    }
+    if (raw === '--') {
+      return { ok: false, reason: '不接受 `--` 分隔符（其后的参数无法被白名单校验）', arg: raw }
+    }
+    if (!raw.startsWith('--')) {
+      return { ok: false, reason: '不接受位置参数或短参数（仅允许 --target）', arg: raw }
+    }
+
+    const eq = raw.indexOf('=')
+    const name = eq >= 0 ? raw.slice(2, eq) : raw.slice(2)
+    if (name !== 'target') {
+      return { ok: false, reason: `参数不在白名单：--${name}（可能改变部署名称/变量/路由/资源/目标）`, arg: raw }
+    }
+    if (targetSeen) {
+      return { ok: false, reason: '--target 重复出现，拒绝（不做“后者覆盖前者”推断）', arg: raw }
+    }
+    targetSeen = true
+
+    let value
+    if (eq >= 0) {
+      value = raw.slice(eq + 1)
+    } else {
+      const next = argv[i + 1]
+      if (next === undefined || next.startsWith('-')) {
+        return { ok: false, reason: '--target 缺少取值（production | trial）', arg: raw }
+      }
+      value = next
+      i += 1
+    }
+
+    if (!ALLOWED_TARGETS.has(value)) {
+      return { ok: false, reason: `--target 取值非法：${value}（仅允许 production | trial）`, arg: raw }
+    }
+    target = value
+  }
+
+  return { ok: true, target }
+}
+
+/**
+ * 向后兼容的“禁止参数”查询：现在等价于「是否偏离白名单」。
  * @param {string[]} args
- * @returns {{arg: string, reason: string} | null}
+ * @returns {{ arg: string, reason: string } | null}
  */
 export function findForbiddenArg(args = []) {
-  for (const raw of args) {
-    if (typeof raw !== 'string' || raw.length < 2 || raw[0] !== '-') continue
-    if (raw.startsWith('--')) {
-      const name = raw.slice(2).split('=')[0]
-      if (FORBIDDEN_LONG.includes(name)) {
-        return { arg: raw, reason: `--${name} 会改变 wrangler 实际读取的配置或环境` }
-      }
-      continue
-    }
-    const short = raw[1]
-    if (FORBIDDEN_SHORT.includes(short)) {
-      return { arg: raw, reason: `-${short} 是 --${SHORT_TO_LONG[short]} 的短别名` }
-    }
-  }
-  return null
+  const parsed = parseDeployArgs(args)
+  if (parsed.ok) return null
+  return { arg: parsed.arg, reason: parsed.reason }
 }
 
 /**
  * 可注入依赖，便于完全本地的控制流测试（不执行真实部署）。
- * 正式入口调用时不传任何参数，使用真实路径与 process.execPath。
  */
 export function runGuardedDeploy({
   workerDir = WORKER_DIR,
@@ -69,19 +107,36 @@ export function runGuardedDeploy({
   nodePath = process.execPath,
   log = console,
 } = {}) {
-  // 0) 参数检查必须发生在任何子进程启动之前：
-  //    --config/-c、--env/-e、--cwd 会让 wrangler 使用守卫没有校验过的配置，
-  //    命中即拒绝（不跑守卫、不启动 wrangler、不产生任何副作用）。
-  const forbidden = findForbiddenArg(args)
-  if (forbidden) {
-    log.error(`[deploy-guarded] ❌ 拒绝参数：${forbidden.arg}`)
-    log.error(`[deploy-guarded] 原因：${forbidden.reason}；守卫只校验 worker/wrangler.toml，必须与实际部署使用的配置一致。`)
+  // 0) 参数白名单校验必须先于任何子进程
+  const parsed = parseDeployArgs(args)
+  if (!parsed.ok) {
+    log.error(`[deploy-guarded] ❌ 拒绝参数：${parsed.arg}`)
+    log.error(`[deploy-guarded] 原因：${parsed.reason}`)
     log.error('[deploy-guarded] 已终止：未运行 D1 守卫，也未调用 wrangler deploy。')
     return 2
   }
 
-  // 1) 守卫必须通过，否则在调用 wrangler deploy 之前终止
-  const guard = spawn(nodePath, [checkScript], { stdio: 'inherit', cwd: workerDir })
+  const target = parsed.target
+  const productionConfig = resolve(workerDir, TARGET_CONFIG_FILES.production)
+  const trialConfig = resolve(workerDir, TARGET_CONFIG_FILES.trial)
+
+  // 1) 守卫参数：production 与旧行为**逐字一致**（只传脚本，不传任何配置路径）
+  const guardArgs =
+    target === 'production'
+      ? [checkScript]
+      : [checkScript, trialConfig, '--compare', productionConfig]
+
+  // 2) wrangler 参数：production 与旧行为一致（仅 deploy）；trial 只传 trial 配置
+  const wranglerArgs =
+    target === 'production' ? ['deploy'] : ['deploy', '--config', trialConfig]
+
+  if (target === 'trial' && !existsSync(trialConfig)) {
+    log.error(`[deploy-guarded] ❌ 找不到 trial 配置：${trialConfig}`)
+    log.error('[deploy-guarded] 已终止：未运行 D1 守卫，也未调用 wrangler deploy。')
+    return 1
+  }
+
+  const guard = spawn(nodePath, guardArgs, { stdio: 'inherit', cwd: workerDir })
   if (guard.error) {
     log.error(`[deploy-guarded] ❌ 守卫无法启动：${guard.error.message}`)
     return 1
@@ -95,13 +150,11 @@ export function runGuardedDeploy({
     return guard.status || 1
   }
 
-  // 2) 守卫通过后才真正部署
   if (!existsSync(wranglerJs)) {
     log.error(`[deploy-guarded] ❌ 找不到本地 wrangler：${wranglerJs}`)
     return 1
   }
-  // 显式固定 cwd 为 worker 目录，确保 wrangler 实际读取的配置与守卫检查的一致
-  const res = spawn(nodePath, [wranglerJs, 'deploy', ...args], { stdio: 'inherit', cwd: workerDir })
+  const res = spawn(nodePath, [wranglerJs, ...wranglerArgs], { stdio: 'inherit', cwd: workerDir })
   if (res.error) {
     log.error(`[deploy-guarded] ❌ Wrangler 无法启动：${res.error.message}`)
     return 1

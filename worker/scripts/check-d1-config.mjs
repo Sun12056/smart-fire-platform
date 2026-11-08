@@ -34,6 +34,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_DIR = resolve(__dirname, '..')
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const ALL_ZERO = '00000000-0000-0000-0000-000000000000'
+/**
+ * 唯一允许「跳过跨配置比对」的精确生产占位符字面量（不是通配、不是前缀匹配）。
+ * 仅当**对照配置（生产）**的 database_id 与此处逐字相等时才降级为 WARN；
+ * Trial 侧占位符、全零、其他任何非 UUID 值一律拒绝。
+ */
+const PRODUCTION_PLACEHOLDER = '<REPLACE_WITH_D1_DATABASE_ID>'
+
+/**
+ * 本项目的冻结约束：每个环境**恰好一个** `binding = "DB"` 的 D1 绑定
+ * （`worker/src/types.ts` 中 `Env.DB: D1Database` 为单绑定）。
+ * 数量为 0 或 > 1 一律 fail-closed，绝不静默取第一个。
+ */
+const EXPECTED_DB_BINDING_COUNT = 1
 const BARE_KEY_RE = /^[A-Za-z0-9_.-]+$/
 const TABLE_RE = /^\[\[([A-Za-z0-9_.-]+)\]\]$/
 const ARRAY_TABLE_RE = /^\[([A-Za-z0-9_.-]+)\]$/
@@ -44,9 +57,58 @@ function fail(msg) {
   process.exit(1)
 }
 
-/** 定位当前 Worker 配置：显式参数优先，否则在 worker 目录按优先级查找；找不到即失败（不放行）。 */
-function locateConfig() {
-  const explicit = process.argv[2]
+/**
+ * 严格命令行解析（**固定顺序**白名单语法）。
+ *
+ * 冻结允许的唯一三种形式：
+ *   []                                         → 默认生产配置（worker/wrangler.toml）
+ *   [configPath]                               → 显式主配置
+ *   [configPath, '--compare', comparePath]     → 显式主配置 + 对照配置
+ *
+ * 顺序约束：`--compare` **只能出现在主配置路径之后**；
+ * `--compare production.toml trial.toml`（先比较后主配置）等任何其他顺序一律 fail-closed。
+ * 同时拒绝：重复 `--compare`、缺路径、未知参数、额外位置参数、裸 `--`、空参数、参数过多。
+ *
+ * @param {string[]} argv
+ * @returns {{ configPath: string | null, comparePath: string | null }}
+ */
+function parseCliArgs(argv = []) {
+  if (!Array.isArray(argv)) fail('内部错误：argv 不是数组')
+  if (argv.length === 0) return { configPath: null, comparePath: null }
+
+  // 位置 0 必须是主配置路径（不能是任何 `-` 开头的选项）
+  const first = argv[0]
+  if (typeof first !== 'string' || first.length === 0) fail('不接受空参数')
+  if (first === '--') fail('不接受 `--` 分隔符')
+  if (first.startsWith('-')) {
+    fail(`参数顺序非法：首个参数必须是主配置路径，实际为选项 ${first}`)
+  }
+  const configPath = first
+
+  if (argv.length === 1) return { configPath, comparePath: null }
+
+  // 位置 1 必须是 --compare
+  const second = argv[1]
+  if (second !== '--compare') {
+    fail(`参数顺序非法：主配置路径之后只允许 '--compare <path>'，实际为 ${second}`)
+  }
+
+  if (argv.length === 2) fail('--compare 缺少配置路径')
+
+  if (argv.length > 3) {
+    fail(`参数过多：--compare 之后只允许 1 个对照配置路径（多余：${argv.slice(3).join(', ')}）`)
+  }
+
+  const comparePath = argv[2]
+  if (typeof comparePath !== 'string' || comparePath.length === 0) fail('--compare 缺少配置路径')
+  if (comparePath === '--') fail('--compare 缺少配置路径（收到 `--`）')
+  if (comparePath.startsWith('-')) fail(`--compare 缺少配置路径（收到选项 ${comparePath}）`)
+
+  return { configPath, comparePath }
+}
+
+/** 定位 Worker 配置：显式路径优先，否则在 worker 目录按优先级查找；找不到即失败（不放行）。 */
+function locateConfig(explicit) {
   if (explicit) {
     const p = resolve(process.cwd(), explicit)
     if (!existsSync(p)) fail(`指定的配置文件不存在：${p}`)
@@ -254,40 +316,92 @@ function parseD1FromJson(text) {
   return (json.d1_databases || []).map((d) => ({ binding: d.binding, database_id: d.database_id }))
 }
 
-const configPath = locateConfig()
-const ext = configPath.toLowerCase().split('.').pop()
-let dbBindingEntries
-try {
-  const text = readFileSync(configPath, 'utf8')
+/** 读取指定配置文件中的 DB 绑定条目（不校验占位符语义）。 */
+function readDbEntries(configPath) {
+  const ext = configPath.toLowerCase().split('.').pop()
+  let text
+  try {
+    text = readFileSync(configPath, 'utf8')
+  } catch (err) {
+    fail(`读取/解析配置失败：${configPath}（${err.message}）`)
+  }
   if (ext === 'toml') {
-    dbBindingEntries = parseTomlStrict(text, configPath)
+    return parseTomlStrict(text, configPath)
       .filter((t) => t.type === 'array' && t.name === 'd1_databases')
       .filter((t) => String(t.entries.binding || '').trim() === 'DB')
       .map((t) => t.entries)
-  } else if (ext === 'json') {
-    dbBindingEntries = parseD1FromJson(text)
-      .filter((d) => String(d.binding || '').trim() === 'DB')
-  } else if (ext === 'jsonc') {
+  }
+  if (ext === 'json') {
+    return parseD1FromJson(text).filter((d) => String(d.binding || '').trim() === 'DB')
+  }
+  if (ext === 'jsonc') {
     fail(`不支持 JSONC（注释 / 尾逗号）；请改用 wrangler.toml 或标准 JSON 配置（${configPath}）`)
-  } else {
-    fail(`不支持的配置文件类型：${configPath}`)
   }
-} catch (err) {
-  fail(`读取/解析配置失败：${configPath}（${err.message}）`)
+  fail(`不支持的配置文件类型：${configPath}`)
 }
 
-if (!dbBindingEntries.length) {
-  fail(`未找到 binding = "DB" 的 [[d1_databases]] 绑定（${configPath}）`)
+/** 读取并强制「恰好 1 个 binding="DB"」的绑定条目（0 个或多个均拒绝，不静默取第一个）。 */
+function readSingleDbEntry(configPath, label) {
+  const entries = readDbEntries(configPath)
+  if (entries.length === 0) {
+    fail(`${label}：未找到 binding = "DB" 的 [[d1_databases]] 绑定（${configPath}）`)
+  }
+  if (entries.length !== EXPECTED_DB_BINDING_COUNT) {
+    fail(
+      `${label}：存在 ${entries.length} 个 binding = "DB" 的绑定，冻结设计要求恰好 ${EXPECTED_DB_BINDING_COUNT} 个；` +
+        `拒绝静默取第一个（${configPath}）`,
+    )
+  }
+  return entries[0]
 }
 
-for (const entry of dbBindingEntries) {
+/** 严格校验单个配置：必须恰好 1 个 binding="DB"，database_id 为合法 UUID 且非全零。返回完整 UUID。 */
+function requireValidDbId(configPath, label) {
+  const entry = readSingleDbEntry(configPath, label)
   const id = String(entry.database_id || '').trim()
-  if (!id) fail(`binding = "DB" 的绑定缺少 database_id（${configPath}）`)
-  if (id === ALL_ZERO) fail(`binding = "DB" 的 database_id 仍为全零占位值（${configPath}）`)
+  if (!id) fail(`${label}：binding = "DB" 的绑定缺少 database_id（${configPath}）`)
+  if (id === ALL_ZERO) fail(`${label}：database_id 仍为全零占位值（${configPath}）`)
   if (!UUID_RE.test(id)) {
-    fail(`binding = "DB" 的 database_id 不是合法 UUID，疑似仍为占位符：${id}（${configPath}）`)
+    fail(`${label}：database_id 不是合法 UUID，疑似仍为占位符：${id}（${configPath}）`)
+  }
+  return id
+}
+
+const { configPath: explicitConfig, comparePath: comparePathRaw } = parseCliArgs(process.argv.slice(2))
+const configPath = locateConfig(explicitConfig)
+const currentId = requireValidDbId(configPath, '主配置')
+
+// ── 可选：跨配置隔离比对（--compare <path>）─────────────────────────────
+// 规则：
+//   · 主配置（trial）：必须恰好 1 个 DB 绑定且为合法 UUID（已在上面强制）
+//   · 对照配置（生产）：必须恰好 1 个 DB 绑定；
+//       仅「精确生产占位符」→ 跳过比对 + WARN；
+//       合法 UUID → 必须与主配置不同；
+//       其余（全零、Trial 占位符、其他非 UUID）→ 一律拒绝
+if (comparePathRaw !== null) {
+  const comparePath = resolve(process.cwd(), comparePathRaw)
+  if (!existsSync(comparePath)) fail(`--compare 指定的配置文件不存在：${comparePath}`)
+  if (!statSync(comparePath).isFile()) fail(`--compare 指定的路径不是文件：${comparePath}`)
+
+  const compareEntry = readSingleDbEntry(comparePath, '对照配置')
+  const compareId = String(compareEntry.database_id || '').trim()
+
+  if (compareId === PRODUCTION_PLACEHOLDER) {
+    console.warn(
+      `[D1 配置守卫] ⚠️ WARN：对照配置（${comparePath}）的 database_id 仍为生产占位符 ${compareId}，` +
+        '跨环境隔离比对已跳过；trial 侧 UUID 已单独校验。生产 D1 建立后必须补做一次完整比对。',
+    )
+  } else if (compareId === ALL_ZERO) {
+    fail(`对照配置的 database_id 为全零占位值，拒绝（${comparePath}）`)
+  } else if (!UUID_RE.test(compareId)) {
+    fail(`对照配置的 database_id 不是合法 UUID（既非生产精确占位符也非 UUID），拒绝：${compareId}（${comparePath}）`)
+  } else if (compareId.toLowerCase() === currentId.toLowerCase()) {
+    fail(`隔离校验失败：trial 与对照配置使用了相同的 database_id（${currentId.slice(0, 8)}…），拒绝部署`)
+  } else {
+    console.log(
+      `[D1 配置守卫] ✅ 隔离比对通过：trial=${currentId.slice(0, 8)}… ≠ compare=${compareId.slice(0, 8)}…（完整值已隐藏）`,
+    )
   }
 }
 
-const id = String(dbBindingEntries[0].database_id).trim()
-console.log(`[D1 配置守卫] ✅ 通过：${configPath} → database_id=${id.slice(0, 8)}…（完整值已隐藏）`)
+console.log(`[D1 配置守卫] ✅ 通过：${configPath} → database_id=${currentId.slice(0, 8)}…（完整值已隐藏）`)

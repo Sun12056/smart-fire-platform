@@ -140,6 +140,60 @@ try {
     `[vars]\ndatabase_id = "${VALID_UUID}"\n\n` + db(PLACEHOLDER))]), 1)
   expect('D1 字段含非 UUID 转义内容时仍被拒绝', run([fixture('d1-escape.toml',
     `[[d1_databases]]\nbinding = "DB"\ndatabase_id = "abc\\q"\n`)]), 1)
+  // ── C1–C7：跨配置隔离比对（--compare）──
+  // 规则：主配置（trial）必须合法 UUID；对照配置（生产）仅「精确占位符」可降级为 WARN，
+  //       其余非 UUID 一律拒绝；两侧 UUID 相同 → 拒绝。
+  const TRIAL_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  const PROD_ID = '11111111-2222-3333-4444-555555555555'
+  const trialDb = (id) => `[[d1_databases]]\nbinding = "DB"\ndatabase_name = "smart-fire-db-trial"\ndatabase_id = "${id}"\n`
+  const trialCfg = fixture('trial-valid.toml', trialDb(TRIAL_ID))
+  const prodCfg = fixture('prod-valid.toml', trialDb(PROD_ID))
+  const prodPlaceholder = fixture('prod-placeholder.toml', trialDb(PLACEHOLDER))
+  const prodZero = fixture('prod-zero.toml', trialDb('00000000-0000-0000-0000-000000000000'))
+  const prodGarbage = fixture('prod-garbage.toml', trialDb('not-a-uuid-value'))
+
+  expect('C1 两侧 UUID 不同 → 通过', run([trialCfg, '--compare', prodCfg]), 0, '隔离比对通过')
+  expect('C2 两侧 UUID 相同 → 拒绝', run([trialCfg, '--compare', trialCfg]), 1, '相同的 database_id')
+  expect('C3 生产为精确占位符 → 通过 + WARN', run([trialCfg, '--compare', prodPlaceholder]), 0, 'WARN')
+  expect('C4 trial 为占位符 → 拒绝', run([prodPlaceholder, '--compare', prodCfg]), 1)
+  expect('C5a 对照配置为全零 → 拒绝', run([trialCfg, '--compare', prodZero]), 1)
+  expect('C5b 对照配置为非 UUID 非占位符 → 拒绝', run([trialCfg, '--compare', prodGarbage]), 1)
+  expect('C6 compare 路径不存在 → 拒绝', run([trialCfg, '--compare', join(dir, 'no-such.toml')]), 1, '不存在')
+  expect('C7 --compare 缺值 → 拒绝', run([trialCfg, '--compare']), 1, '缺少配置路径')
+
+  // ── C8–C14：F-1 多绑定约束 / F-2 占位符收紧 / F-3 严格参数解析 ──
+  const TRIAL_PLACEHOLDER = '<REPLACE_WITH_TRIAL_D1_DATABASE_ID>'
+  const dbTwo = (id1, id2) =>
+    `[[d1_databases]]\nbinding = "DB"\ndatabase_name = "a"\ndatabase_id = "${id1}"\n\n` +
+    `[[d1_databases]]\nbinding = "DB"\ndatabase_name = "b"\ndatabase_id = "${id2}"\n`
+  const trialPlaceholderCfg = fixture('trial-placeholder.toml', trialDb(TRIAL_PLACEHOLDER))
+  const dupMain = fixture('dup-main.toml', dbTwo(TRIAL_ID, PROD_ID))
+  const dupCompare = fixture('dup-compare.toml', dbTwo(PROD_ID, '99999999-8888-7777-6666-555555555555'))
+
+  expect('C8 主配置存在 2 个 DB 绑定 → 拒绝（不静默取第一个）', run([dupMain]), 1, '恰好 1 个')
+  expect('C9 对照配置存在 2 个 DB 绑定 → 拒绝', run([trialCfg, '--compare', dupCompare]), 1, '恰好 1 个')
+  expect('C10 对照配置为 Trial 占位符 → 拒绝（F-2 收紧）', run([trialCfg, '--compare', trialPlaceholderCfg]), 1)
+  expect('C11 未知参数 → 拒绝', run([trialCfg, '--evil']), 1, '参数顺序非法')
+  expect('C12 第二个位置参数（非 --compare）→ 拒绝', run([trialCfg, prodCfg]), 1, '参数顺序非法')
+  expect('C13 重复 --compare → 拒绝', run([trialCfg, '--compare', prodCfg, '--compare', prodCfg]), 1, '参数过多')
+  expect('C14 裸 -- → 拒绝', run([trialCfg, '--']), 1, '--')
+
+  // ── C15–C18：F-3 严格顺序（--compare 只能在主配置之后）──
+  expect('C15 反向顺序 --compare prod trial → 拒绝', run(['--compare', prodCfg, trialCfg]), 1, '参数顺序非法')
+  expect('C16 --compare 后多余参数 → 拒绝', run([trialCfg, '--compare', prodCfg, 'extra.toml']), 1, '参数过多')
+  expect('C17 --compare 后跟选项而非路径 → 拒绝', run([trialCfg, '--compare', '--evil']), 1, '缺少配置路径')
+  expect('C18 首参为裸 -- → 拒绝', run(['--', trialCfg]), 1, '--')
+
+  // ── C19–C22：UUID 大小写归一化与格式边界 ──
+  const UPPER_SAME = '0D92D71A-2658-4EC1-BC16-13C9628FAB80'
+  const LOWER_SAME = '0d92d71a-2658-4ec1-bc16-13c9628fab80'
+  const upperCfg = fixture('c19-upper.toml', trialDb(UPPER_SAME))
+  const lowerCfg = fixture('c19-lower.toml', trialDb(LOWER_SAME))
+
+  expect('C19 同一 UUID 大小写不同 → 拒绝（归一化比较）', run([upperCfg, '--compare', lowerCfg]), 1, '相同的 database_id')
+  expect('C20 大写合法 UUID 单配置 → 通过', run([upperCfg]), 0)
+  expect('C21 长度少 1 位 → 拒绝', run([fixture('c21-short.toml', trialDb('0d92d71a-2658-4ec1-bc16-13c9628fab8'))]), 1)
+  expect('C22 含非 hex 字符 → 拒绝', run([fixture('c22-nonhex.toml', trialDb('zz92d71a-2658-4ec1-bc16-13c9628fab80'))]), 1)
 } finally {
   rmSync(dir, { recursive: true, force: true })
 }

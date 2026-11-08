@@ -1,0 +1,36 @@
+# 试用环境 Worker 配置（独立于生产的 wrangler.toml，二者不共用任何资源 ID）
+#
+# 重要：
+#   · 本文件中的 database_id 必须替换为 **trial D1** 的真实 UUID；
+#     在生产 D1 尚未建立时，生产侧的占位符仅用于触发「跳过跨配置比对 + WARN」的降级路径。
+#   · GATEWAY_MODE 为**预留变量**：worker/src/** 目前尚未实现读取该变量的运行时中间件
+#     （登记为独立工作包 U-14）。因此本文件中的取值**不代表**运行时拒绝网关已经生效。
+#   · 部署入口：npm run deploy:trial（内部固定 --config 指向本文件）。
+name = "smart-fire-api-trial"
+main = "src/index.ts"
+compatibility_date = "2026-09-20"
+workers_dev = false
+preview_urls = false
+
+# D1：trial 独立库（不得与生产 smart-fire-db 共用）
+[[d1_databases]]
+binding = "DB"
+database_name = "smart-fire-db-trial"
+database_id = "0d92d71a-2658-4ec1-bc16-13c9628fab80"
+
+# Durable Objects：与生产同源代码类，但 Worker 名不同 → 平台侧为独立 namespace（需 T16b 平台验证）
+[[durable_objects.bindings]]
+name = "DEMO_ROOM"
+class_name = "DemoRoom"
+script_name = "smart-fire-api-trial"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DemoRoom"]
+
+# 网关模式（预留变量，运行时中间件未实现）
+# P1d: deny_all → P2: auth_only → P3: enforce
+[vars]
+GATEWAY_MODE = "deny_all"
+
+# ⚠️ 生产环境请勿在此写入真实令牌；trial 的 SEED_TOKEN 应使用 wrangler secret put 单独设置。
