@@ -1,0 +1,10 @@
+# Trial Pages 项目（独立 root_dir，避免污染生产 Pages 的 functions 检测）
+# 该目录必须作为 Pages 项目的 root_dir，生产项目 root_dir="" 保持不变。
+name = "smart-fire-platform-trial"
+pages_build_output_dir = "./dist"
+compatibility_date = "2026-09-20"
+
+# Service Binding → Trial Worker（不依赖 workers.dev / routes）
+[[services]]
+binding = "API"
+service = "smart-fire-api-trial"

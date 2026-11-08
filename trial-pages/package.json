@@ -1,0 +1,11 @@
+{
+  "name": "smart-fire-platform-trial-pages",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "cd .. && npm ci && cd trial-pages && node scripts/build.mjs",
+    "build:local": "node scripts/build.mjs --skip-frontend-build",
+    "test:proxy": "node scripts/p1e-proxy.test.mjs"
+  }
+}
