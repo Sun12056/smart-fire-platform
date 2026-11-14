@@ -5,11 +5,11 @@
       <div class="header-bar"></div>
       <div class="header-text">
         <h2 class="title-spacing">消防生命感知中心</h2>
-        <p class="header-sub">毫米波雷达实时人员定位与生命体征监测</p>
+        <p class="header-sub">毫米波雷达人员定位演示 · 本地模拟数据（非真实传感器）</p>
       </div>
       <div class="header-status">
-        <span class="status-tag cyan">雷达在线</span>
-        <span class="status-tag green">系统正常</span>
+        <span class="status-tag cyan">演示数据源</span>
+        <span class="status-tag green">本地模拟</span>
       </div>
     </div>
 
@@ -19,7 +19,7 @@
         <div class="mini-stat-bar" style="background: var(--fire-blue); "></div>
         <div class="mini-stat-body">
           <span class="mini-stat-value num-font glow-text-sm" style="color: var(--fire-blue);">{{ currentFloorStats.total }}</span>
-          <span class="mini-stat-label">实时人员</span>
+          <span class="mini-stat-label">模拟人员</span>
         </div>
         <svg class="mini-stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color: var(--fire-blue);">
           <circle cx="12" cy="8" r="4"/><path d="M4 22c0-4 4-6 8-6s8 2 8 6"/>
@@ -317,8 +317,8 @@
         <!-- 人数趋势图 -->
         <div class="fire-card chart-card">
           <div class="chart-title-row">
-            <span class="col-section-title title-spacing-sm">{{ selectedBuildingName }} · {{ selectedFloor }} 人数趋势</span>
-            <span class="status-tag cyan">实时</span>
+            <span class="col-section-title title-spacing-sm">{{ selectedBuildingName }} · {{ selectedFloor }} 模拟人数趋势</span>
+            <span class="status-tag cyan">本地生成 · 非实时</span>
           </div>
           <div ref="trendChartRef" class="chart-box"></div>
         </div>
@@ -502,7 +502,7 @@ function inBuilding(p, buildingName, buildingId) {
   return String(p.building || '') === String(buildingName)
 }
 
-// 楼层按钮列表（含每楼层实时人数标签）
+// 楼层按钮列表（含每楼层模拟人数标签）
 // P1.6.1：按统一字段 buildingId / floorId 统计
 const floorOptions = computed(() => {
   const building = selectedBuildingName.value
@@ -612,7 +612,7 @@ function onPersonClick(person) {
 const trendChartRef = ref(null)
 let trendChart = null
 
-// 每楼层独立趋势：以当前楼层实时人数为曲线量级基准，按楼栋/楼层哈希差异化形态
+// 每楼层独立趋势：以当前楼层模拟人数为曲线量级基准，按楼栋/楼层哈希差异化形态（本地生成，非历史时序）
 const currentFloorTrend = computed(() => {
   const base = store.personTrend && typeof store.personTrend === 'object' ? store.personTrend : {}
   const hours = Array.isArray(base.hours) && base.hours.length

@@ -23,8 +23,14 @@
       </button>
 
       <div class="section-divider"></div>
-      <!-- 六阶段演示流程（真实改变平台状态，统一单一数据源） -->
-      <div class="section-label">六阶段演示流程</div>
+      <!-- 六阶段演示流程（L-2：mock 模式为前端本地推演，非后端状态机） -->
+      <div class="section-label">
+        六阶段演示流程
+        <span class="mock-chip">本地模拟推演</span>
+      </div>
+      <p class="mock-note">
+        以下阶段推进由前端本地 Mock 推演产生，<strong>不代表</strong> Worker 后端状态机、真实消防设备联动或真实消防指令下发。
+      </p>
       <div class="demo-flow-progress">
         <el-progress :percentage="platformStore.demoFlowProgress" :stroke-width="6" :color="'#4CC9F0'" />
       </div>
@@ -220,6 +226,28 @@ function handleStopAutoDemo() {
 </script>
 
 <style scoped>
+.section-label .mock-chip {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  background: rgba(239, 68, 68, 0.18);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.mock-note {
+  margin: 6px 0 8px;
+  padding: 7px 9px;
+  border-left: 2px solid rgba(239, 68, 68, 0.55);
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: 4px;
+  color: #fca5a5;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
 .demo-panel {
   position: fixed;
   bottom: 16px;
