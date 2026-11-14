@@ -73,6 +73,16 @@
           <path d="M12 7V4"/>
           <line x1="10" y1="5" x2="14" y2="5"/>
         </svg>
+        <!-- User / 我的账号 -->
+        <svg v-if="item.icon === 'user'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="8" r="4"/>
+          <path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/>
+        </svg>
+        <!-- Admin / 用户管理 -->
+        <svg v-if="item.icon === 'admin'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/>
+          <path d="M9.5 12l1.8 1.8L15 10"/>
+        </svg>
         <!-- Route / 疏散路线规划 -->
         <svg v-if="item.icon === 'route'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="6" cy="6" r="2.5"/>
@@ -126,17 +136,27 @@
 <script setup>
 import { computed } from 'vue'
 import { useFireStore } from '../stores/fireStore'
+import { useAuthStore } from '../stores/authStore'
 
 const store = useFireStore()
+// AUTH-8：前端仅用于菜单可见性，授权边界在 Worker requireAdmin
+const auth = useAuthStore()
 
-const navItems = computed(() => [
-  { path: '/dashboard', label: '楼宇态势', icon: 'dashboard' },
-  { path: '/building', label: '消防态势', icon: 'building' },
-  { path: '/person', label: '生命感知', icon: 'person' },
-  { path: '/evacuation', label: '智能疏散', icon: 'door' },
-  { path: '/route-plan', label: '疏散路径', icon: 'route' },
-  { path: '/emergency', label: '后台日志', icon: 'emergency' },
-])
+const navItems = computed(() => {
+  const items = [
+    { path: '/dashboard', label: '楼宇态势', icon: 'dashboard' },
+    { path: '/building', label: '消防态势', icon: 'building' },
+    { path: '/person', label: '生命感知', icon: 'person' },
+    { path: '/evacuation', label: '智能疏散', icon: 'door' },
+    { path: '/route-plan', label: '疏散路径', icon: 'route' },
+    { path: '/emergency', label: '后台日志', icon: 'emergency' },
+    // AUTH-8：所有登录用户可见
+    { path: '/account', label: '我的账号', icon: 'user' },
+  ]
+  // AUTH-8：仅管理员可见（后端 requireAdmin 为最终授权边界）
+  if (auth.isAdmin) items.push({ path: '/admin/users', label: '用户管理', icon: 'admin' })
+  return items
+})
 
 const groupHeaders = computed(() => [
   {

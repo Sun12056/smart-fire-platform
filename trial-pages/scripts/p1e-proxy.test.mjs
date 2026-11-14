@@ -137,19 +137,24 @@ function included(path) {
   return (routes.include || []).some((p) => (p.endsWith('/*') ? path === p.slice(0, -2) || path.startsWith(p.slice(0, -1)) : p === path))
 }
 
-console.log('\n[G3] /api/v10 路径边界（配置层）')
+// ── G3/G4：_routes.json 配置层边界（AUTH-3 语义变更后）────────────────────
+// AUTH-3 要求全站访问保护：`_routes.json` 改为 include ["/*"]（全站进入 Functions）。
+// 因此 G3/G4 的旧断言（静态资源不进入 Functions）已不再适用，改为断言新语义：
+//   · 全站（含静态资源）必须被纳入，否则无法实施登录保护；
+//   · `/api/v10` 虽被纳入，但不得被当作业务 API 透传（由 _middleware 走登录保护）。
+console.log('\n[G3] /api/v10 路径边界（AUTH-3 后：纳入但不透传）')
 {
-  const name = 'G3 /api/v10 与 /api/v10/x 不被 _routes.json 纳入'
-  const a = ok(included('/api/v10') === false, { matched: included('/api/v10') })
-  const b = ok(included('/api/v10/x') === false, { matched: included('/api/v10/x') })
+  const name = 'G3 /api/v10 与 /api/v10/x 被全站纳入（鉴权由 _middleware 承担，非 /api/v1 透传）'
+  const a = ok(included('/api/v10') === true, { matched: included('/api/v10') })
+  const b = ok(included('/api/v10/x') === true, { matched: included('/api/v10/x') })
   done(name, a && b, { v10: included('/api/v10'), v10x: included('/api/v10/x') })
 }
 
-console.log('\n[G4] 静态资源不进入 Functions（配置层）')
+console.log('\n[G4] 全站纳入 Functions（AUTH-3 全站保护要求）')
 {
-  const name = 'G4 / 与 /assets/* 不被纳入'
-  const a = ok(included('/') === false, { matched: included('/') })
-  const b = ok(included('/assets/index.js') === false, { matched: included('/assets/index.js') })
+  const name = 'G4 / 与 /assets/* 被纳入（全站保护），/api/v1 仍纳入'
+  const a = ok(included('/') === true, { matched: included('/') })
+  const b = ok(included('/assets/index.js') === true, { matched: included('/assets/index.js') })
   const c = ok(included('/api/v1') === true && included('/api/v1/buildings') === true, {
     apiRoot: included('/api/v1'),
     apiChild: included('/api/v1/buildings'),

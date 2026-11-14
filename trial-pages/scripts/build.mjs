@@ -41,4 +41,29 @@ cpSync(SRC_DIST, OUT_DIST, { recursive: true })
 // _routes.json 必须位于 Pages 构建输出目录根部
 writeFileSync(join(OUT_DIST, '_routes.json'), readFileSync(ROUTES_SRC, 'utf8'), 'utf8')
 
-console.log('[trial-pages] 输出就绪：dist/（含 _routes.json）')
+// AUTH-3：登录页必须随构建产物发布（匿名例外路径 /login 与 /login.html）
+const LOGIN_SRC = join(TRIAL_DIR, 'login.html')
+if (!existsSync(LOGIN_SRC)) {
+  console.error('[trial-pages] 缺少 login.html（AUTH-3 登录页）')
+  process.exit(1)
+}
+cpSync(LOGIN_SRC, join(OUT_DIST, 'login.html'))
+
+// AUTH-9：登录页复用的设计稿静态资源（与 login.html 同级发布）
+const LOGIN_ASSETS = ['auth.css', 'auth.js', 'orb-particles.js', 'favicon.svg']
+for (const name of LOGIN_ASSETS) {
+  const src = join(TRIAL_DIR, name)
+  if (!existsSync(src)) {
+    console.error(`[trial-pages] 缺少登录页资源 ${name}`)
+    process.exit(1)
+  }
+  cpSync(src, join(OUT_DIST, name))
+}
+
+// AUTH-3：/login → /login.html 内部 rewrite（避免依赖 Pages 默认 html_handling）
+const REDIRECTS_SRC = join(TRIAL_DIR, '_redirects')
+if (existsSync(REDIRECTS_SRC)) {
+  cpSync(REDIRECTS_SRC, join(OUT_DIST, '_redirects'))
+}
+
+console.log('[trial-pages] 输出就绪：dist/（含 _routes.json / _redirects / login.html）')

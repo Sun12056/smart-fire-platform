@@ -1,0 +1,290 @@
+/* ============================================================
+   auth.css — 登录 / 注册页共用样式
+   布局参考用户提供的「创建您的账户」参考图：大圆角左右分栏、
+   左栏表单（居中标题+副标题 / 标签在上带星号 / 灰底输入框+帮助文字 /
+   全宽主按钮 / 或使用以下方式继续 / 三个第三方图标 / 底部链接）、
+   右栏竖版视觉区 + 轮播圆点。右栏图片由放大的粒子球替代。
+   配色：消防红（heroui Danger #E44C3D）+ 警示黄（Warning #F5A524）
+        + 成功绿（Success #24864E），默认深色。
+   ============================================================ */
+:root {
+  --radius: 24px;
+  --bg: #14171b; --card: #1c2128; --card-border: #333b45;
+  --text: #f2f4f7; --muted: #a2acba;
+  --field-bg: #2b323b; --field-border: #39424d;
+  --accent: #E44C3D; --accent-2: #FF7A2F; --warn: #F5A524;
+  --success: #24864E; --danger: #FF5A4E;
+  --shadow: 0 30px 80px -28px rgba(0,0,0,.75);
+  --stripe: repeating-linear-gradient(115deg,
+    var(--warn) 0 12px, #1b1b1b 12px 24px, var(--warn) 24px 30px, #1b1b1b 30px 42px);
+}
+* { box-sizing: border-box; }
+html, body { min-height: 100%; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text); background: var(--bg);
+  display: grid; place-items: center; padding: clamp(16px, 3vw, 40px);
+  /* AUTH-9.2：登录卡片与粒子球作为整体下移（仅改父容器上内距，
+     两者相对位置、尺寸、间距与动画均不变） */
+  padding-top: calc(clamp(16px, 3vw, 40px) + 10vh);
+  overflow-x: hidden;
+}
+
+/* ---- 背景：libraries.dev/orbs 氛围光球 + bencho Particles 火星余烬 ---- */
+.orbs { position: fixed; inset: 0; z-index: 0; filter: blur(64px); opacity: .4; pointer-events: none; }
+.orbs span {
+  position: absolute; width: 38vmax; height: 38vmax; border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, var(--accent), transparent 60%);
+  animation: float 18s ease-in-out infinite;
+}
+.orbs span:nth-child(2) {
+  background: radial-gradient(circle at 30% 30%, var(--accent-2), transparent 60%);
+  right: -10vmax; bottom: -10vmax; animation-delay: -6s;
+}
+@keyframes float { 0%,100%{transform:translate(0,0) scale(1)} 50%{transform:translate(6vmax,-4vmax) scale(1.15)} }
+@media (prefers-reduced-motion: reduce){ .orbs span{animation:none} }
+#particles { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+
+/* ---- 页面级两栏：左卡片（表单） + 右侧裸粒子球 ----
+   粒子球不放在卡片内、不包裹任何容器，直接落在页面背景上。 ---- */
+.auth-stage {
+  position: relative; z-index: 1;
+  width: min(1040px, 100%);
+  display: grid; grid-template-columns: minmax(0, 460px) minmax(0, 1fr);
+  align-items: center; gap: clamp(24px, 5vw, 72px);
+}
+/* 卡片只包左栏表单 + Border beam（libraries.dev/beam） */
+.auth-card {
+  position: relative; z-index: 1;
+  width: 100%;
+  background: var(--card);
+  border: 1px solid var(--card-border); border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  transform-style: preserve-3d;
+  animation: cardIn .6s cubic-bezier(.16,1,.3,1) both; /* beui EASE_OUT */
+}
+@property --beam-angle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
+@keyframes beamRide { to { --beam-angle: 360deg; } }
+.auth-card::before, .auth-card::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: conic-gradient(from var(--beam-angle, 0deg),
+    transparent 0deg 268deg,
+    color-mix(in srgb, var(--accent) 22%, transparent) 282deg,
+    var(--accent) 300deg, var(--accent-2) 318deg, var(--warn) 332deg,
+    #fff6e0 340deg, transparent 356deg 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+}
+.auth-card::before { padding: 2px; z-index: 3; opacity: .95; animation: beamRide 5s linear infinite; }
+.auth-card::after  { padding: 5px; z-index: 0; filter: blur(9px); opacity: var(--beam-glow, .5); animation: beamRide 5s linear infinite; }
+@keyframes cardIn { from { opacity: 0; transform: translateY(24px) scale(.98); } to { opacity: 1; transform: none; } }
+.card__stripe { position: absolute; top: 0; left: 0; right: 0; height: 4px; z-index: 4; background: var(--stripe); opacity: .8; }
+@media (prefers-reduced-motion: reduce){
+  .auth-card { animation: none; }
+  .auth-card::before, .auth-card::after { animation: none; opacity: .3; }
+}
+
+/* ---- 左栏：表单 ---- */
+.auth-form {
+  position: relative; z-index: 2;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 44px clamp(28px, 5vw, 60px);
+}
+.auth-head { text-align: center; margin-bottom: 30px; }
+.auth-head h1 { font-size: clamp(30px, 3.4vw, 40px); font-weight: 800; margin: 0; letter-spacing: .02em; line-height: 1.15; }
+.auth-lead { margin: 12px 0 0; font-size: 14px; line-height: 1.6; color: var(--muted); }
+
+.field { margin-bottom: 18px; }
+.req { color: var(--accent); margin-left: 2px; }
+.field__control { position: relative; }
+.field input {
+  width: 100%; padding: 22px 16px 9px; font-size: 15px; color: var(--text);
+  background: var(--field-bg); border: 1px solid var(--field-border); border-radius: 8px;
+  transition: border-color .2s, box-shadow .2s;
+}
+.field input::placeholder { color: var(--muted); opacity: .85; }
+/* 浮动标签：静息时标签充当占位符位于框内；
+   鼠标点击（focus-within）或已输入（:not(:placeholder-shown)）时上浮缩小并变色。
+   输入框 placeholder 必须是单个空格，:placeholder-shown 才能判定空值。 */
+.field__control label {
+  position: absolute; left: 16px; top: 15px; z-index: 1;
+  font-size: 15px; font-weight: 600; color: var(--muted);
+  pointer-events: none; transform-origin: left top;
+  transition: transform .18s ease, color .18s ease;
+}
+.field__control:focus-within label,
+.field__control:has(input:not(:placeholder-shown)) label {
+  transform: translateY(-9px) scale(.76); color: var(--accent);
+}
+.field input:focus { outline: none; border-color: var(--accent); animation: focusPulse 1.4s ease-out infinite; }
+@keyframes focusPulse {
+  0%   { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 34%, transparent); }
+  70%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent); }
+  100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 34%, transparent); }
+}
+@media (prefers-reduced-motion: reduce){ .field input:focus{animation:none} }
+.field__control:focus-within input,
+.field__control:has(input:not(:placeholder-shown)) input {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--field-border));
+}
+/* Border beam 的 size="line" 变体：聚焦时细光束沿输入框边框骑行 */
+.field__control::after {
+  content: ""; position: absolute; inset: 0; border-radius: 8px; pointer-events: none;
+  background: conic-gradient(from var(--beam-angle, 0deg),
+    transparent 0deg 270deg, var(--accent) 300deg, var(--warn) 332deg, #fff6e0 344deg, transparent 358deg 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  padding: 1.5px; opacity: 0; transition: opacity .2s;
+}
+.field__control:focus-within::after { opacity: .9; animation: beamRide 2.2s linear infinite; }
+@media (prefers-reduced-motion: reduce){ .field__control:focus-within::after{animation:none;opacity:.35} }
+.field:has(input:user-invalid) input { border-color: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent); }
+.field:has(input:user-valid) input { border-color: var(--success); }
+/* bencho Form error：失败字段抖动 */
+@keyframes shake {
+  10%,90%{transform:translateX(-2px)} 20%,80%{transform:translateX(4px)}
+  30%,50%,70%{transform:translateX(-7px)} 40%,60%{transform:translateX(7px)}
+}
+.field.shake { animation: shake .5s cubic-bezier(.36,.07,.19,.97) both; }
+@media (prefers-reduced-motion: reduce){ .field.shake{animation:none} }
+
+/* bencho Eye tracker：眼睛磁吸 + 动效 */
+.field__control--password input { padding-right: 48px; }
+.pw-toggle {
+  position: absolute; right: 4px; top: 50%; z-index: 1; transform: translateY(-50%);
+  width: 38px; height: 38px; display: grid; place-items: center;
+  background: transparent; border: none; border-radius: 8px; color: var(--muted);
+  cursor: pointer; transition: transform .18s cubic-bezier(.34,1.56,.64,1), color .18s, background .18s;
+}
+.pw-toggle:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.pw-toggle svg { grid-area: 1/1; width: 20px; height: 20px; transition: transform .2s ease, opacity .2s ease; }
+.pw-toggle .eye-off { opacity: 0; transform: rotate(-90deg) scale(.6); }
+.pw-toggle.is-visible .eye-open { opacity: 0; transform: rotate(90deg) scale(.6); }
+.pw-toggle.is-visible .eye-off { opacity: 1; transform: rotate(0) scale(1); }
+.pw-toggle.pop svg { animation: eyePop .3s ease; }
+@keyframes eyePop { 0%{transform:scale(.6)} 60%{transform:scale(1.25)} 100%{transform:scale(1)} }
+@media (prefers-reduced-motion: reduce){ .pw-toggle, .pw-toggle svg{transition:none; animation:none} }
+
+.row { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 18px; }
+.row label { font-size: 13px; color: var(--muted); display: inline-flex; gap: 8px; align-items: center; }
+.row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.row a { color: var(--accent); text-decoration: none; font-size: 13px; }
+.row a:hover { text-decoration: underline; }
+
+/* 主按钮 + bencho Sweep button 扫光 */
+button[type="submit"] {
+  position: relative; overflow: hidden;
+  width: 100%; padding: 14px; font-size: 15px; font-weight: 700; color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border: none; border-radius: 8px; cursor: pointer;
+  transition: transform .1s, filter .2s; display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+}
+button[type="submit"]:hover { filter: brightness(1.08); }
+button[type="submit"]:active { transform: scale(.99); }
+button[type="submit"]:disabled { filter: saturate(.6) brightness(.9); cursor: progress; }
+button[type="submit"]::after {
+  content: ""; position: absolute; top: 0; left: -60%; width: 50%; height: 100%;
+  background: linear-gradient(100deg, transparent, rgba(255,255,255,.45), transparent);
+  transform: skewX(-20deg);
+}
+button[type="submit"]:hover::after { animation: sweep .8s ease; }
+@keyframes sweep { to { left: 130%; } }
+@media (prefers-reduced-motion: reduce){ button[type="submit"]::after{display:none} }
+.orb { width: 18px; height: 18px; border-radius: 50%; position: relative; flex: none; }
+.orb::before, .orb::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(from 0deg, #fff, transparent 70%); animation: spin 1s linear infinite;
+}
+.orb::after { inset: 4px; background: var(--accent); animation: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce){ .orb::before{animation:none} }
+
+.divider { display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 13px; margin: 22px 0 16px; }
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--card-border); }
+
+/* boardui 身份验证卡片：三个第三方图标 + bencho Magnetic 磁吸 */
+.oauth { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.oauth button {
+  height: 48px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px; border: 1px solid var(--field-border);
+  background: var(--field-bg); color: var(--text); cursor: pointer;
+  transition: transform .18s cubic-bezier(.34,1.56,.64,1), box-shadow .18s, border-color .18s;
+  will-change: transform;
+}
+.oauth button:hover { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent); }
+.oauth svg { width: 22px; height: 22px; }
+
+.foot { text-align: center; margin: 22px 0 0; font-size: 14px; color: var(--muted); }
+.foot a { color: var(--accent); text-decoration: none; font-weight: 600; }
+.foot a:hover { text-decoration: underline; }
+
+/* ---- 粒子球：页面级裸元素，无任何容器 / 底色 / 边框 / 圆角 ---- */
+.orb-stage {
+  position: relative; z-index: 1;
+  justify-self: center;
+  width: min(100%, 440px); aspect-ratio: 1;
+  display: grid; place-items: center;
+  min-width: 0; cursor: crosshair;
+  background: none; border: 0; padding: 0; box-shadow: none;
+  animation: orbFloat 5s ease-in-out infinite;
+}
+.orb-stage:focus-visible { outline: 2px solid var(--warn); outline-offset: 12px; border-radius: 50%; }
+.orb-stage canvas { display: block; width: 100%; height: 100%; background: none; }
+@keyframes orbFloat { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
+@media (prefers-reduced-motion: reduce){ .orb-stage{animation:none} }
+
+/* bencho Toast stack：弹性入场 */
+.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 5; display: grid; gap: 10px; }
+.toast {
+  min-width: 220px; padding: 12px 14px; border-radius: 10px; color: #fff; font-size: .88rem;
+  box-shadow: var(--shadow); animation: toastSpring .45s cubic-bezier(.34,1.56,.64,1) both;
+  border: 1px solid rgba(255,255,255,.15);
+}
+.toast--success { background: var(--success); }
+.toast--error { background: var(--accent); }
+@keyframes toastSpring {
+  0%{opacity:0;transform:translateY(16px) scale(.85)}
+  60%{opacity:1;transform:translateY(-3px) scale(1.04)}
+  100%{opacity:1;transform:translateY(0) scale(1)}
+}
+@media (prefers-reduced-motion: reduce){ .toast{animation:none} }
+
+/* 忘记密码 dialog */
+dialog {
+  border: 1px solid var(--card-border); background: var(--card); color: var(--text);
+  border-radius: 18px; padding: 24px; max-width: 340px; width: calc(100% - 32px);
+  box-shadow: var(--shadow);
+}
+dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(2px); }
+dialog h2 { margin: 0 0 6px; font-size: 1.1rem; }
+dialog p { color: var(--muted); font-size: .86rem; line-height: 1.5; margin: 0 0 16px; }
+/* 弹窗保持静态标签在上，输入框用常规内边距（不参与浮动标签） */
+dialog .field > label { display: block; font-size: 14px; font-weight: 700; margin-bottom: 8px; }
+dialog .field input { padding: 13px 16px; }
+dialog .dialog-actions { display: flex; gap: 10px; margin-top: 4px; }
+dialog .dialog-actions button {
+  flex: 1; padding: 10px; border-radius: 8px; cursor: pointer; font-size: .9rem;
+  border: 1px solid var(--card-border); background: var(--field-bg); color: var(--text);
+}
+dialog .dialog-actions button.primary {
+  border: none; color: #fff; font-weight: 700;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+:where(button, a, .orb-stage):focus-visible { outline: 2px solid var(--warn); outline-offset: 2px; }
+
+/* 响应式：窄屏改为上下堆叠，视觉区在上、表单在下 */
+@media (max-width: 860px){
+  /* AUTH-9.2：移动端为单列且总高更长，下移量收敛，避免过度滚动 */
+  body { padding-top: calc(clamp(16px, 3vw, 40px) + 4vh); }
+  .auth-stage { grid-template-columns: 1fr; gap: 12px; }
+  .orb-stage { order: -1; width: min(100%, 250px); }
+  .auth-card { width: min(460px, 100%); justify-self: center; }
+  .auth-form { padding: 28px clamp(20px, 5vw, 40px) 34px; }
+}
+@media (max-width: 420px){
+  .orb-stage { width: min(100%, 200px); }
+  .oauth { gap: 8px; }
+  .auth-head { margin-bottom: 24px; }
+}

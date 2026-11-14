@@ -3,7 +3,8 @@
 // 与 mockRepository 方法签名一一对应；数据形状由 docs/API_CONTRACT.md 约束。
 import { endpoints, buildQuery } from './contract'
 
-const BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8787').replace(/\/$/, '')
+// AUTH-8：默认同源相对路径（Cookie 由浏览器自动携带）；仅在显式需要跨域时才配置 VITE_API_BASE_URL。
+const BASE_URL = String(import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
 async function request(path, options = {}) {
   const res = await fetch(`${BASE_URL}${path}`, {

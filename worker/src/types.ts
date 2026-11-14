@@ -7,6 +7,10 @@ export interface Env {
   SEED_TOKEN?: string
   /** CORS 追加允许的来源（逗号分隔，仅本地开发用；生产默认仅放行 Pages 域名） */
   ALLOWED_ORIGINS?: string
+  /** AUTH-2b：PBKDF2 迭代次数（字符串整数，越界 fail-closed，不执行 KDF） */
+  PBKDF2_ITERATIONS?: string
+  /** AUTH-2b：Session 绝对有效期（小时）；保留扩展点，当前固定 8h */
+  SESSION_TTL_HOURS?: string
 }
 
 // ── Building ──

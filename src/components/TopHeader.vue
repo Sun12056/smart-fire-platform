@@ -20,11 +20,8 @@
         <span class="status-dot"></span>
         <span class="status-label">系统运行中</span>
       </div>
-      <div class="status-item admin-area" @click="store.toggleDemoMode()">
-        <span class="admin-badge" :class="{ active: store.demoMode }">
-          {{ store.demoMode ? '演示模式' : '管理员' }}
-        </span>
-      </div>
+      <!-- AUTH-8：原「管理员」徽章实际触发 demoMode，属权限误导；改为真实身份菜单 -->
+      <UserMenu />
     </div>
   </header>
 </template>
@@ -32,6 +29,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useFireStore } from '../stores/fireStore'
+import UserMenu from './UserMenu.vue'
 
 const store = useFireStore()
 const currentTime = ref('')

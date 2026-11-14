@@ -14,6 +14,7 @@ import { personPresenceRoute } from './routes/personPresence'
 import { operationLogsRoute } from './routes/operationLogs'
 import { adminRoute } from './routes/admin'
 import { demoRoute } from './routes/demo'
+import { authRoute } from './routes/auth'
 import { gatewayGuard } from './middleware/gateway'
 
 // Durable Object 必须由入口模块导出，供 wrangler 绑定
@@ -31,6 +32,9 @@ app.use('*', cors({
     return allowed.includes(origin) ? origin : ''
   },
 }))
+
+// AUTH-2b：独立认证控制面 /api/auth/*（isApiPath 仅匹配 /api/v1，不被网关拦截）
+app.route('/api/auth', authRoute)
 
 // P1d：网关守卫（CORS 之后、路由之前；OPTIONS 与 /healthz 由守卫内部放行）
 app.use('*', gatewayGuard)

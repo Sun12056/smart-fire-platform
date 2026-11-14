@@ -1,0 +1,4 @@
+# AUTH-3/5 · 登录页路径映射
+# 注意：Pages 默认 html_handling 已能将 /login 映射到 login.html（200）。
+# 若在此显式 rewrite 到 /login.html，会与 html_handling 的「剥离 .html」308 规则互相触发，
+# 形成 /login → /login.html → /login 的重定向循环。因此**不配置 rewrite 规则**。

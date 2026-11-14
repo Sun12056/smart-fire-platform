@@ -1,5 +1,7 @@
 <template>
   <div class="app-container">
+    <!-- AUTH-8：mock 模式常驻 Demo 标识（顶部条 + 右下角标，不可关闭） -->
+    <DemoBadge />
     <TopHeader />
     <DataSourceBanner />
     <div class="main-body">
@@ -13,6 +15,9 @@
       </div>
     </div>
     <DemoPanel v-if="store.demoMode" />
+
+    <!-- AUTH-8：强制改密（不可关闭） -->
+    <ChangePasswordDialog :model-value="auth.mustChangePassword" force @success="onPasswordChanged" />
   </div>
 </template>
 
@@ -20,17 +25,29 @@
 import { onMounted, onUnmounted } from 'vue'
 import { useFireStore } from './stores/fireStore'
 import { useDemoStore } from './stores/demoStore'
+import { useAuthStore } from './stores/authStore'
 import { dataSource } from './api'
 import TopHeader from './components/TopHeader.vue'
 import SideNavigation from './components/SideNavigation.vue'
 import DemoPanel from './components/DemoPanel.vue'
 import DataSourceBanner from './components/DataSourceBanner.vue'
+import DemoBadge from './components/DemoBadge.vue'
+import ChangePasswordDialog from './components/ChangePasswordDialog.vue'
 
 const store = useFireStore()
 const demoStore = useDemoStore()
+const auth = useAuthStore()
+
+/** 改密成功后：后端已撤销全部 Session，必须回到登录页重新认证 */
+function onPasswordChanged() {
+  window.location.assign('/login')
+}
 
 let timer = null
 onMounted(async () => {
+  // AUTH-8：先确定当前身份（唯一来源为 /api/auth/session）
+  await auth.refresh()
+
   // 远端模式（api / demo）：经 Service 层从 Workers → D1 拉取初始化数据
   // 失败时不会静默回退 mock，而是置位 remoteError 并由 DataSourceBanner 明确告警
   await store.initFromRemote()

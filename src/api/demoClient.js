@@ -3,9 +3,16 @@
 // 业务状态一律以后端广播为准，前端不自行推演阶段。
 import { endpoints, WS_MSG } from './contract'
 
-const BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8787').replace(/\/$/, '')
+// AUTH-8：默认同源；BASE_URL 为空时 WebSocket 由 location 推导（https→wss）
+const BASE_URL = String(import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
 function toWsUrl(httpUrl) {
+  if (!httpUrl) {
+    // SSR / Node（含 store 单测）无 window，不得抛错；浏览器运行时一定走下面的同源推导。
+    if (typeof window === 'undefined' || !window.location) return ''
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${proto}//${window.location.host}`
+  }
   return httpUrl.replace(/^http/, 'ws')
 }
 

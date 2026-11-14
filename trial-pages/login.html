@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<!--
+  布局参考用户提供的「创建您的账户」参考图：大圆角左右分栏、
+  左栏表单（居中标题+副标题 / 标签在上带星号 / 灰底输入框+帮助文字 /
+  全宽主按钮 / 或使用以下方式继续 / 三个第三方图标 / 底部链接）、
+  右栏竖版视觉区 + 轮播圆点。右栏图片改用放大的粒子球。
+  样式见 auth.css，粒子球见 orb-particles.js。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>登录 · 智慧消防管理平台</title>
+<meta name="description" content="登录智慧消防管理平台。" />
+<link rel="stylesheet" href="auth.css" />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+</head>
+<body>
+  <canvas id="particles" aria-hidden="true"></canvas>
+  <div class="orbs" aria-hidden="true"><span></span><span></span></div>
+
+  <div class="auth-stage">
+  <main class="auth-card">
+    <div class="card__stripe" aria-hidden="true"></div>
+
+    <!-- 左栏：表单 -->
+    <section class="auth-form" aria-labelledby="authTitle">
+      <div class="auth-head">
+        <h1 id="authTitle">登录</h1>
+        <p class="auth-lead">欢迎回来，登录后可以从上次停下的地方继续。</p>
+      </div>
+
+      <form id="loginForm" novalidate>
+        <div class="field">
+          <div class="field__control">
+            <input id="username" name="username" type="text" required autocomplete="username" inputmode="text" placeholder=" " />
+            <label for="username">用户名 <span class="req" aria-hidden="true">*</span></label>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field__control field__control--password">
+            <input id="password" name="password" type="password" required minlength="12" maxlength="128" autocomplete="current-password" placeholder=" " />
+            <label for="password">密码 <span class="req" aria-hidden="true">*</span></label>
+            <button type="button" class="pw-toggle" id="pwToggle" aria-label="显示密码" aria-pressed="false">
+              <svg class="eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 11 7 11 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 1 12s4 7 11 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="row">
+          <a href="#resetDialog" id="forgot" style="margin-left:auto">忘记密码？</a>
+        </div>
+
+        <button type="submit" id="submitBtn">登录</button>
+      </form>
+
+      <p class="foot">还没有账号？请联系管理员开通</p>
+    </section>
+  </main>
+
+  <!-- 粒子球：卡片外的页面级裸元素，直接落在右侧背景上，无任何容器/底色/边框 -->
+  <div class="orb-stage" id="orbStage" tabindex="0" role="img"
+       aria-label="AI 粒子思考球，鼠标悬停或聚焦时粒子会响应">
+    <canvas id="orbCanvas" aria-hidden="true"></canvas>
+  </div>
+  </div>
+
+  <dialog id="resetDialog" aria-labelledby="resetTitle">
+    <h2 id="resetTitle">重置密码</h2>
+    <p>本平台不提供自助重置。请联系管理员为你重置临时密码，首次登录后需立即修改。</p>
+    <div class="field">
+      <label for="resetEmail">你的用户名 <span class="req" aria-hidden="true">*</span></label>
+      <div class="field__control">
+        <input id="resetEmail" type="text" required autocomplete="username" placeholder="请输入用户名" />
+      </div>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="resetCancel">取消</button>
+      <button type="button" class="primary" id="resetSend">我知道了</button>
+    </div>
+  </dialog>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="orb-particles.js"></script>
+  <script src="auth.js"></script>
+  <script>
+    // 放大的粒子球：占满右栏视觉区
+    const particleOrb = window.FireOrb.mount(
+      document.getElementById('orbStage'),
+      document.getElementById('orbCanvas'),
+      { count: 420, radiusRatio: 0.42 }
+    );
+    window.Auth.init({
+      formId: 'loginForm',
+      orb: particleOrb,
+      loginUrl: '/api/auth/login',
+      successText: '登录成功，正在进入智慧消防管理平台'
+    });
+  </script>
+</body>
+</html>

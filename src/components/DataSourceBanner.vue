@@ -20,6 +20,9 @@ import { dataSource } from '../api'
 const store = useFireStore()
 const demoStore = useDemoStore()
 
+// AUTH-8 分工：
+//   · 本组件只负责「远端数据源/状态机异常」告警；
+//   · mock 模式的**常驻**演示标识由 DemoBadge（顶部条 + 右下角角标）承担，避免重复。
 const visible = computed(() => Boolean(store.remoteError || store.dataSourceDegraded || demoStore.error))
 const level = computed(() => 'danger')
 const title = computed(() => {

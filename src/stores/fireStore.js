@@ -2727,6 +2727,11 @@ export const useFireStore = defineStore('fire', () => {
     }
   }
 
+  /**
+   * AUTH-8：demoMode 仅为「演示控制台面板」的显隐开关。
+   * 与用户身份、角色、授权**完全无关**——不得据此判断管理员权限，
+   * 也不得在任何 UI 中把它显示成"管理员"。真实身份见 authStore。
+   */
   function toggleDemoMode() {
     demoMode.value = !demoMode.value
   }
